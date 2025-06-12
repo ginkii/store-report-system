@@ -503,7 +503,7 @@ def find_matching_reports(store_name, reports_data):
     return matching_sheets
 
 def analyze_receivable_data(df):
-    """分析应收未收额数据 - 只查找合计列"""
+    """分析应收未收额数据 - 增强识别逻辑"""
     analysis_results = {}
     
     if len(df.columns) == 0:
@@ -511,57 +511,105 @@ def analyze_receivable_data(df):
     
     first_col = df.columns[0]
     
-    # 定义需要查找的目标指标
-    target_keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收 未收额']
+    # 扩展目标关键词，支持更多格式
+    target_keywords = [
+        '应收-未收额', '应收未收额', '应收-未收', '应收 未收额',
+        '应收未收', '应收-未收金额', '应收未收金额', '未收金额',
+        '应收款', '应收账款', '应收余额'
+    ]
     
-    # 查找合计列
-    total_column = None
+    # 智能查找合计列 - 多种策略
+    total_columns = []
+    
+    # 策略1: 明确包含"合计"等关键词的列
     for col in df.columns[1:]:
         col_str = str(col).lower()
-        if '合计' in col_str or '总计' in col_str or '合并' in col_str:
-            total_column = col
-            break
+        if any(keyword in col_str for keyword in ['合计', '总计', '合并', '汇总', '小计']):
+            total_columns.append(col)
     
-    if total_column is None:
-        # 如果没有明确的合计列，尝试找最后一个数值列
-        for col in reversed(df.columns[1:]):
+    # 策略2: 如果没找到，查找最后几列中的数值列
+    if not total_columns:
+        for col in reversed(df.columns[-5:]):  # 检查最后5列
             try:
-                # 检查是否是数值列
-                df[col].astype(float)
-                total_column = col
-                break
+                # 检查是否包含数值数据
+                non_null_values = df[col].dropna()
+                if len(non_null_values) > 0:
+                    # 尝试转换一些值看是否是数值
+                    test_values = non_null_values.head(10)
+                    numeric_count = 0
+                    for val in test_values:
+                        try:
+                            cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                            if cleaned.replace('.', '').replace('-', '').isdigit():
+                                numeric_count += 1
+                        except:
+                            continue
+                    
+                    # 如果大部分值都是数字，认为是数值列
+                    if numeric_count >= len(test_values) * 0.5:
+                        total_columns.append(col)
             except:
                 continue
     
-    if total_column:
-        # 查找目标指标行
+    # 策略3: 如果还没找到，直接用最后一列
+    if not total_columns and len(df.columns) > 1:
+        total_columns.append(df.columns[-1])
+    
+    # 在每个可能的合计列中查找目标指标
+    for total_column in total_columns:
         for idx, row in df.iterrows():
             row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
             
-            # 检查是否匹配目标指标
+            # 更宽松的匹配策略
             matched = False
+            matched_keyword = ""
+            
+            # 精确匹配
             for keyword in target_keywords:
                 if keyword in row_name:
                     matched = True
+                    matched_keyword = keyword
                     break
+            
+            # 模糊匹配 - 去除空格和特殊字符后匹配
+            if not matched:
+                clean_row_name = row_name.replace(' ', '').replace('-', '').replace('_', '')
+                for keyword in target_keywords:
+                    clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '')
+                    if clean_keyword in clean_row_name:
+                        matched = True
+                        matched_keyword = keyword
+                        break
             
             if matched:
                 try:
                     val = row[total_column]
-                    if pd.notna(val):
-                        # 清理数据
-                        cleaned_val = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
-                        if cleaned_val.replace('.', '').replace('-', '').isdigit() or (cleaned_val.startswith('-') and cleaned_val[1:].replace('.', '').isdigit()):
+                    if pd.notna(val) and str(val).strip() != '' and str(val).lower() != 'none':
+                        # 更强的数据清理
+                        cleaned_val = str(val).replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '').strip()
+                        
+                        # 处理负数格式 (1200) -> -1200
+                        if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
+                            cleaned_val = '-' + cleaned_val[1:-1]
+                        
+                        # 验证是否为数字
+                        try:
                             amount = float(cleaned_val)
                             
-                            analysis_results['应收-未收额'] = {
-                                'amount': amount,
-                                'column_name': str(total_column),
-                                'row_index': idx,
-                                'row_name': row_name,
-                                'is_negative': amount < 0
-                            }
-                            break
+                            # 只有非零值才记录
+                            if amount != 0:
+                                analysis_results['应收-未收额'] = {
+                                    'amount': amount,
+                                    'column_name': str(total_column),
+                                    'row_index': idx,
+                                    'row_name': row_name,
+                                    'is_negative': amount < 0,
+                                    'matched_keyword': matched_keyword
+                                }
+                                # 找到第一个有效值就返回
+                                return analysis_results
+                        except ValueError:
+                            continue
                 except Exception as e:
                     continue
     
@@ -613,8 +661,8 @@ def show_setup_guide():
     """显示Google Sheets设置指南"""
     st.markdown("""
         <div class="setup-guide">
-            <h3>🔧 Google Sheets 设置指南</h3>
-            <p>请按以下步骤配置Google Sheets数据库：</p>
+            <h3>🔧 数据库设置指南</h3>
+            <p>请按以下步骤配置云数据库：</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -690,24 +738,24 @@ def show_setup_guide():
 init_session_state()
 
 # 主标题
-st.markdown('<h1 class="main-header">📊 门店报表查询系统 (Google Sheets版)</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
 # 检查Google Sheets配置
 if not check_google_sheets_setup():
-    st.error("❌ Google Sheets配置不完整")
+    st.error("❌ 云数据库配置不完整")
     show_setup_guide()
     st.stop()
 
 # 初始化Google Sheets客户端
 if not st.session_state.google_sheets_client:
-    with st.spinner("🔗 连接Google Sheets..."):
+    with st.spinner("🔗 连接云数据库..."):
         gc = get_google_sheets_client()
         if gc:
             st.session_state.google_sheets_client = gc
             st.session_state.setup_complete = True
-            st.success("✅ Google Sheets连接成功！")
+            st.success("✅ 云数据库连接成功！")
         else:
-            st.error("❌ Google Sheets连接失败")
+            st.error("❌ 云数据库连接失败")
             st.stop()
 
 # 加载数据
@@ -739,7 +787,7 @@ with st.sidebar:
     
     # 显示连接状态
     if st.session_state.setup_complete:
-        st.success("🔗 Google Sheets 已连接")
+        st.success("🔗 云数据库已连接")
     
     # 用户类型选择
     user_type = st.radio(
@@ -782,7 +830,7 @@ with st.sidebar:
                     
                     # 验证文件格式
                     if len(df.columns) >= 2:
-                        with st.spinner("💾 保存权限数据到Google Sheets..."):
+                        with st.spinner("💾 保存权限数据到云数据库..."):
                             if save_permissions_to_sheets(df, gc):
                                 # 统计信息
                                 total_users = len(df)
@@ -845,8 +893,8 @@ with st.sidebar:
                         
                         progress_bar.empty()
                     
-                    # 保存到Google Sheets
-                    with st.spinner("💾 保存报表数据到Google Sheets..."):
+                    # 保存到云数据库
+                    with st.spinner("💾 保存报表数据到云数据库..."):
                         if save_reports_to_sheets(reports_dict, gc):
                             st.success(f"✅ 报表已上传：{len(reports_dict)} 个门店")
                             st.info("包含的门店：" + ", ".join(list(reports_dict.keys())[:10]) + 
@@ -889,12 +937,12 @@ with st.sidebar:
                     st.rerun()
             
             with col2:
-                if st.button("📊 查看Google表格", use_container_width=True):
+                if st.button("📊 查看数据表格", use_container_width=True):
                     try:
                         spreadsheet = get_or_create_spreadsheet(gc)
                         if spreadsheet:
-                            st.success("📋 Google表格链接：")
-                            st.write(f"🔗 [点击打开Google表格]({spreadsheet.url})")
+                            st.success("📋 云数据表格链接：")
+                            st.write(f"🔗 [点击打开数据表格]({spreadsheet.url})")
                     except:
                         st.error("❌ 无法获取表格链接")
             
@@ -924,8 +972,8 @@ if user_type == "管理员" and st.session_state.is_admin:
     # 管理员界面
     st.markdown("""
         <div class="admin-panel">
-            <h3>👨‍💼 管理员控制面板 (Google Sheets版)</h3>
-            <p>数据将永久保存在Google Sheets中，支持多用户实时访问</p>
+            <h3>👨‍💼 管理员控制面板</h3>
+            <p>数据将永久保存在云端，支持多用户实时访问</p>
         </div>
     """, unsafe_allow_html=True)
     
@@ -1182,12 +1230,14 @@ else:
                             
                             ### 数据定位：
                             - 指标名称：{data['row_name']}
+                            - 匹配关键词：{data.get('matched_keyword', '应收-未收额')}
                             - 所在列：{data['column_name']}
                             - 所在行：第{data['row_index']+2}行
+                            - 原始值：{data['amount']}
                             """)
                     else:
                         st.warning("⚠️ 未找到'应收-未收额'数据")
-                        st.info("请确保报表中包含'应收-未收额'行，且有'合计'列")
+                        st.info("请确保报表中包含应收相关行，系统会自动识别合计列")
                         
                         # 调试信息
                         with st.expander("🔧 查看报表结构"):
@@ -1202,6 +1252,11 @@ else:
                                 first_col_data = df.iloc[:20, 0].dropna()
                                 for idx, item in enumerate(first_col_data):
                                     st.write(f"{idx+1}. {item}")
+                            
+                            st.write("\n**系统支持的关键词：**")
+                            keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收 未收额', '应收未收', '应收-未收金额', '应收未收金额', '未收金额', '应收款', '应收账款', '应收余额']
+                            for kw in keywords:
+                                st.write(f"• {kw}")
                 
                 except Exception as e:
                     st.error(f"❌ 分析数据时出错：{str(e)}")
@@ -1274,7 +1329,7 @@ else:
                     <ul>
                         <li>管理员尚未上传包含该门店的报表文件</li>
                         <li>报表中的Sheet名称与门店名称不匹配</li>
-                        <li>Google Sheets数据同步延迟</li>
+                        <li>云数据库数据同步延迟</li>
                     </ul>
                     <p><strong>解决方案：</strong></p>
                     <ul>
@@ -1289,8 +1344,8 @@ else:
 st.divider()
 st.markdown("""
     <div style="text-align: center; color: #888; font-size: 0.8rem; padding: 1rem;">
-        <p>🏪 门店报表查询系统 v5.0 - Google Sheets版</p>
-        <p>💾 数据永久保存在Google Sheets | 🌐 支持多用户实时访问 | 🔄 自动同步更新</p>
+        <p>🏪 门店报表查询系统 v5.0 - 应收未收额专用版</p>
+        <p>💾 数据永久保存 | 🌐 支持多用户实时访问 | 🔄 自动同步更新</p>
         <p>技术支持：IT部门 | 建议使用Chrome浏览器访问</p>
     </div>
 """, unsafe_allow_html=True)
