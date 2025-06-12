@@ -1,14 +1,15 @@
 import streamlit as st
 import pandas as pd
 import io
-import os
-import pickle
+import json
 import hashlib
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
-from pathlib import Path
 import time
+import base64
+import gspread
+from google.oauth2.service_account import Credentials
 
 # 页面配置
 st.set_page_config(
@@ -20,13 +21,11 @@ st.set_page_config(
 
 # 系统配置
 ADMIN_PASSWORD = "admin123"  # 建议修改为复杂密码
-DATA_DIR = "data"  # 数据存储目录
-PERMISSIONS_FILE = os.path.join(DATA_DIR, "permissions.pkl")
-REPORTS_FILE = os.path.join(DATA_DIR, "reports.pkl")
-SYSTEM_INFO_FILE = os.path.join(DATA_DIR, "system_info.pkl")
 
-# 创建数据目录
-os.makedirs(DATA_DIR, exist_ok=True)
+# Google Sheets配置
+PERMISSIONS_SHEET_NAME = "store_permissions"  # 权限表sheet名称
+REPORTS_SHEET_NAME = "store_reports"          # 报表数据sheet名称
+SYSTEM_INFO_SHEET_NAME = "system_info"       # 系统信息sheet名称
 
 # 自定义CSS样式
 st.markdown("""
@@ -54,13 +53,6 @@ st.markdown("""
         margin: 1rem 0;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
-    .metric-card {
-        background-color: #f8f9fa;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #007bff;
-        margin: 0.5rem 0;
-    }
     .success-message {
         background-color: #d4edda;
         color: #155724;
@@ -83,56 +75,340 @@ st.markdown("""
         border-radius: 8px;
         margin: 1rem 0;
     }
+    .receivable-positive {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 2px solid #ffeaa7;
+        margin: 1rem 0;
+        text-align: center;
+    }
+    .receivable-negative {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 2px solid #c3e6cb;
+        margin: 1rem 0;
+        text-align: center;
+    }
+    .setup-guide {
+        background-color: #e3f2fd;
+        color: #0d47a1;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 2px solid #bbdefb;
+        margin: 1rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# 数据持久化函数
-@st.cache_data
-def load_data_from_file(filepath):
-    """从文件加载数据"""
+# Google Sheets连接管理
+@st.cache_resource
+def get_google_sheets_client():
+    """获取Google Sheets客户端连接"""
     try:
-        if os.path.exists(filepath):
-            with open(filepath, 'rb') as f:
-                return pickle.load(f)
+        # 从Streamlit secrets获取Google服务账号凭据
+        credentials_info = st.secrets["google_sheets"]
+        
+        # 设置权限范围
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
+        # 创建凭据对象
+        credentials = Credentials.from_service_account_info(
+            credentials_info, 
+            scopes=scopes
+        )
+        
+        # 授权并返回客户端
+        return gspread.authorize(credentials)
+    
+    except KeyError:
+        st.error("❌ 未找到Google Sheets配置信息")
+        st.info("请在Streamlit secrets中配置google_sheets信息")
+        return None
     except Exception as e:
-        st.error(f"加载数据失败: {str(e)}")
-    return None
+        st.error(f"❌ Google Sheets连接失败: {str(e)}")
+        return None
 
-def save_data_to_file(data, filepath):
-    """保存数据到文件"""
+def get_or_create_spreadsheet(gc, spreadsheet_name="门店报表系统数据"):
+    """获取或创建Google Spreadsheet"""
     try:
-        with open(filepath, 'wb') as f:
-            pickle.dump(data, f)
+        # 尝试打开现有表格
+        spreadsheet = gc.open(spreadsheet_name)
+        return spreadsheet
+    except gspread.SpreadsheetNotFound:
+        # 如果不存在，创建新表格
+        try:
+            spreadsheet = gc.create(spreadsheet_name)
+            
+            # 与当前用户共享（如果配置了的话）
+            try:
+                if "user_email" in st.secrets.get("google_sheets", {}):
+                    user_email = st.secrets["google_sheets"]["user_email"]
+                    spreadsheet.share(user_email, perm_type='user', role='owner')
+            except:
+                pass
+            
+            return spreadsheet
+        except Exception as e:
+            st.error(f"❌ 创建Google Spreadsheet失败: {str(e)}")
+            return None
+
+def get_or_create_worksheet(spreadsheet, sheet_name):
+    """获取或创建工作表"""
+    try:
+        # 尝试获取现有工作表
+        worksheet = spreadsheet.worksheet(sheet_name)
+        return worksheet
+    except gspread.WorksheetNotFound:
+        # 如果不存在，创建新工作表
+        try:
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
+            return worksheet
+        except Exception as e:
+            st.error(f"❌ 创建工作表 {sheet_name} 失败: {str(e)}")
+            return None
+
+# 权限数据管理
+def save_permissions_to_sheets(df, gc):
+    """保存权限数据到Google Sheets"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        if not spreadsheet:
+            return False
+        
+        worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
+        if not worksheet:
+            return False
+        
+        # 清空现有数据
+        worksheet.clear()
+        
+        # 设置表头
+        headers = ['门店名称', '人员编号', '更新时间']
+        worksheet.append_row(headers)
+        
+        # 添加数据
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for _, row in df.iterrows():
+            data_row = [str(row.iloc[0]), str(row.iloc[1]), current_time]
+            worksheet.append_row(data_row)
+        
+        # 更新系统信息
+        update_system_info(gc, {
+            'permissions_updated': current_time,
+            'total_users': len(df),
+            'total_stores': df.iloc[:, 0].nunique()
+        })
+        
         return True
+    
     except Exception as e:
-        st.error(f"保存数据失败: {str(e)}")
+        st.error(f"❌ 保存权限数据失败: {str(e)}")
         return False
 
-def get_file_hash(file_data):
-    """获取文件的MD5哈希值"""
-    return hashlib.md5(file_data).hexdigest()
+def load_permissions_from_sheets(gc):
+    """从Google Sheets加载权限数据"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        if not spreadsheet:
+            return None
+        
+        try:
+            worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            return None
+        
+        # 获取所有数据
+        data = worksheet.get_all_values()
+        
+        if len(data) <= 1:  # 只有表头或没有数据
+            return None
+        
+        # 创建DataFrame（跳过表头）
+        df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
+        
+        # 只返回门店名称和人员编号列
+        return df[['门店名称', '人员编号']]
+    
+    except Exception as e:
+        st.error(f"❌ 加载权限数据失败: {str(e)}")
+        return None
+
+# 报表数据管理
+def save_reports_to_sheets(reports_dict, gc):
+    """保存报表数据到Google Sheets"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        if not spreadsheet:
+            return False
+        
+        worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME)
+        if not worksheet:
+            return False
+        
+        # 清空现有数据
+        worksheet.clear()
+        
+        # 设置表头
+        headers = ['门店名称', '报表数据JSON', '行数', '列数', '更新时间']
+        worksheet.append_row(headers)
+        
+        # 保存每个门店的报表数据
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        for store_name, df in reports_dict.items():
+            try:
+                # 将DataFrame转换为JSON字符串
+                json_data = df.to_json(orient='records', force_ascii=False)
+                
+                # 由于Google Sheets单元格有字符限制，需要处理大数据
+                # 如果数据太大，可以考虑分片存储
+                if len(json_data) > 50000:  # 50KB限制
+                    # 大数据处理：只保存基本信息和前100行
+                    sample_df = df.head(100)
+                    json_data = sample_df.to_json(orient='records', force_ascii=False)
+                    store_name += " (样本数据)"
+                
+                data_row = [
+                    store_name,
+                    json_data,
+                    len(df),
+                    len(df.columns),
+                    current_time
+                ]
+                
+                worksheet.append_row(data_row)
+                
+            except Exception as e:
+                st.warning(f"⚠️ 保存门店 {store_name} 数据时出错: {str(e)}")
+                continue
+        
+        # 更新系统信息
+        update_system_info(gc, {
+            'reports_updated': current_time,
+            'total_reports': len(reports_dict)
+        })
+        
+        return True
+    
+    except Exception as e:
+        st.error(f"❌ 保存报表数据失败: {str(e)}")
+        return False
+
+def load_reports_from_sheets(gc):
+    """从Google Sheets加载报表数据"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        if not spreadsheet:
+            return {}
+        
+        try:
+            worksheet = spreadsheet.worksheet(REPORTS_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            return {}
+        
+        # 获取所有数据
+        data = worksheet.get_all_values()
+        
+        if len(data) <= 1:  # 只有表头或没有数据
+            return {}
+        
+        reports_dict = {}
+        
+        # 解析数据
+        for row in data[1:]:  # 跳过表头
+            if len(row) >= 2:
+                store_name = row[0]
+                json_data = row[1]
+                
+                try:
+                    # 将JSON字符串转换回DataFrame
+                    df = pd.read_json(json_data, orient='records')
+                    reports_dict[store_name] = df
+                except Exception as e:
+                    st.warning(f"⚠️ 解析门店 {store_name} 数据时出错: {str(e)}")
+                    continue
+        
+        return reports_dict
+    
+    except Exception as e:
+        st.error(f"❌ 加载报表数据失败: {str(e)}")
+        return {}
 
 # 系统信息管理
-def get_system_info():
-    """获取系统信息"""
-    default_info = {
-        'last_update': None,
-        'total_stores': 0,
-        'total_users': 0,
-        'permissions_hash': None,
-        'reports_hash': None
-    }
-    info = load_data_from_file(SYSTEM_INFO_FILE)
-    return info if info else default_info
-
-def update_system_info(**kwargs):
+def update_system_info(gc, info_dict):
     """更新系统信息"""
-    info = get_system_info()
-    info.update(kwargs)
-    info['last_update'] = datetime.now()
-    save_data_to_file(info, SYSTEM_INFO_FILE)
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        if not spreadsheet:
+            return False
+        
+        worksheet = get_or_create_worksheet(spreadsheet, SYSTEM_INFO_SHEET_NAME)
+        if not worksheet:
+            return False
+        
+        # 获取现有数据
+        try:
+            data = worksheet.get_all_values()
+            existing_info = {}
+            if len(data) > 1:
+                for row in data[1:]:
+                    if len(row) >= 2:
+                        existing_info[row[0]] = row[1]
+        except:
+            existing_info = {}
+        
+        # 更新信息
+        existing_info.update(info_dict)
+        existing_info['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 清空并重写
+        worksheet.clear()
+        worksheet.append_row(['键', '值', '更新时间'])
+        
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for key, value in existing_info.items():
+            worksheet.append_row([key, str(value), current_time])
+        
+        return True
+    
+    except Exception as e:
+        st.error(f"❌ 更新系统信息失败: {str(e)}")
+        return False
 
-# 权限验证函数
+def get_system_info(gc):
+    """获取系统信息"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        if not spreadsheet:
+            return {}
+        
+        try:
+            worksheet = spreadsheet.worksheet(SYSTEM_INFO_SHEET_NAME)
+            data = worksheet.get_all_values()
+            
+            if len(data) <= 1:
+                return {}
+            
+            info = {}
+            for row in data[1:]:
+                if len(row) >= 2:
+                    info[row[0]] = row[1]
+            
+            return info
+        except gspread.WorksheetNotFound:
+            return {}
+    
+    except Exception as e:
+        return {}
+
+# 核心业务逻辑函数（与原版本相同）
 def verify_user_permission(store_name, user_id, permissions_data):
     """验证用户权限"""
     if permissions_data is None or len(permissions_data.columns) < 2:
@@ -172,9 +448,8 @@ def find_matching_reports(store_name, reports_data):
     
     return matching_sheets
 
-# 数据分析函数
-def analyze_financial_data(df):
-    """分析财务数据"""
+def analyze_receivable_data(df):
+    """分析应收未收额数据 - 只查找合计列"""
     analysis_results = {}
     
     if len(df.columns) == 0:
@@ -182,57 +457,59 @@ def analyze_financial_data(df):
     
     first_col = df.columns[0]
     
-    # 查找关键财务指标
-    key_indicators = {
-        '营业收入': ['营业收入', '收入', '销售收入'],
-        '毛利润': ['毛利', '毛利润', '毛利-线上'],
-        '净利润': ['净利润', '净利'],
-        '成本': ['成本', '营业成本'],
-        '费用': ['费用', '管理费用', '销售费用'],
-        '应收款': ['应收', '应收款', '应收-未收']
-    }
+    # 定义需要查找的目标指标
+    target_keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收 未收额']
     
-    for indicator, keywords in key_indicators.items():
+    # 查找合计列
+    total_column = None
+    for col in df.columns[1:]:
+        col_str = str(col).lower()
+        if '合计' in col_str or '总计' in col_str or '合并' in col_str:
+            total_column = col
+            break
+    
+    if total_column is None:
+        # 如果没有明确的合计列，尝试找最后一个数值列
+        for col in reversed(df.columns[1:]):
+            try:
+                # 检查是否是数值列
+                df[col].astype(float)
+                total_column = col
+                break
+            except:
+                continue
+    
+    if total_column:
+        # 查找目标指标行
         for idx, row in df.iterrows():
             row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
             
-            for keyword in keywords:
+            # 检查是否匹配目标指标
+            matched = False
+            for keyword in target_keywords:
                 if keyword in row_name:
-                    # 计算该行的数值
-                    total = 0
-                    monthly_data = {}
-                    
-                    for col in df.columns[1:]:
-                        try:
-                            val = row[col]
-                            if pd.notna(val):
-                                # 清理数值
-                                val_str = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
-                                if val_str.replace('.', '').replace('-', '').isdigit():
-                                    num_val = float(val_str)
-                                    
-                                    # 识别月份
-                                    col_str = str(col)
-                                    for month_num in range(1, 13):
-                                        month_pattern = f"{month_num}月"
-                                        if month_pattern in col_str:
-                                            monthly_data[month_pattern] = num_val
-                                            break
-                                    
-                                    if '合计' not in col_str and '总计' not in col_str:
-                                        total += num_val
-                        except:
-                            continue
-                    
-                    if total != 0 or monthly_data:
-                        analysis_results[indicator] = {
-                            'total': total,
-                            'monthly': monthly_data,
-                            'row_index': idx
-                        }
+                    matched = True
                     break
-                if indicator in analysis_results:
-                    break
+            
+            if matched:
+                try:
+                    val = row[total_column]
+                    if pd.notna(val):
+                        # 清理数据
+                        cleaned_val = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                        if cleaned_val.replace('.', '').replace('-', '').isdigit() or (cleaned_val.startswith('-') and cleaned_val[1:].replace('.', '').isdigit()):
+                            amount = float(cleaned_val)
+                            
+                            analysis_results['应收-未收额'] = {
+                                'amount': amount,
+                                'column_name': str(total_column),
+                                'row_index': idx,
+                                'row_name': row_name,
+                                'is_negative': amount < 0
+                            }
+                            break
+                except Exception as e:
+                    continue
     
     return analysis_results
 
@@ -245,57 +522,170 @@ def init_session_state():
         'user_id': "",
         'login_time': None,
         'is_admin': False,
-        'permissions_data': None,
-        'reports_data': {},
-        'system_info': get_system_info(),
-        'data_loaded': False
+        'data_loaded': False,
+        'setup_complete': False,
+        'google_sheets_client': None
     }
     
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-# 加载持久化数据
 def load_persistent_data():
     """加载持久化数据"""
-    if not st.session_state.data_loaded:
-        # 加载权限数据
-        permissions = load_data_from_file(PERMISSIONS_FILE)
-        if permissions is not None:
-            st.session_state.permissions_data = permissions
-        
-        # 加载报表数据
-        reports = load_data_from_file(REPORTS_FILE)
-        if reports is not None:
-            st.session_state.reports_data = reports
-        
-        # 更新系统信息
-        st.session_state.system_info = get_system_info()
+    if not st.session_state.data_loaded and st.session_state.google_sheets_client:
         st.session_state.data_loaded = True
 
+# 检查Google Sheets配置
+def check_google_sheets_setup():
+    """检查Google Sheets配置是否完成"""
+    try:
+        if "google_sheets" not in st.secrets:
+            return False
+        
+        required_fields = ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id"]
+        google_config = st.secrets["google_sheets"]
+        
+        for field in required_fields:
+            if field not in google_config:
+                return False
+        
+        return True
+    except:
+        return False
+
+# 显示设置指南
+def show_setup_guide():
+    """显示Google Sheets设置指南"""
+    st.markdown("""
+        <div class="setup-guide">
+            <h3>🔧 Google Sheets 设置指南</h3>
+            <p>请按以下步骤配置Google Sheets数据库：</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    with st.expander("📋 详细配置步骤", expanded=True):
+        st.markdown("""
+        ### 第一步：创建Google Cloud项目
+        
+        1. 访问 [Google Cloud Console](https://console.cloud.google.com/)
+        2. 创建新项目或选择现有项目
+        3. 启用以下API：
+           - Google Sheets API
+           - Google Drive API
+        
+        ### 第二步：创建服务账号
+        
+        1. 在Google Cloud Console中，前往 "IAM & Admin" > "Service Accounts"
+        2. 点击 "Create Service Account"
+        3. 输入服务账号名称，如 "streamlit-sheets-access"
+        4. 点击 "Create and Continue"
+        5. 跳过权限设置，点击 "Done"
+        
+        ### 第三步：生成密钥
+        
+        1. 点击刚创建的服务账号
+        2. 切换到 "Keys" 标签页
+        3. 点击 "Add Key" > "Create new key"
+        4. 选择 "JSON" 格式
+        5. 下载JSON密钥文件
+        
+        ### 第四步：配置Streamlit Secrets
+        
+        在Streamlit应用的 `.streamlit/secrets.toml` 文件中添加：
+        
+        ```toml
+        [google_sheets]
+        type = "service_account"
+        project_id = "your-project-id"
+        private_key_id = "your-private-key-id"
+        private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+        client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+        client_id = "your-client-id"
+        auth_uri = "https://accounts.google.com/o/oauth2/auth"
+        token_uri = "https://oauth2.googleapis.com/token"
+        auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+        client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-project.iam.gserviceaccount.com"
+        
+        # 可选：管理员邮箱（用于共享表格）
+        user_email = "your-admin-email@gmail.com"
+        ```
+        
+        ### 第五步：安装依赖
+        
+        在 `requirements.txt` 中添加：
+        ```
+        gspread
+        google-auth
+        google-auth-oauthlib
+        google-auth-httplib2
+        ```
+        
+        ### 第六步：重新部署应用
+        
+        配置完成后，重新部署Streamlit应用即可开始使用。
+        
+        ### 🔒 安全提示
+        
+        - 服务账号密钥包含敏感信息，请妥善保管
+        - 建议定期轮换密钥
+        - 不要将密钥文件提交到代码仓库
+        """)
+
+# 初始化
 init_session_state()
-load_persistent_data()
 
 # 主标题
-st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">📊 门店报表查询系统 (Google Sheets版)</h1>', unsafe_allow_html=True)
+
+# 检查Google Sheets配置
+if not check_google_sheets_setup():
+    st.error("❌ Google Sheets配置不完整")
+    show_setup_guide()
+    st.stop()
+
+# 初始化Google Sheets客户端
+if not st.session_state.google_sheets_client:
+    with st.spinner("🔗 连接Google Sheets..."):
+        gc = get_google_sheets_client()
+        if gc:
+            st.session_state.google_sheets_client = gc
+            st.session_state.setup_complete = True
+            st.success("✅ Google Sheets连接成功！")
+        else:
+            st.error("❌ Google Sheets连接失败")
+            st.stop()
+
+# 加载数据
+load_persistent_data()
+
+# 获取系统信息
+gc = st.session_state.google_sheets_client
+system_info = get_system_info(gc)
 
 # 显示系统状态
-if st.session_state.system_info['last_update']:
-    last_update = st.session_state.system_info['last_update']
-    if isinstance(last_update, str):
-        last_update = datetime.fromisoformat(last_update)
-    
+if system_info.get('last_update'):
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("总门店数", st.session_state.system_info['total_stores'])
+        st.metric("总门店数", system_info.get('total_stores', 0))
     with col2:
-        st.metric("授权用户数", st.session_state.system_info['total_users'])
+        st.metric("授权用户数", system_info.get('total_users', 0))
     with col3:
-        st.metric("最后更新", last_update.strftime("%m-%d %H:%M"))
+        last_update = system_info.get('last_update', '')
+        if last_update:
+            try:
+                dt = datetime.fromisoformat(last_update)
+                st.metric("最后更新", dt.strftime("%m-%d %H:%M"))
+            except:
+                st.metric("最后更新", last_update[:16])
 
 # 侧边栏
 with st.sidebar:
     st.title("⚙️ 系统功能")
+    
+    # 显示连接状态
+    if st.session_state.setup_complete:
+        st.success("🔗 Google Sheets 已连接")
     
     # 用户类型选择
     user_type = st.radio(
@@ -334,42 +724,32 @@ with st.sidebar:
             
             if permissions_file:
                 try:
-                    # 检查文件是否有变化
-                    file_data = permissions_file.getvalue()
-                    current_hash = get_file_hash(file_data)
+                    df = pd.read_excel(permissions_file)
                     
-                    if current_hash != st.session_state.system_info.get('permissions_hash'):
-                        df = pd.read_excel(permissions_file)
-                        
-                        # 验证文件格式
-                        if len(df.columns) >= 2:
-                            st.session_state.permissions_data = df
-                            
-                            # 保存到文件
-                            if save_data_to_file(df, PERMISSIONS_FILE):
+                    # 验证文件格式
+                    if len(df.columns) >= 2:
+                        with st.spinner("💾 保存权限数据到Google Sheets..."):
+                            if save_permissions_to_sheets(df, gc):
                                 # 统计信息
                                 total_users = len(df)
                                 unique_stores = df.iloc[:, 0].nunique()
                                 
-                                update_system_info(
-                                    total_users=total_users,
-                                    permissions_hash=current_hash
-                                )
-                                
                                 st.success(f"✅ 权限表已上传：{total_users} 个用户，{unique_stores} 个门店")
+                                st.balloons()
                             else:
-                                st.error("保存权限表失败")
-                        else:
-                            st.error("权限表格式错误：至少需要两列（门店名称、人员编号）")
+                                st.error("❌ 保存权限表失败")
                     else:
-                        st.info("文件未发生变化")
+                        st.error("❌ 权限表格式错误：至少需要两列（门店名称、人员编号）")
                         
                 except Exception as e:
-                    st.error(f"读取权限表失败：{str(e)}")
+                    st.error(f"❌ 读取权限表失败：{str(e)}")
             
             # 显示当前权限表状态
-            if st.session_state.permissions_data is not None:
-                df = st.session_state.permissions_data
+            with st.spinner("📋 加载权限表..."):
+                permissions_data = load_permissions_from_sheets(gc)
+            
+            if permissions_data is not None:
+                df = permissions_data
                 st.info(f"📋 当前权限表：{len(df)} 个用户，{df.iloc[:, 0].nunique()} 个门店")
                 
                 if st.checkbox("查看权限表预览"):
@@ -391,61 +771,54 @@ with st.sidebar:
             
             if reports_file:
                 try:
-                    # 检查文件是否有变化
-                    file_data = reports_file.getvalue()
-                    current_hash = get_file_hash(file_data)
+                    with st.spinner("📊 处理报表文件..."):
+                        excel_file = pd.ExcelFile(reports_file)
+                        sheets = excel_file.sheet_names
+                        
+                        # 批量处理sheet
+                        reports_dict = {}
+                        progress_bar = st.progress(0)
+                        
+                        for i, sheet in enumerate(sheets):
+                            try:
+                                df = pd.read_excel(reports_file, sheet_name=sheet)
+                                if not df.empty:
+                                    reports_dict[sheet] = df
+                                progress_bar.progress((i + 1) / len(sheets))
+                            except Exception as e:
+                                st.warning(f"⚠️ 跳过Sheet '{sheet}'：{str(e)}")
+                                continue
+                        
+                        progress_bar.empty()
                     
-                    if current_hash != st.session_state.system_info.get('reports_hash'):
-                        with st.spinner("正在处理报表文件..."):
-                            excel_file = pd.ExcelFile(reports_file)
-                            sheets = excel_file.sheet_names
-                            
-                            # 清空之前的数据
-                            st.session_state.reports_data = {}
-                            
-                            # 批量处理sheet
-                            progress_bar = st.progress(0)
-                            for i, sheet in enumerate(sheets):
-                                try:
-                                    df = pd.read_excel(reports_file, sheet_name=sheet)
-                                    if not df.empty:
-                                        st.session_state.reports_data[sheet] = df
-                                    progress_bar.progress((i + 1) / len(sheets))
-                                except Exception as e:
-                                    st.warning(f"跳过Sheet '{sheet}'：{str(e)}")
-                                    continue
-                            
-                            progress_bar.empty()
-                            
-                            # 保存到文件
-                            if save_data_to_file(st.session_state.reports_data, REPORTS_FILE):
-                                update_system_info(
-                                    total_stores=len(st.session_state.reports_data),
-                                    reports_hash=current_hash
-                                )
-                                
-                                st.success(f"✅ 报表已上传：{len(st.session_state.reports_data)} 个门店")
-                                st.info("包含的门店：" + ", ".join(list(st.session_state.reports_data.keys())[:10]) + 
-                                       ("..." if len(st.session_state.reports_data) > 10 else ""))
-                            else:
-                                st.error("保存报表失败")
-                    else:
-                        st.info("报表文件未发生变化")
+                    # 保存到Google Sheets
+                    with st.spinner("💾 保存报表数据到Google Sheets..."):
+                        if save_reports_to_sheets(reports_dict, gc):
+                            st.success(f"✅ 报表已上传：{len(reports_dict)} 个门店")
+                            st.info("包含的门店：" + ", ".join(list(reports_dict.keys())[:10]) + 
+                                   ("..." if len(reports_dict) > 10 else ""))
+                            st.balloons()
+                        else:
+                            st.error("❌ 保存报表失败")
                         
                 except Exception as e:
-                    st.error(f"读取报表失败：{str(e)}")
+                    st.error(f"❌ 读取报表失败：{str(e)}")
             
             # 显示当前报表状态
-            if st.session_state.reports_data:
-                st.info(f"📊 当前报表：{len(st.session_state.reports_data)} 个门店")
+            with st.spinner("📊 加载报表信息..."):
+                reports_data = load_reports_from_sheets(gc)
+            
+            if reports_data:
+                st.info(f"📊 当前报表：{len(reports_data)} 个门店")
                 
                 if st.checkbox("查看已上传的门店列表"):
-                    stores = list(st.session_state.reports_data.keys())
+                    stores = list(reports_data.keys())
                     for i in range(0, len(stores), 3):
                         cols = st.columns(3)
                         for j, store in enumerate(stores[i:i+3]):
-                            with cols[j]:
-                                st.write(f"• {store}")
+                            if j < len(cols):
+                                with cols[j]:
+                                    st.write(f"• {store}")
             
             st.divider()
             
@@ -457,24 +830,19 @@ with st.sidebar:
             with col1:
                 if st.button("🔄 重新加载数据", use_container_width=True):
                     st.session_state.data_loaded = False
-                    load_persistent_data()
-                    st.success("数据已重新加载")
+                    st.cache_resource.clear()
+                    st.success("✅ 数据已重新加载")
                     st.rerun()
             
             with col2:
-                if st.button("🗑️ 清空所有数据", type="secondary", use_container_width=True):
-                    # 删除文件
-                    for filepath in [PERMISSIONS_FILE, REPORTS_FILE, SYSTEM_INFO_FILE]:
-                        if os.path.exists(filepath):
-                            os.remove(filepath)
-                    
-                    # 重置状态
-                    st.session_state.permissions_data = None
-                    st.session_state.reports_data = {}
-                    st.session_state.system_info = get_system_info()
-                    
-                    st.success("所有数据已清空")
-                    st.rerun()
+                if st.button("📊 查看Google表格", use_container_width=True):
+                    try:
+                        spreadsheet = get_or_create_spreadsheet(gc)
+                        if spreadsheet:
+                            st.success("📋 Google表格链接：")
+                            st.write(f"🔗 [点击打开Google表格]({spreadsheet.url})")
+                    except:
+                        st.error("❌ 无法获取表格链接")
             
             if st.button("🚪 退出管理员", use_container_width=True):
                 st.session_state.is_admin = False
@@ -502,122 +870,48 @@ if user_type == "管理员" and st.session_state.is_admin:
     # 管理员界面
     st.markdown("""
         <div class="admin-panel">
-            <h3>👨‍💼 管理员控制面板</h3>
-            <p>您可以在左侧边栏上传和管理权限表和财务报表文件</p>
+            <h3>👨‍💼 管理员控制面板 (Google Sheets版)</h3>
+            <p>数据将永久保存在Google Sheets中，支持多用户实时访问</p>
         </div>
     """, unsafe_allow_html=True)
     
     # 系统概览
+    permissions_data = load_permissions_from_sheets(gc)
+    reports_data = load_reports_from_sheets(gc)
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        permissions_status = "已上传" if st.session_state.permissions_data is not None else "未上传"
-        permissions_count = len(st.session_state.permissions_data) if st.session_state.permissions_data is not None else 0
+        permissions_status = "已上传" if permissions_data is not None else "未上传"
+        permissions_count = len(permissions_data) if permissions_data is not None else 0
         st.metric("权限表状态", permissions_status, f"{permissions_count} 用户")
     
     with col2:
-        reports_count = len(st.session_state.reports_data)
+        reports_count = len(reports_data)
         st.metric("报表门店数", f"{reports_count} 个", "已就绪" if reports_count > 0 else "未上传")
     
     with col3:
-        if st.session_state.permissions_data is not None:
-            unique_stores = st.session_state.permissions_data.iloc[:, 0].nunique()
+        if permissions_data is not None:
+            unique_stores = permissions_data.iloc[:, 0].nunique()
             st.metric("授权门店数", f"{unique_stores} 个")
         else:
             st.metric("授权门店数", "0 个")
     
     with col4:
-        last_update = st.session_state.system_info.get('last_update')
+        last_update = system_info.get('last_update')
         if last_update:
-            if isinstance(last_update, str):
-                last_update = datetime.fromisoformat(last_update)
-            update_time = last_update.strftime("%H:%M")
-            st.metric("最后更新", update_time)
+            try:
+                dt = datetime.fromisoformat(last_update)
+                update_time = dt.strftime("%H:%M")
+                st.metric("最后更新", update_time)
+            except:
+                st.metric("最后更新", last_update[:16])
         else:
             st.metric("最后更新", "无")
-    
-    # 数据一致性检查
-    if st.session_state.permissions_data is not None and st.session_state.reports_data:
-        st.subheader("📋 数据一致性检查")
-        
-        # 获取权限表中的门店
-        permission_stores = set(st.session_state.permissions_data.iloc[:, 0].unique())
-        # 获取报表中的门店
-        report_stores = set(st.session_state.reports_data.keys())
-        
-        # 找出差异
-        missing_reports = permission_stores - report_stores
-        extra_reports = report_stores - permission_stores
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if missing_reports:
-                st.warning(f"⚠️ 有权限但缺少报表的门店 ({len(missing_reports)}个):")
-                for store in list(missing_reports)[:5]:
-                    st.write(f"• {store}")
-                if len(missing_reports) > 5:
-                    st.write(f"... 还有 {len(missing_reports) - 5} 个")
-            else:
-                st.success("✅ 所有授权门店都有对应报表")
-        
-        with col2:
-            if extra_reports:
-                st.info(f"ℹ️ 有报表但无权限的门店 ({len(extra_reports)}个):")
-                for store in list(extra_reports)[:5]:
-                    st.write(f"• {store}")
-                if len(extra_reports) > 5:
-                    st.write(f"... 还有 {len(extra_reports) - 5} 个")
-            else:
-                st.success("✅ 所有报表门店都有对应权限")
-    
-    # 使用说明
-    with st.expander("📖 管理员操作指南"):
-        st.markdown("""
-        ### 🚀 快速开始：
-        
-        **第一步：上传权限表**
-        - Excel文件，包含两列：门店名称、人员编号
-        - 支持一个门店多个用户
-        - 建议使用标准化的门店名称
-        
-        **第二步：上传财务报表**
-        - Excel文件，每个Sheet代表一个门店
-        - Sheet名称应与权限表中的门店名称对应（支持模糊匹配）
-        - 系统会自动处理70+门店的大型文件
-        
-        **第三步：数据验证**
-        - 查看数据一致性检查结果
-        - 确认门店数量和用户数量
-        - 测试用户登录功能
-        
-        ### 💡 最佳实践：
-        
-        - **门店命名规范**：保持权限表和报表中门店名称的一致性
-        - **定期更新**：建议每月更新一次报表数据
-        - **备份数据**：重要数据请做好本地备份
-        - **性能优化**：单个报表文件建议不超过50MB
-        
-        ### 🔧 故障排除：
-        
-        - **文件上传失败**：检查文件格式和大小
-        - **门店匹配失败**：检查门店名称是否一致
-        - **用户登录失败**：确认权限表中有对应记录
-        - **数据丢失**：重新上传文件即可恢复
-        """)
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     # 提示输入管理员密码
     st.info("👈 请在左侧边栏输入管理员密码以访问管理功能")
-    
-    # 显示系统状态（非敏感信息）
-    if st.session_state.system_info['last_update']:
-        st.markdown("""
-            <div class="warning-message">
-                <h4>🏪 系统状态</h4>
-                <p>系统已配置并正在运行，用户可以正常查询报表</p>
-            </div>
-        """, unsafe_allow_html=True)
 
 else:
     # 普通用户界面
@@ -625,8 +919,11 @@ else:
         # 登录界面
         st.subheader("🔐 用户登录")
         
-        # 检查是否有权限数据
-        if st.session_state.permissions_data is None:
+        # 加载权限数据
+        with st.spinner("🔍 加载用户权限..."):
+            permissions_data = load_permissions_from_sheets(gc)
+        
+        if permissions_data is None:
             st.markdown("""
                 <div class="warning-message">
                     <h4>⚠️ 系统维护中</h4>
@@ -634,18 +931,16 @@ else:
                 </div>
             """, unsafe_allow_html=True)
         else:
-            permissions_df = st.session_state.permissions_data
-            
-            if len(permissions_df.columns) >= 2:
-                store_column = permissions_df.columns[0]
-                id_column = permissions_df.columns[1]
+            if len(permissions_data.columns) >= 2:
+                store_column = permissions_data.columns[0]
+                id_column = permissions_data.columns[1]
                 
                 # 数据清理和转换
-                permissions_df[store_column] = permissions_df[store_column].astype(str).str.strip()
-                permissions_df[id_column] = permissions_df[id_column].astype(str).str.strip()
+                permissions_data[store_column] = permissions_data[store_column].astype(str).str.strip()
+                permissions_data[id_column] = permissions_data[id_column].astype(str).str.strip()
                 
                 # 获取门店列表
-                stores = sorted(permissions_df[store_column].unique().tolist())
+                stores = sorted(permissions_data[store_column].unique().tolist())
                 
                 # 登录表单
                 col1, col2, col3 = st.columns([1, 2, 1])
@@ -678,7 +973,7 @@ else:
                         if submit:
                             if selected_store and user_id.strip():
                                 # 验证权限
-                                if verify_user_permission(selected_store, user_id.strip(), permissions_df):
+                                if verify_user_permission(selected_store, user_id.strip(), permissions_data):
                                     st.session_state.logged_in = True
                                     st.session_state.store_name = selected_store
                                     st.session_state.user_id = user_id.strip()
@@ -693,17 +988,6 @@ else:
                                 st.warning("⚠️ 请填写完整的登录信息")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
-                
-                # 登录提示
-                st.markdown("""
-                    <div style="text-align: center; margin-top: 2rem; color: #666;">
-                        <p>💡 <strong>登录提示：</strong></p>
-                        <p>请选择您的门店并输入管理员分配给您的人员编号</p>
-                        <p>如遇问题，请联系系统管理员</p>
-                    </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.error("权限表格式错误，请联系管理员重新上传")
     
     else:
         # 已登录 - 显示报表
@@ -714,8 +998,12 @@ else:
             </div>
         """, unsafe_allow_html=True)
         
+        # 加载报表数据
+        with st.spinner("📊 加载报表数据..."):
+            reports_data = load_reports_from_sheets(gc)
+        
         # 查找对应的报表
-        matching_sheets = find_matching_reports(st.session_state.store_name, st.session_state.reports_data)
+        matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
         
         if matching_sheets:
             # 如果有多个匹配的sheet，让用户选择
@@ -730,7 +1018,7 @@ else:
                 st.info(f"📊 已找到报表：{selected_sheet}")
             
             # 获取报表数据
-            df = st.session_state.reports_data[selected_sheet]
+            df = reports_data[selected_sheet]
             
             # 报表操作界面
             st.subheader(f"📈 财务报表 - {st.session_state.store_name}")
@@ -751,7 +1039,7 @@ else:
                 n_rows = st.selectbox("显示行数", [10, 25, 50, 100, "全部"])
             
             with col3:
-                show_analysis = st.checkbox("📊 显示数据分析", value=False)
+                show_analysis = st.checkbox("💰 显示应收未收额", value=True)
             
             st.markdown('</div>', unsafe_allow_html=True)
             
@@ -768,11 +1056,105 @@ else:
             # 显示数据统计
             total_rows = len(filtered_df)
             st.markdown(f"""
-                <div class="metric-card">
+                <div style="background-color: #f8f9fa; padding: 1rem; border-radius: 8px; border-left: 4px solid #007bff; margin: 0.5rem 0;">
                     📊 <strong>数据统计：</strong>共 {total_rows} 条记录 | 
                     📅 <strong>报表列数：</strong>{len(df.columns)} 列
                 </div>
             """, unsafe_allow_html=True)
+            
+            # 显示应收未收额分析（放在数据表格前面）
+            if show_analysis:
+                st.divider()
+                st.subheader("💰 应收未收额分析")
+                
+                try:
+                    analysis_results = analyze_receivable_data(df)
+                    
+                    if '应收-未收额' in analysis_results:
+                        data = analysis_results['应收-未收额']
+                        amount = data['amount']
+                        
+                        # 根据金额正负显示不同样式
+                        if amount < 0:
+                            # 负数 - 门店会收到退款（标绿）
+                            st.markdown(f"""
+                                <div class="receivable-negative">
+                                    <h2 style="margin: 0; font-size: 2.5rem;">💚 ¥{abs(amount):,.2f}</h2>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店将收到退款</p>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（金额为负，系统将退款给门店）</p>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # 显示成功状态的指标卡
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("状态", "退款", "门店将收到退款", delta_color="normal")
+                            with col2:
+                                st.metric("退款金额", f"¥{abs(amount):,.2f}", "系统处理中")
+                            with col3:
+                                st.metric("数据来源", data['column_name'], f"第{data['row_index']+2}行")
+                        else:
+                            # 正数 - 门店需要付款
+                            st.markdown(f"""
+                                <div class="receivable-positive">
+                                    <h2 style="margin: 0; font-size: 2.5rem;">💛 ¥{amount:,.2f}</h2>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店需要付款</p>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（金额为正，请及时缴纳）</p>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # 显示警告状态的指标卡
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("状态", "待付款", "门店需要付款", delta_color="off")
+                            with col2:
+                                st.metric("应付金额", f"¥{amount:,.2f}", "请及时处理")
+                            with col3:
+                                st.metric("数据来源", data['column_name'], f"第{data['row_index']+2}行")
+                        
+                        # 显示说明
+                        with st.expander("💡 查看详细说明"):
+                            st.markdown(f"""
+                            ### 应收未收额说明：
+                            
+                            - **金额为正数**：表示门店欠款，需要向系统付款
+                            - **金额为负数**：表示系统欠门店款项，门店将收到退款
+                            
+                            ### 处理建议：
+                            
+                            1. **如需付款**：请联系财务部门确认付款方式和时间
+                            2. **如有退款**：退款将在月底统一处理，请注意查收
+                            3. **如有疑问**：请截图保存并联系财务部门核实
+                            
+                            ### 数据定位：
+                            - 指标名称：{data['row_name']}
+                            - 所在列：{data['column_name']}
+                            - 所在行：第{data['row_index']+2}行
+                            """)
+                    else:
+                        st.warning("⚠️ 未找到'应收-未收额'数据")
+                        st.info("请确保报表中包含'应收-未收额'行，且有'合计'列")
+                        
+                        # 调试信息
+                        with st.expander("🔧 查看报表结构"):
+                            st.write("**报表列名：**")
+                            cols = st.columns(3)
+                            for i, col in enumerate(df.columns):
+                                with cols[i % 3]:
+                                    st.write(f"{i+1}. {col}")
+                            
+                            st.write("\n**第一列内容（前20行）：**")
+                            if len(df.columns) > 0:
+                                first_col_data = df.iloc[:20, 0].dropna()
+                                for idx, item in enumerate(first_col_data):
+                                    st.write(f"{idx+1}. {item}")
+                
+                except Exception as e:
+                    st.error(f"❌ 分析数据时出错：{str(e)}")
+                    with st.expander("🔧 错误详情"):
+                        st.code(str(e))
+                
+                st.divider()
             
             # 显示数据表
             if total_rows > 0:
@@ -828,108 +1210,6 @@ else:
                     mime="text/csv",
                     use_container_width=True
                 )
-            
-            # 数据分析模块
-            if show_analysis:
-                st.subheader("📊 财务数据分析")
-                
-                try:
-                    analysis_results = analyze_financial_data(df)
-                    
-                    if analysis_results:
-                        # 关键指标展示
-                        st.markdown("#### 🎯 关键财务指标")
-                        
-                        # 创建指标卡片
-                        metric_cols = st.columns(min(len(analysis_results), 4))
-                        
-                        for i, (indicator, data) in enumerate(analysis_results.items()):
-                            with metric_cols[i % 4]:
-                                total_value = data['total']
-                                if total_value != 0:
-                                    formatted_value = f"¥{total_value:,.0f}"
-                                    if '应收' in indicator or '成本' in indicator or '费用' in indicator:
-                                        st.metric(indicator, formatted_value, delta="需关注", delta_color="inverse")
-                                    else:
-                                        st.metric(indicator, formatted_value)
-                        
-                        # 月度趋势分析
-                        st.markdown("#### 📈 月度趋势")
-                        
-                        # 选择要分析的指标
-                        indicators_with_monthly = [k for k, v in analysis_results.items() if v['monthly']]
-                        
-                        if indicators_with_monthly:
-                            selected_indicator = st.selectbox(
-                                "选择指标进行月度分析", 
-                                indicators_with_monthly
-                            )
-                            
-                            monthly_data = analysis_results[selected_indicator]['monthly']
-                            
-                            if monthly_data:
-                                # 创建月度趋势图
-                                months = list(monthly_data.keys())
-                                values = list(monthly_data.values())
-                                
-                                fig = px.line(
-                                    x=months, 
-                                    y=values,
-                                    title=f"{selected_indicator} - 月度趋势",
-                                    labels={'x': '月份', 'y': '金额'},
-                                    markers=True
-                                )
-                                fig.update_layout(height=400)
-                                st.plotly_chart(fig, use_container_width=True)
-                                
-                                # 月度数据表
-                                monthly_df = pd.DataFrame({
-                                    '月份': months,
-                                    '金额': [f"¥{v:,.0f}" for v in values]
-                                })
-                                st.dataframe(monthly_df, use_container_width=True)
-                        
-                        # 财务比率分析
-                        if '营业收入' in analysis_results and '净利润' in analysis_results:
-                            revenue = analysis_results['营业收入']['total']
-                            profit = analysis_results['净利润']['total']
-                            
-                            if revenue > 0:
-                                profit_margin = (profit / revenue) * 100
-                                st.markdown("#### 💹 财务比率")
-                                
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("净利率", f"{profit_margin:.1f}%")
-                                
-                                if '毛利润' in analysis_results:
-                                    gross_profit = analysis_results['毛利润']['total']
-                                    gross_margin = (gross_profit / revenue) * 100
-                                    with col2:
-                                        st.metric("毛利率", f"{gross_margin:.1f}%")
-                                
-                                if '成本' in analysis_results:
-                                    cost = analysis_results['成本']['total']
-                                    cost_ratio = (cost / revenue) * 100
-                                    with col3:
-                                        st.metric("成本率", f"{cost_ratio:.1f}%")
-                    
-                    else:
-                        st.info("🔍 无法识别标准财务指标，显示通用数据统计")
-                        
-                        # 通用统计分析
-                        numeric_cols = df.select_dtypes(include=['number']).columns
-                        
-                        if len(numeric_cols) > 0:
-                            st.markdown("#### 📊 数值列统计")
-                            stats_df = df[numeric_cols].describe().round(2)
-                            st.dataframe(stats_df, use_container_width=True)
-                        else:
-                            st.info("报表中没有可分析的数值数据")
-                
-                except Exception as e:
-                    st.error(f"数据分析时出错：{str(e)}")
-                    st.info("💡 建议：确保报表格式符合标准财务报表格式")
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
@@ -940,7 +1220,7 @@ else:
                     <ul>
                         <li>管理员尚未上传包含该门店的报表文件</li>
                         <li>报表中的Sheet名称与门店名称不匹配</li>
-                        <li>报表文件正在更新中</li>
+                        <li>Google Sheets数据同步延迟</li>
                     </ul>
                     <p><strong>解决方案：</strong></p>
                     <ul>
@@ -955,8 +1235,8 @@ else:
 st.divider()
 st.markdown("""
     <div style="text-align: center; color: #888; font-size: 0.8rem; padding: 1rem;">
-        <p>🏪 门店报表查询系统 v4.0 - 企业级版本</p>
-        <p>💡 支持70+门店 | 🔒 权限分离 | 💾 数据持久化 | 📊 智能分析</p>
+        <p>🏪 门店报表查询系统 v5.0 - Google Sheets版</p>
+        <p>💾 数据永久保存在Google Sheets | 🌐 支持多用户实时访问 | 🔄 自动同步更新</p>
         <p>技术支持：IT部门 | 建议使用Chrome浏览器访问</p>
     </div>
 """, unsafe_allow_html=True)
