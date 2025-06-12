@@ -262,23 +262,20 @@ def save_reports_to_sheets(reports_dict, gc):
         
         # 清空现有数据
         worksheet.clear()
+        time.sleep(1)  # 避免API频率限制
         
-        # 设置表头
-        headers = ['门店名称', '报表数据JSON', '行数', '列数', '更新时间']
-        worksheet.append_row(headers)
+        # 准备所有数据（一次性写入）
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        all_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间']]  # 表头
         
         # 保存每个门店的报表数据
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         for store_name, df in reports_dict.items():
             try:
                 # 将DataFrame转换为JSON字符串
                 json_data = df.to_json(orient='records', force_ascii=False)
                 
-                # 由于Google Sheets单元格有字符限制，需要处理大数据
-                # 如果数据太大，可以考虑分片存储
+                # 处理大数据限制
                 if len(json_data) > 50000:  # 50KB限制
-                    # 大数据处理：只保存基本信息和前100行
                     sample_df = df.head(100)
                     json_data = sample_df.to_json(orient='records', force_ascii=False)
                     store_name += " (样本数据)"
@@ -291,22 +288,31 @@ def save_reports_to_sheets(reports_dict, gc):
                     current_time
                 ]
                 
-                worksheet.append_row(data_row)
+                all_data.append(data_row)
                 
             except Exception as e:
-                st.warning(f"⚠️ 保存门店 {store_name} 数据时出错: {str(e)}")
+                st.warning(f"⚠️ 处理门店 {store_name} 数据时出错: {str(e)}")
                 continue
         
-        # 更新系统信息
-        update_system_info(gc, {
-            'reports_updated': current_time,
-            'total_reports': len(reports_dict)
-        })
+        # 一次性写入所有数据
+        if len(all_data) > 1:  # 确保有数据要写入
+            worksheet.update('A1', all_data)
+            
+            # 更新系统信息
+            time.sleep(1)  # 避免频率限制
+            update_system_info(gc, {
+                'reports_updated': current_time,
+                'total_reports': len(reports_dict)
+            })
         
         return True
     
     except Exception as e:
-        st.error(f"❌ 保存报表数据失败: {str(e)}")
+        if "429" in str(e) or "Quota exceeded" in str(e):
+            st.error("⚠️ API请求频率过高，请等待2-3分钟后重试")
+            st.info("💡 建议：先上传较小的报表文件测试，成功后再上传完整文件")
+        else:
+            st.error(f"❌ 保存报表数据失败: {str(e)}")
         return False
 
 def load_reports_from_sheets(gc):
