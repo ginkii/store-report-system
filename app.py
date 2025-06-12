@@ -271,14 +271,41 @@ def save_reports_to_sheets(reports_dict, gc):
         # 保存每个门店的报表数据
         for store_name, df in reports_dict.items():
             try:
-                # 将DataFrame转换为JSON字符串
+                # 检查数据大小并智能压缩
                 json_data = df.to_json(orient='records', force_ascii=False)
+                original_size = len(json_data)
                 
-                # 处理大数据限制
-                if len(json_data) > 50000:  # 50KB限制
-                    sample_df = df.head(100)
-                    json_data = sample_df.to_json(orient='records', force_ascii=False)
-                    store_name += " (样本数据)"
+                # 如果数据太大，采用分级压缩策略
+                if original_size > 45000:  # 留一些余量
+                    # 策略1：减少行数
+                    if len(df) > 500:
+                        sample_df = df.head(500)  # 取前500行
+                        json_data = sample_df.to_json(orient='records', force_ascii=False)
+                        store_name += f" (前500行,共{len(df)}行)"
+                    
+                    # 策略2：如果还是太大，进一步减少
+                    if len(json_data) > 45000 and len(df) > 200:
+                        sample_df = df.head(200)
+                        json_data = sample_df.to_json(orient='records', force_ascii=False)
+                        store_name += f" (前200行,共{len(df)}行)"
+                    
+                    # 策略3：最后保险，只取前100行
+                    if len(json_data) > 45000:
+                        sample_df = df.head(100)
+                        json_data = sample_df.to_json(orient='records', force_ascii=False)
+                        store_name += f" (前100行,共{len(df)}行)"
+                
+                # 最终检查
+                if len(json_data) > 45000:
+                    # 如果还是太大，只保存基本信息
+                    json_data = json.dumps({
+                        "status": "数据过大",
+                        "total_rows": len(df),
+                        "total_columns": len(df.columns),
+                        "columns": list(df.columns)[:10],  # 只保存前10个列名
+                        "sample_data": df.head(5).to_dict('records')  # 只保存前5行作为样本
+                    }, ensure_ascii=False)
+                    store_name += " (仅基本信息)"
                 
                 data_row = [
                     store_name,
@@ -290,8 +317,21 @@ def save_reports_to_sheets(reports_dict, gc):
                 
                 all_data.append(data_row)
                 
+                # 显示处理进度
+                if original_size > 45000:
+                    st.info(f"📊 {store_name}: 原始大小{original_size//1000}KB，压缩后{len(json_data)//1000}KB")
+                
             except Exception as e:
                 st.warning(f"⚠️ 处理门店 {store_name} 数据时出错: {str(e)}")
+                # 添加错误记录
+                error_data = [
+                    f"{store_name} (错误)",
+                    f"处理失败: {str(e)}",
+                    0,
+                    0,
+                    current_time
+                ]
+                all_data.append(error_data)
                 continue
         
         # 一次性写入所有数据
