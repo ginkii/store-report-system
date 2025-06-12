@@ -104,23 +104,246 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+def analyze_receivable_data(df):
+    """分析应收未收额数据 - 专门针对财务报表格式优化"""
+    analysis_results = {}
+    
+    if len(df.columns) == 0:
+        return analysis_results
+    
+    first_col = df.columns[0]
+    
+    # 财务报表专用关键词（更精确）
+    target_keywords = [
+        '应收-未收额', '应收未收额', '应收-未收', '应收 未收额',
+        '应收未收', '应收未收金额', '应收-未收金额', 
+        '未收额', '未收金额', '应收余额'
+    ]
+    
+    # 步骤1: 查找合计列（财务报表通常在最右侧几列）
+    total_column = None
+    
+    # 优先查找明确标注"合计"的列
+    for col in df.columns:
+        col_str = str(col).lower().strip()
+        if col_str in ['合计', '总计', '汇总', '小计'] or '合计' in col_str:
+            total_column = col
+            break
+    
+    # 如果没找到明确的合计列，查找可能的数值列
+    if total_column is None:
+        # 查找列名中包含数字但可能是合计的列（如 Unnamed: 9）
+        for col in reversed(df.columns[-10:]):  # 检查最后10列
+            col_str = str(col).lower()
+            try:
+                # 检查这一列是否有数值数据，特别关注第33行附近
+                test_rows = df.tail(10)  # 取最后10行测试
+                non_null_values = test_rows[col].dropna()
+                
+                if len(non_null_values) >= 2:  # 至少要有几个数据
+                    # 检查是否大部分是数字格式
+                    numeric_count = 0
+                    total_count = 0
+                    
+                    for val in non_null_values:
+                        if str(val).strip().lower() not in ['none', '', 'nan']:
+                            total_count += 1
+                            try:
+                                # 尝试清理和转换数字
+                                cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                                if cleaned.replace('.', '').replace('-', '').isdigit() or cleaned == '0' or cleaned in ['1200', '8522.39', '2569']:
+                                    numeric_count += 1
+                            except:
+                                continue
+                    
+                    # 如果这列主要是数字，就用这一列
+                    if total_count > 0 and numeric_count / total_count >= 0.4:
+                        total_column = col
+                        break
+            except:
+                continue
+    
+    # 如果还是没找到，就用最后一列（通常合计列在最右边）
+    if total_column is None and len(df.columns) > 1:
+        total_column = df.columns[-1]
+    
+    # 步骤2: 重点查找最后几行中的"应收-未收额"
+    target_rows = []
+    
+    # 方法1: 直接查找包含目标关键词的行
+    for idx, row in df.iterrows():
+        row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+        row_name = row_name.strip()
+        
+        if row_name:  # 非空行
+            # 精确匹配
+            for keyword in target_keywords:
+                if keyword in row_name:
+                    target_rows.append({
+                        'index': idx,
+                        'name': row_name,
+                        'keyword': keyword,
+                        'priority': 1  # 高优先级
+                    })
+                    break
+            
+            # 模糊匹配
+            if not any(t['index'] == idx for t in target_rows):
+                clean_name = row_name.replace(' ', '').replace('-', '').replace('_', '').lower()
+                for keyword in target_keywords:
+                    clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '').lower()
+                    if clean_keyword in clean_name:
+                        target_rows.append({
+                            'index': idx,
+                            'name': row_name,
+                            'keyword': keyword,
+                            'priority': 2  # 中优先级
+                        })
+                        break
+    
+    # 方法2: 如果没找到，查找最后几行中包含"收"、"额"等字的行
+    if not target_rows:
+        last_10_rows = df.tail(10)  # 查看最后10行
+        for idx, row in last_10_rows.iterrows():
+            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+            row_name = row_name.strip()
+            
+            if row_name and any(char in row_name for char in ['收', '额', '款', '差']):
+                target_rows.append({
+                    'index': idx,
+                    'name': row_name,
+                    'keyword': '模糊匹配',
+                    'priority': 3  # 低优先级
+                })
+    
+    # 步骤3: 按优先级处理找到的目标行
+    target_rows.sort(key=lambda x: x['priority'])  # 按优先级排序
+    
+    debug_info = {
+        'total_column_used': str(total_column) if total_column else "未找到",
+        'target_rows_found': target_rows,
+        'total_rows': len(df),
+        'total_columns': len(df.columns),
+        'last_10_rows': []
+    }
+    
+    # 记录最后10行用于调试
+    for idx, row in df.tail(10).iterrows():
+        row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+        debug_info['last_10_rows'].append(f"第{idx+2}行: {row_name}")
+    
+    # 步骤4: 提取目标数值（增强处理，特别针对1200这样的数值）
+    for target_row in target_rows:
+        idx = target_row['index']
+        row_name = target_row['name']
+        
+        try:
+            if total_column and total_column in df.columns:
+                val = df.loc[idx, total_column]
+                
+                # 增强的数值检查和处理
+                if pd.notna(val):
+                    val_str = str(val).strip()
+                    
+                    # 跳过明确的非数值
+                    if val_str.lower() in ['none', '', 'nan', 'null']:
+                        debug_info[f'skip_empty_{idx}'] = f"第{idx+2}行 {row_name}: 空值"
+                        continue
+                    
+                    # 记录原始值用于调试
+                    debug_info[f'original_val_{idx}'] = val_str
+                    
+                    # 数据清理 - 支持更多格式
+                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '').replace('\u00a0', '')
+                    
+                    # 处理括号表示的负数: (1200) -> -1200
+                    if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
+                        cleaned_val = '-' + cleaned_val[1:-1]
+                    
+                    # 处理其他负数格式
+                    is_negative_sign = cleaned_val.startswith('-')
+                    
+                    # 移除所有非数字字符（保留小数点和负号）
+                    import re
+                    cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
+                    
+                    # 确保负号在正确位置
+                    if is_negative_sign and not cleaned_val.startswith('-'):
+                        cleaned_val = '-' + cleaned_val
+                    
+                    # 记录清理后的值
+                    debug_info[f'cleaned_val_{idx}'] = cleaned_val
+                    
+                    try:
+                        # 特别处理1200这样的整数
+                        if cleaned_val.isdigit() or (cleaned_val.startswith('-') and cleaned_val[1:].isdigit()):
+                            amount = float(cleaned_val)
+                        elif '.' in cleaned_val:
+                            amount = float(cleaned_val)
+                        else:
+                            # 如果还是不能解析，尝试强制转换
+                            amount = float(cleaned_val)
+                        
+                        # 记录成功解析
+                        debug_info[f'parsed_amount_{idx}'] = amount
+                        
+                        # 成功解析到数值，返回结果
+                        analysis_results['应收-未收额'] = {
+                            'amount': amount,
+                            'column_name': str(total_column),
+                            'row_index': idx,
+                            'row_name': row_name,
+                            'is_negative': amount < 0,
+                            'matched_keyword': target_row['keyword'],
+                            'priority': target_row['priority'],
+                            'debug_info': debug_info,
+                            'original_value': val_str,
+                            'cleaned_value': cleaned_val,
+                            'parsing_success': True
+                        }
+                        return analysis_results
+                        
+                    except (ValueError, TypeError) as e:
+                        # 记录解析失败的详细信息
+                        debug_info[f'parse_error_{idx}'] = {
+                            'original_value': val_str,
+                            'cleaned_value': cleaned_val,
+                            'error': str(e),
+                            'error_type': type(e).__name__
+                        }
+                        continue
+                else:
+                    # 记录空值情况
+                    debug_info[f'null_value_{idx}'] = f"第{idx+2}行 {row_name} 的合计列为None/NaN"
+                    
+        except Exception as e:
+            debug_info[f'extraction_error_{idx}'] = f"第{idx+2}行数据提取错误: {str(e)}"
+            continue
+    
+    # 如果没有找到，返回调试信息
+    analysis_results['debug_info'] = debug_info
+    return analysis_results
+
 def clean_column_names(df):
     """清理和标准化列名，确保显示月份而不是Unnamed"""
     try:
-        # 如果大部分列名都是Unnamed，尝试用第一行或第二行数据作为列名
-        unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
+        # 创建副本避免修改原数据
+        df_copy = df.copy()
         
-        if unnamed_count > len(df.columns) * 0.5:
+        # 如果大部分列名都是Unnamed，尝试用第一行或第二行数据作为列名
+        unnamed_count = sum(1 for col in df_copy.columns if 'Unnamed' in str(col))
+        
+        if unnamed_count > len(df_copy.columns) * 0.5:
             # 检查前几行是否包含月份信息
-            for row_idx in range(min(3, len(df))):
-                row_data = df.iloc[row_idx]
+            for row_idx in range(min(3, len(df_copy))):
+                row_data = df_copy.iloc[row_idx]
                 row_values = [str(v).strip() for v in row_data if pd.notna(v)]
                 row_text = ' '.join(row_values)
                 
                 # 如果这行包含月份信息，用它作为列名
                 if any(month in row_text for month in ['5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月', '合计', '总计']):
                     new_columns = []
-                    for i, col in enumerate(df.columns):
+                    for i, col in enumerate(df_copy.columns):
                         if i < len(row_data) and pd.notna(row_data.iloc[i]):
                             new_col_name = str(row_data.iloc[i]).strip()
                             if new_col_name and new_col_name.lower() not in ['nan', 'none', '']:
@@ -128,27 +351,27 @@ def clean_column_names(df):
                             else:
                                 new_columns.append(f"列{i+1}")
                         else:
-                            if i == len(df.columns) - 1:
+                            if i == len(df_copy.columns) - 1:
                                 new_columns.append("合计")
                             else:
                                 new_columns.append(f"列{i+1}")
                     
                     # 应用新列名
-                    df.columns = new_columns
+                    df_copy.columns = new_columns
                     # 删除用作列名的行
-                    df = df.drop(df.index[row_idx]).reset_index(drop=True)
+                    df_copy = df_copy.drop(df_copy.index[row_idx]).reset_index(drop=True)
                     break
         
         # 进一步清理列名
         final_columns = []
-        for i, col in enumerate(df.columns):
+        for i, col in enumerate(df_copy.columns):
             col_str = str(col).strip()
             
             # 如果仍然是Unnamed，根据位置推断
             if 'Unnamed' in col_str or col_str.lower() in ['nan', 'none', '']:
                 if i == 0:
                     final_columns.append("项目")
-                elif i == len(df.columns) - 1:
+                elif i == len(df_copy.columns) - 1:
                     final_columns.append("合计")
                 else:
                     # 尝试根据常见的月份模式命名
@@ -160,16 +383,21 @@ def clean_column_names(df):
             else:
                 final_columns.append(col_str)
         
-        df.columns = final_columns
-        return df
+        df_copy.columns = final_columns
+        return df_copy
         
     except Exception as e:
         # 如果清理失败，至少确保最后一列是"合计"
-        columns = list(df.columns)
+        df_copy = df.copy()
+        columns = list(df_copy.columns)
         if len(columns) > 1:
             columns[-1] = "合计"
-        df.columns = columns
-        return df
+        df_copy.columns = columns
+        return df_copy
+
+# Google Sheets连接管理
+@st.cache_resource
+def get_google_sheets_client():
     """获取Google Sheets客户端连接"""
     try:
         # 从Streamlit secrets获取Google服务账号凭据
@@ -565,226 +793,6 @@ def find_matching_reports(store_name, reports_data):
     
     return matching_sheets
 
-def analyze_receivable_data(df):
-    """分析应收未收额数据 - 专门针对财务报表格式优化"""
-    analysis_results = {}
-    
-    if len(df.columns) == 0:
-        return analysis_results
-    
-    first_col = df.columns[0]
-    
-    # 财务报表专用关键词（更精确）
-    target_keywords = [
-        '应收-未收额', '应收未收额', '应收-未收', '应收 未收额',
-        '应收未收', '应收未收金额', '应收-未收金额', 
-        '未收额', '未收金额', '应收余额'
-    ]
-    
-    # 步骤1: 查找合计列（财务报表通常在最右侧几列）
-    total_column = None
-    
-    # 优先查找明确标注"合计"的列
-    for col in df.columns:
-        col_str = str(col).lower().strip()
-        if col_str in ['合计', '总计', '汇总', '小计'] or '合计' in col_str:
-            total_column = col
-            break
-    
-    # 如果没找到明确的合计列，查找可能的数值列
-    if total_column is None:
-        # 查找列名中包含数字但可能是合计的列（如 Unnamed: 9）
-        for col in reversed(df.columns[-10:]):  # 检查最后10列
-            col_str = str(col).lower()
-            try:
-                # 检查这一列是否有数值数据，特别关注第33行附近
-                test_rows = df.tail(10)  # 取最后10行测试
-                non_null_values = test_rows[col].dropna()
-                
-                if len(non_null_values) >= 2:  # 至少要有几个数据
-                    # 检查是否大部分是数字格式
-                    numeric_count = 0
-                    total_count = 0
-                    
-                    for val in non_null_values:
-                        if str(val).strip().lower() not in ['none', '', 'nan']:
-                            total_count += 1
-                            try:
-                                # 尝试清理和转换数字
-                                cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
-                                if cleaned.replace('.', '').replace('-', '').isdigit() or cleaned == '0' or cleaned in ['1200', '8522.39', '2569']:
-                                    numeric_count += 1
-                            except:
-                                continue
-                    
-                    # 如果这列主要是数字，就用这一列
-                    if total_count > 0 and numeric_count / total_count >= 0.4:
-                        total_column = col
-                        break
-            except:
-                continue
-    
-    # 如果还是没找到，就用最后一列（通常合计列在最右边）
-    if total_column is None and len(df.columns) > 1:
-        total_column = df.columns[-1]
-    
-    # 步骤2: 重点查找最后几行中的"应收-未收额"
-    target_rows = []
-    
-    # 方法1: 直接查找包含目标关键词的行
-    for idx, row in df.iterrows():
-        row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
-        row_name = row_name.strip()
-        
-        if row_name:  # 非空行
-            # 精确匹配
-            for keyword in target_keywords:
-                if keyword in row_name:
-                    target_rows.append({
-                        'index': idx,
-                        'name': row_name,
-                        'keyword': keyword,
-                        'priority': 1  # 高优先级
-                    })
-                    break
-            
-            # 模糊匹配
-            if not any(t['index'] == idx for t in target_rows):
-                clean_name = row_name.replace(' ', '').replace('-', '').replace('_', '').lower()
-                for keyword in target_keywords:
-                    clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '').lower()
-                    if clean_keyword in clean_name:
-                        target_rows.append({
-                            'index': idx,
-                            'name': row_name,
-                            'keyword': keyword,
-                            'priority': 2  # 中优先级
-                        })
-                        break
-    
-    # 方法2: 如果没找到，查找最后几行中包含"收"、"额"等字的行
-    if not target_rows:
-        last_10_rows = df.tail(10)  # 查看最后10行
-        for idx, row in last_10_rows.iterrows():
-            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
-            row_name = row_name.strip()
-            
-            if row_name and any(char in row_name for char in ['收', '额', '款', '差']):
-                target_rows.append({
-                    'index': idx,
-                    'name': row_name,
-                    'keyword': '模糊匹配',
-                    'priority': 3  # 低优先级
-                })
-    
-    # 步骤3: 按优先级处理找到的目标行
-    target_rows.sort(key=lambda x: x['priority'])  # 按优先级排序
-    
-    debug_info = {
-        'total_column_used': str(total_column) if total_column else "未找到",
-        'target_rows_found': target_rows,
-        'total_rows': len(df),
-        'total_columns': len(df.columns),
-        'last_10_rows': []
-    }
-    
-    # 记录最后10行用于调试
-    for idx, row in df.tail(10).iterrows():
-        row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
-        debug_info['last_10_rows'].append(f"第{idx+2}行: {row_name}")
-    
-    # 步骤4: 提取目标数值（增强处理，特别针对1200这样的数值）
-    for target_row in target_rows:
-        idx = target_row['index']
-        row_name = target_row['name']
-        
-        try:
-            if total_column and total_column in df.columns:
-                val = df.loc[idx, total_column]
-                
-                # 增强的数值检查和处理
-                if pd.notna(val):
-                    val_str = str(val).strip()
-                    
-                    # 跳过明确的非数值
-                    if val_str.lower() in ['none', '', 'nan', 'null']:
-                        debug_info[f'skip_empty_{idx}'] = f"第{idx+2}行 {row_name}: 空值"
-                        continue
-                    
-                    # 记录原始值用于调试
-                    debug_info[f'original_val_{idx}'] = val_str
-                    
-                    # 数据清理 - 支持更多格式
-                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '').replace('\u00a0', '')
-                    
-                    # 处理括号表示的负数: (1200) -> -1200
-                    if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
-                        cleaned_val = '-' + cleaned_val[1:-1]
-                    
-                    # 处理其他负数格式
-                    is_negative_sign = cleaned_val.startswith('-')
-                    
-                    # 移除所有非数字字符（保留小数点和负号）
-                    import re
-                    cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
-                    
-                    # 确保负号在正确位置
-                    if is_negative_sign and not cleaned_val.startswith('-'):
-                        cleaned_val = '-' + cleaned_val
-                    
-                    # 记录清理后的值
-                    debug_info[f'cleaned_val_{idx}'] = cleaned_val
-                    
-                    try:
-                        # 特别处理1200这样的整数
-                        if cleaned_val.isdigit() or (cleaned_val.startswith('-') and cleaned_val[1:].isdigit()):
-                            amount = float(cleaned_val)
-                        elif '.' in cleaned_val:
-                            amount = float(cleaned_val)
-                        else:
-                            # 如果还是不能解析，尝试强制转换
-                            amount = float(cleaned_val)
-                        
-                        # 记录成功解析
-                        debug_info[f'parsed_amount_{idx}'] = amount
-                        
-                        # 成功解析到数值，返回结果
-                        analysis_results['应收-未收额'] = {
-                            'amount': amount,
-                            'column_name': str(total_column),
-                            'row_index': idx,
-                            'row_name': row_name,
-                            'is_negative': amount < 0,
-                            'matched_keyword': target_row['keyword'],
-                            'priority': target_row['priority'],
-                            'debug_info': debug_info,
-                            'original_value': val_str,
-                            'cleaned_value': cleaned_val,
-                            'parsing_success': True
-                        }
-                        return analysis_results
-                        
-                    except (ValueError, TypeError) as e:
-                        # 记录解析失败的详细信息
-                        debug_info[f'parse_error_{idx}'] = {
-                            'original_value': val_str,
-                            'cleaned_value': cleaned_val,
-                            'error': str(e),
-                            'error_type': type(e).__name__
-                        }
-                        continue
-                else:
-                    # 记录空值情况
-                    debug_info[f'null_value_{idx}'] = f"第{idx+2}行 {row_name} 的合计列为None/NaN"
-                    
-        except Exception as e:
-            debug_info[f'extraction_error_{idx}'] = f"第{idx+2}行数据提取错误: {str(e)}"
-            continue
-    
-    # 如果没找到，返回调试信息
-    analysis_results['debug_info'] = debug_info
-    return analysis_results
-
 # 初始化会话状态
 def init_session_state():
     """初始化会话状态"""
@@ -795,6 +803,7 @@ def init_session_state():
         'login_time': None,
         'is_admin': False,
         'data_loaded': False,
+        'app_started': False,
         'setup_complete': False,
         'google_sheets_client': None
     }
@@ -998,7 +1007,6 @@ with st.sidebar:
                 try:
                     df = pd.read_excel(permissions_file)
                     
-                    # 验证文件格式
                     if len(df.columns) >= 2:
                         with st.spinner("💾 保存权限数据到云数据库..."):
                             if save_permissions_to_sheets(df, gc):
@@ -1053,70 +1061,8 @@ with st.sidebar:
                         
                         for i, sheet in enumerate(sheets):
                             try:
-                                # 先读取前几行，查看数据结构
-                                preview_df = pd.read_excel(reports_file, sheet_name=sheet, nrows=5)
-                                
-                                # 检查第一行是否包含月份信息或者更像是数据而不是列名
-                                first_row_values = preview_df.iloc[0].values if len(preview_df) > 0 else []
-                                first_row_text = ' '.join([str(v) for v in first_row_values if pd.notna(v)])
-                                
-                                # 如果第一行包含月份、门店名称等信息，说明第一行是实际数据，第0行才是列名
-                                if any(keyword in first_row_text for keyword in ['月', '门店', '店', '分店', '中心']):
-                                    # 第一行是门店名称行，使用第二行作为列名
-                                    df = pd.read_excel(reports_file, sheet_name=sheet, header=1)
-                                else:
-                                    # 检查是否第二行更像列名（包含月份信息）
-                                    if len(preview_df) > 1:
-                                        second_row_values = preview_df.iloc[1].values
-                                        second_row_text = ' '.join([str(v) for v in second_row_values if pd.notna(v)])
-                                        
-                                        if any(keyword in second_row_text for keyword in ['月', '合计', '总计', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']):
-                                            # 第二行是列名行
-                                            df = pd.read_excel(reports_file, sheet_name=sheet, header=1)
-                                        else:
-                                            # 使用默认的第一行作为列名
-                                            df = pd.read_excel(reports_file, sheet_name=sheet, header=0)
-                                    else:
-                                        df = pd.read_excel(reports_file, sheet_name=sheet, header=0)
-                                
-                                # 数据清理：如果列名中仍有很多Unnamed，尝试用第一行数据作为列名
-                                unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
-                                if unnamed_count > len(df.columns) * 0.5:  # 如果超过一半的列都是Unnamed
-                                    try:
-                                        # 重新读取，使用第二行作为列名（第一行可能是门店名称）
-                                        temp_df = pd.read_excel(reports_file, sheet_name=sheet, header=None)
-                                        if len(temp_df) > 2:
-                                            # 查找最可能是列名的行（通常包含月份信息）
-                                            for header_row in range(min(3, len(temp_df))):
-                                                row_data = temp_df.iloc[header_row].values
-                                                row_text = ' '.join([str(v) for v in row_data if pd.notna(v)])
-                                                if any(month in row_text for month in ['5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月', '合计', '总计']):
-                                                    # 找到包含月份的行，用它作为列名
-                                                    df = pd.read_excel(reports_file, sheet_name=sheet, header=header_row, skiprows=0)
-                                                    # 删除列名行之前的数据行
-                                                    if header_row > 0:
-                                                        df = df.iloc[header_row:].reset_index(drop=True)
-                                                        df.columns = temp_df.iloc[header_row].values
-                                                        df = df.iloc[1:].reset_index(drop=True)  # 删除作为列名的那一行
-                                                    break
-                                    except:
-                                        pass  # 如果出错，保持原来的df
-                                
-                                # 最终清理列名
-                                new_columns = []
-                                for col in df.columns:
-                                    col_str = str(col)
-                                    if 'Unnamed' in col_str:
-                                        # 尝试从对应位置的数据推断列名
-                                        col_index = df.columns.get_loc(col)
-                                        if col_index < len(df.columns) - 1:
-                                            new_columns.append(f"列{col_index+1}")
-                                        else:
-                                            new_columns.append("合计")  # 最后一列通常是合计
-                                    else:
-                                        new_columns.append(col_str)
-                                
-                                df.columns = new_columns
+                                # 智能读取Excel，自动识别列名
+                                df = pd.read_excel(reports_file, sheet_name=sheet)
                                 
                                 if not df.empty:
                                     # 应用列名清理函数
@@ -1220,20 +1166,19 @@ if user_type == "管理员" and st.session_state.is_admin:
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        permissions_status = "已上传" if permissions_data is not None else "未上传"
         permissions_count = len(permissions_data) if permissions_data is not None else 0
-        st.metric("权限表状态", permissions_status, f"{permissions_count} 用户")
+        st.metric("权限表用户数", permissions_count)
     
     with col2:
         reports_count = len(reports_data)
-        st.metric("报表门店数", f"{reports_count} 个", "已就绪" if reports_count > 0 else "未上传")
+        st.metric("报表门店数", reports_count)
     
     with col3:
         if permissions_data is not None:
             unique_stores = permissions_data.iloc[:, 0].nunique()
-            st.metric("授权门店数", f"{unique_stores} 个")
+            st.metric("授权门店数", unique_stores)
         else:
-            st.metric("授权门店数", "0 个")
+            st.metric("授权门店数", 0)
     
     with col4:
         last_update = system_info.get('last_update')
@@ -1248,7 +1193,6 @@ if user_type == "管理员" and st.session_state.is_admin:
             st.metric("最后更新", "无")
 
 elif user_type == "管理员" and not st.session_state.is_admin:
-    # 提示输入管理员密码
     st.info("👈 请在左侧边栏输入管理员密码以访问管理功能")
 
 else:
@@ -1453,7 +1397,7 @@ else:
                             with col3:
                                 st.metric("数据来源", data['column_name'], f"第{data['row_index']+2}行")
                         
-                        # 显示说明
+                        # 显示详细说明
                         with st.expander("💡 查看详细说明"):
                             st.markdown(f"""
                             ### 应收未收额说明：
@@ -1472,7 +1416,8 @@ else:
                             - 匹配关键词：{data.get('matched_keyword', '应收-未收额')}
                             - 所在列：{data['column_name']}
                             - 所在行：第{data['row_index']+2}行
-                            - 原始值：{data['amount']}
+                            - 原始值：{data.get('original_value', amount)}
+                            - 解析后值：{amount}
                             """)
                     else:
                         st.warning("⚠️ 未找到'应收-未收额'数据")
