@@ -627,7 +627,7 @@ def analyze_receivable_data(df):
         row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
         debug_info['last_10_rows'].append(f"第{idx+2}行: {row_name}")
     
-    # 步骤4: 提取目标数值
+    # 步骤4: 提取目标数值（增强处理）
     for target_row in target_rows:
         idx = target_row['index']
         row_name = target_row['name']
@@ -636,19 +636,35 @@ def analyze_receivable_data(df):
             if total_column and total_column in df.columns:
                 val = df.loc[idx, total_column]
                 
-                if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
-                    # 清理数据
+                # 增强的数值检查和处理
+                if pd.notna(val):
                     val_str = str(val).strip()
-                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '')
                     
-                    # 处理负数格式
-                    if val_str.startswith('(') and val_str.endswith(')'):
-                        cleaned_val = '-' + cleaned_val
+                    # 跳过明确的非数值
+                    if val_str.lower() in ['none', '', 'nan', 'null']:
+                        continue
+                    
+                    # 数据清理 - 支持更多格式
+                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '')
+                    
+                    # 处理括号表示的负数: (1200) -> -1200
+                    if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
+                        cleaned_val = '-' + cleaned_val[1:-1]
+                    
+                    # 处理其他负数格式
+                    if cleaned_val.startswith('-'):
+                        is_negative = True
+                    else:
+                        is_negative = False
+                    
+                    # 移除所有非数字字符（保留小数点和负号）
+                    import re
+                    cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
                     
                     try:
                         amount = float(cleaned_val)
                         
-                        # 返回找到的结果
+                        # 成功解析到数值，返回结果
                         analysis_results['应收-未收额'] = {
                             'amount': amount,
                             'column_name': str(total_column),
@@ -658,13 +674,25 @@ def analyze_receivable_data(df):
                             'matched_keyword': target_row['keyword'],
                             'priority': target_row['priority'],
                             'debug_info': debug_info,
-                            'original_value': val_str
+                            'original_value': val_str,
+                            'cleaned_value': cleaned_val
                         }
                         return analysis_results
                         
-                    except ValueError:
+                    except (ValueError, TypeError) as e:
+                        # 记录解析失败的详细信息
+                        debug_info[f'parse_error_{idx}'] = {
+                            'original_value': val_str,
+                            'cleaned_value': cleaned_val,
+                            'error': str(e)
+                        }
                         continue
+                else:
+                    # 记录空值情况
+                    debug_info[f'empty_value_{idx}'] = f"第{idx+2}行 {row_name} 的合计列为空"
+                    
         except Exception as e:
+            debug_info[f'extraction_error_{idx}'] = f"第{idx+2}行数据提取错误: {str(e)}"
             continue
     
     # 如果没找到，返回调试信息
@@ -1324,14 +1352,17 @@ else:
                                 
                                 # 显示所有列名
                                 st.write("**📋 所有列名（横向月份布局）：**")
-                                cols_display = st.columns(min(4, len(debug.get('all_columns', []))))
                                 all_cols = debug.get('all_columns', [])
-                                for i, col in enumerate(all_cols):
-                                    with cols_display[i % len(cols_display)]:
-                                        if '合计' in str(col).lower():
-                                            st.write(f"📊 **{col}** ← 合计列")
-                                        else:
-                                            st.write(f"{i+1}. {col}")
+                                if len(all_cols) > 0:
+                                    # 确保列数不超过4，避免布局问题
+                                    num_cols = min(4, len(all_cols))
+                                    cols_display = st.columns(num_cols)
+                                    for i, col in enumerate(all_cols):
+                                        with cols_display[i % num_cols]:
+                                            if '合计' in str(col).lower():
+                                                st.write(f"📊 **{col}** ← 合计列")
+                                            else:
+                                                st.write(f"{i+1}. {col}")
                             
                             st.write("**💡 财务报表要求：**")
                             st.info("""
@@ -1357,7 +1388,7 @@ else:
                                     st.write("系统找到了一些可能的财务项目，请选择正确的应收-未收额：")
                                     
                                     # 为每个找到的项目显示数值
-                                    for target in target_rows:
+                                    for i, target in enumerate(target_rows):
                                         try:
                                             row_idx = target['index']
                                             row_name = target['name']
@@ -1367,59 +1398,75 @@ else:
                                                 val = df.loc[row_idx, total_col]
                                                 val_display = str(val) if pd.notna(val) else "无数据"
                                                 
-                                                # 创建选择按钮
-                                                button_key = f"select_row_{row_idx}"
-                                                col1, col2, col3 = st.columns([3, 2, 1])
-                                                
-                                                with col1:
-                                                    st.write(f"第{row_idx+2}行: **{row_name}**")
-                                                with col2:
-                                                    st.write(f"合计值: **{val_display}**")
-                                                with col3:
-                                                    if st.button("选择", key=button_key):
-                                                        # 处理选中的数据
-                                                        try:
-                                                            if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
-                                                                val_str = str(val).strip()
-                                                                cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '')
-                                                                
-                                                                if val_str.startswith('(') and val_str.endswith(')'):
-                                                                    cleaned_val = '-' + cleaned_val
-                                                                
-                                                                amount = float(cleaned_val)
-                                                                
-                                                                # 显示结果
-                                                                if amount < 0:
-                                                                    st.markdown(f"""
-                                                                        <div class="receivable-negative">
-                                                                            <h2 style="margin: 0; font-size: 2.5rem;">💚 ¥{abs(amount):,.2f}</h2>
-                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店将收到退款</p>
-                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
-                                                                        </div>
-                                                                    """, unsafe_allow_html=True)
+                                                # 创建唯一的容器
+                                                with st.container():
+                                                    # 使用expander来避免布局冲突
+                                                    with st.expander(f"第{row_idx+2}行: {row_name} = {val_display}", expanded=True):
+                                                        
+                                                        # 创建选择按钮
+                                                        button_key = f"select_receivable_{row_idx}_{i}"
+                                                        
+                                                        if st.button(f"✅ 选择此项作为应收-未收额", key=button_key, use_container_width=True):
+                                                            # 处理选中的数据
+                                                            try:
+                                                                if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
+                                                                    val_str = str(val).strip()
+                                                                    
+                                                                    # 增强的数据清理
+                                                                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '')
+                                                                    
+                                                                    # 处理负数格式
+                                                                    if val_str.startswith('(') and val_str.endswith(')'):
+                                                                        cleaned_val = '-' + cleaned_val[1:-1]
+                                                                    
+                                                                    # 移除非数字字符
+                                                                    import re
+                                                                    cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
+                                                                    
+                                                                    amount = float(cleaned_val)
+                                                                    
+                                                                    # 显示结果
+                                                                    st.success(f"✅ 已确认：{row_name} = ¥{amount:,.2f}")
+                                                                    
+                                                                    if amount < 0:
+                                                                        st.markdown(f"""
+                                                                            <div class="receivable-negative">
+                                                                                <h2 style="margin: 0; font-size: 2.5rem;">💚 ¥{abs(amount):,.2f}</h2>
+                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店将收到退款</p>
+                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
+                                                                            </div>
+                                                                        """, unsafe_allow_html=True)
+                                                                    else:
+                                                                        st.markdown(f"""
+                                                                            <div class="receivable-positive">
+                                                                                <h2 style="margin: 0; font-size: 2.5rem;">💛 ¥{amount:,.2f}</h2>
+                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店需要付款</p>
+                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
+                                                                            </div>
+                                                                        """, unsafe_allow_html=True)
+                                                                    
+                                                                    # 显示数据来源信息
+                                                                    st.write("**📊 数据详情：**")
+                                                                    info_col1, info_col2, info_col3 = st.columns(3)
+                                                                    with info_col1:
+                                                                        st.metric("状态", "手动确认")
+                                                                    with info_col2:
+                                                                        st.metric("原始数值", val_str)
+                                                                    with info_col3:
+                                                                        st.metric("数据位置", f"第{row_idx+2}行,{total_col}列")
+                                                                    
+                                                                    # 停止处理其他项目
+                                                                    break
+                                                                    
                                                                 else:
-                                                                    st.markdown(f"""
-                                                                        <div class="receivable-positive">
-                                                                            <h2 style="margin: 0; font-size: 2.5rem;">💛 ¥{amount:,.2f}</h2>
-                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店需要付款</p>
-                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
-                                                                        </div>
-                                                                    """, unsafe_allow_html=True)
-                                                                
-                                                                # 显示数据来源信息
-                                                                col_a, col_b, col_c = st.columns(3)
-                                                                with col_a:
-                                                                    st.metric("状态", "手动确认", "用户选择")
-                                                                with col_b:
-                                                                    st.metric("金额", f"¥{abs(amount):,.2f}")
-                                                                with col_c:
-                                                                    st.metric("数据位置", f"第{row_idx+2}行,{total_col}列")
-                                                                
-                                                                st.success(f"✅ 已选择：{row_name} = ¥{amount:,.2f}")
-                                                                
-                                                        except Exception as e:
-                                                            st.error(f"❌ 数据处理错误：{str(e)}")
+                                                                    st.error(f"❌ 该行合计列无有效数据：{val}")
+                                                                    
+                                                            except Exception as e:
+                                                                st.error(f"❌ 数据处理错误：{str(e)}")
+                                                                st.code(f"原始值: {val}")
+                                                                st.code(f"错误详情: {str(e)}")
                                         except Exception as e:
+                                            st.error(f"处理第{i+1}个项目时出错：{str(e)}")
                                             continue
                             
                             st.write("**📞 需要帮助？**")
