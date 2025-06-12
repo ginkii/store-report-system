@@ -503,7 +503,7 @@ def find_matching_reports(store_name, reports_data):
     return matching_sheets
 
 def analyze_receivable_data(df):
-    """分析应收未收额数据 - 增强识别逻辑"""
+    """分析应收未收额数据 - 专门针对财务报表格式优化"""
     analysis_results = {}
     
     if len(df.columns) == 0:
@@ -511,108 +511,164 @@ def analyze_receivable_data(df):
     
     first_col = df.columns[0]
     
-    # 扩展目标关键词，支持更多格式
+    # 财务报表专用关键词（更精确）
     target_keywords = [
         '应收-未收额', '应收未收额', '应收-未收', '应收 未收额',
-        '应收未收', '应收-未收金额', '应收未收金额', '未收金额',
-        '应收款', '应收账款', '应收余额'
+        '应收未收', '应收未收金额', '应收-未收金额', 
+        '未收额', '未收金额', '应收余额'
     ]
     
-    # 智能查找合计列 - 多种策略
-    total_columns = []
+    # 步骤1: 查找合计列（财务报表通常在最右侧几列）
+    total_column = None
     
-    # 策略1: 明确包含"合计"等关键词的列
-    for col in df.columns[1:]:
-        col_str = str(col).lower()
-        if any(keyword in col_str for keyword in ['合计', '总计', '合并', '汇总', '小计']):
-            total_columns.append(col)
+    # 优先查找明确标注"合计"的列
+    for col in df.columns:
+        col_str = str(col).lower().strip()
+        if col_str in ['合计', '总计', '汇总', '小计'] or '合计' in col_str:
+            total_column = col
+            break
     
-    # 策略2: 如果没找到，查找最后几列中的数值列
-    if not total_columns:
+    # 如果没找到明确的合计列，查找最后几列中最可能的数值列
+    if total_column is None:
+        # 从右往左查找，找到第一个包含数值的列
         for col in reversed(df.columns[-5:]):  # 检查最后5列
             try:
-                # 检查是否包含数值数据
+                # 检查这一列是否有数值数据
                 non_null_values = df[col].dropna()
-                if len(non_null_values) > 0:
-                    # 尝试转换一些值看是否是数值
-                    test_values = non_null_values.head(10)
+                if len(non_null_values) > 2:  # 至少要有几个数据
+                    # 检查是否大部分是数字格式
                     numeric_count = 0
-                    for val in test_values:
-                        try:
-                            cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
-                            if cleaned.replace('.', '').replace('-', '').isdigit():
-                                numeric_count += 1
-                        except:
-                            continue
+                    total_count = 0
                     
-                    # 如果大部分值都是数字，认为是数值列
-                    if numeric_count >= len(test_values) * 0.5:
-                        total_columns.append(col)
+                    for val in non_null_values:
+                        if str(val).strip().lower() not in ['none', '', 'nan']:
+                            total_count += 1
+                            try:
+                                # 尝试清理和转换数字
+                                cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                                if cleaned.replace('.', '').replace('-', '').isdigit() or cleaned == '0':
+                                    numeric_count += 1
+                            except:
+                                continue
+                    
+                    # 如果这列主要是数字，就用这一列
+                    if total_count > 0 and numeric_count / total_count >= 0.5:
+                        total_column = col
+                        break
             except:
                 continue
     
-    # 策略3: 如果还没找到，直接用最后一列
-    if not total_columns and len(df.columns) > 1:
-        total_columns.append(df.columns[-1])
+    # 如果还是没找到，就用最后一列
+    if total_column is None and len(df.columns) > 1:
+        total_column = df.columns[-1]
     
-    # 在每个可能的合计列中查找目标指标
-    for total_column in total_columns:
-        for idx, row in df.iterrows():
-            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
-            
-            # 更宽松的匹配策略
-            matched = False
-            matched_keyword = ""
-            
+    # 步骤2: 重点查找最后几行中的"应收-未收额"
+    target_rows = []
+    
+    # 方法1: 直接查找包含目标关键词的行
+    for idx, row in df.iterrows():
+        row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+        row_name = row_name.strip()
+        
+        if row_name:  # 非空行
             # 精确匹配
             for keyword in target_keywords:
                 if keyword in row_name:
-                    matched = True
-                    matched_keyword = keyword
+                    target_rows.append({
+                        'index': idx,
+                        'name': row_name,
+                        'keyword': keyword,
+                        'priority': 1  # 高优先级
+                    })
                     break
             
-            # 模糊匹配 - 去除空格和特殊字符后匹配
-            if not matched:
-                clean_row_name = row_name.replace(' ', '').replace('-', '').replace('_', '')
+            # 模糊匹配
+            if not any(t['index'] == idx for t in target_rows):
+                clean_name = row_name.replace(' ', '').replace('-', '').replace('_', '').lower()
                 for keyword in target_keywords:
-                    clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '')
-                    if clean_keyword in clean_row_name:
-                        matched = True
-                        matched_keyword = keyword
+                    clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '').lower()
+                    if clean_keyword in clean_name:
+                        target_rows.append({
+                            'index': idx,
+                            'name': row_name,
+                            'keyword': keyword,
+                            'priority': 2  # 中优先级
+                        })
                         break
-            
-            if matched:
-                try:
-                    val = row[total_column]
-                    if pd.notna(val) and str(val).strip() != '' and str(val).lower() != 'none':
-                        # 更强的数据清理
-                        cleaned_val = str(val).replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '').strip()
-                        
-                        # 处理负数格式 (1200) -> -1200
-                        if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
-                            cleaned_val = '-' + cleaned_val[1:-1]
-                        
-                        # 验证是否为数字
-                        try:
-                            amount = float(cleaned_val)
-                            
-                            # 只有非零值才记录
-                            if amount != 0:
-                                analysis_results['应收-未收额'] = {
-                                    'amount': amount,
-                                    'column_name': str(total_column),
-                                    'row_index': idx,
-                                    'row_name': row_name,
-                                    'is_negative': amount < 0,
-                                    'matched_keyword': matched_keyword
-                                }
-                                # 找到第一个有效值就返回
-                                return analysis_results
-                        except ValueError:
-                            continue
-                except Exception as e:
-                    continue
     
+    # 方法2: 如果没找到，查找最后几行中包含"收"、"额"等字的行
+    if not target_rows:
+        last_10_rows = df.tail(10)  # 查看最后10行
+        for idx, row in last_10_rows.iterrows():
+            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+            row_name = row_name.strip()
+            
+            if row_name and any(char in row_name for char in ['收', '额', '款', '差']):
+                target_rows.append({
+                    'index': idx,
+                    'name': row_name,
+                    'keyword': '模糊匹配',
+                    'priority': 3  # 低优先级
+                })
+    
+    # 步骤3: 按优先级处理找到的目标行
+    target_rows.sort(key=lambda x: x['priority'])  # 按优先级排序
+    
+    debug_info = {
+        'total_column_used': str(total_column) if total_column else "未找到",
+        'target_rows_found': target_rows,
+        'total_rows': len(df),
+        'total_columns': len(df.columns),
+        'last_10_rows': []
+    }
+    
+    # 记录最后10行用于调试
+    for idx, row in df.tail(10).iterrows():
+        row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+        debug_info['last_10_rows'].append(f"第{idx+2}行: {row_name}")
+    
+    # 步骤4: 提取目标数值
+    for target_row in target_rows:
+        idx = target_row['index']
+        row_name = target_row['name']
+        
+        try:
+            if total_column and total_column in df.columns:
+                val = df.loc[idx, total_column]
+                
+                if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
+                    # 清理数据
+                    val_str = str(val).strip()
+                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '')
+                    
+                    # 处理负数格式
+                    if val_str.startswith('(') and val_str.endswith(')'):
+                        cleaned_val = '-' + cleaned_val
+                    
+                    try:
+                        amount = float(cleaned_val)
+                        
+                        # 返回找到的结果
+                        analysis_results['应收-未收额'] = {
+                            'amount': amount,
+                            'column_name': str(total_column),
+                            'row_index': idx,
+                            'row_name': row_name,
+                            'is_negative': amount < 0,
+                            'matched_keyword': target_row['keyword'],
+                            'priority': target_row['priority'],
+                            'debug_info': debug_info,
+                            'original_value': val_str
+                        }
+                        return analysis_results
+                        
+                    except ValueError:
+                        continue
+        except Exception as e:
+            continue
+    
+    # 如果没找到，返回调试信息
+    analysis_results['debug_info'] = debug_info
     return analysis_results
 
 # 初始化会话状态
@@ -1237,31 +1293,153 @@ else:
                             """)
                     else:
                         st.warning("⚠️ 未找到'应收-未收额'数据")
-                        st.info("请确保报表中包含应收相关行，系统会自动识别合计列")
+                        st.info("系统正在分析财务报表结构，请查看诊断信息")
                         
-                        # 调试信息
-                        with st.expander("🔧 查看报表结构"):
-                            st.write("**报表列名：**")
-                            cols = st.columns(3)
-                            for i, col in enumerate(df.columns):
-                                with cols[i % 3]:
-                                    st.write(f"{i+1}. {col}")
+                        # 显示财务报表专用的调试信息
+                        with st.expander("🔧 财务报表诊断报告", expanded=True):
                             
-                            st.write("\n**第一列内容（前20行）：**")
-                            if len(df.columns) > 0:
-                                first_col_data = df.iloc[:20, 0].dropna()
-                                for idx, item in enumerate(first_col_data):
-                                    st.write(f"{idx+1}. {item}")
+                            if 'debug_info' in analysis_results:
+                                debug = analysis_results['debug_info']
+                                
+                                st.write("**📊 财务报表结构分析：**")
+                                st.write(f"• 总行数：{debug['total_rows']} 行")
+                                st.write(f"• 总列数：{debug['total_columns']} 列")
+                                st.write(f"• 使用的合计列：{debug['total_column_used']}")
+                                
+                                # 显示最后10行（重点关注区域）
+                                st.write("**📝 表格最后10行（应收-未收额通常在此区域）：**")
+                                for row_info in debug['last_10_rows']:
+                                    # 高亮显示可能相关的行
+                                    if any(keyword in row_info.lower() for keyword in ['收', '额', '款', '差', '余']):
+                                        st.write(f"🔍 **{row_info}** ← 可能相关")
+                                    else:
+                                        st.write(f"• {row_info}")
+                                
+                                # 显示找到的目标行
+                                if debug.get('target_rows_found'):
+                                    st.write("**🎯 找到的相关财务项目：**")
+                                    for target in debug['target_rows_found']:
+                                        priority_text = ["❌", "✅ 高匹配", "⚠️ 中匹配", "🔍 低匹配"][target['priority']]
+                                        st.write(f"{priority_text} 第{target['index']+2}行: **{target['name']}** (匹配关键词: {target['keyword']})")
+                                
+                                # 显示所有列名
+                                st.write("**📋 所有列名（横向月份布局）：**")
+                                cols_display = st.columns(min(4, len(debug.get('all_columns', []))))
+                                all_cols = debug.get('all_columns', [])
+                                for i, col in enumerate(all_cols):
+                                    with cols_display[i % len(cols_display)]:
+                                        if '合计' in str(col).lower():
+                                            st.write(f"📊 **{col}** ← 合计列")
+                                        else:
+                                            st.write(f"{i+1}. {col}")
                             
-                            st.write("\n**系统支持的关键词：**")
-                            keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收 未收额', '应收未收', '应收-未收金额', '应收未收金额', '未收金额', '应收款', '应收账款', '应收余额']
-                            for kw in keywords:
-                                st.write(f"• {kw}")
+                            st.write("**💡 财务报表要求：**")
+                            st.info("""
+                            根据您的说明，系统期望的报表格式：
+                            • 第一行：门店名称
+                            • 横向：各月份，最右侧有"合计"列
+                            • 纵向：各类收入和成本分类
+                            • 最后一行：包含"应收-未收额"的汇总行
+                            
+                            如果系统未找到数据，请检查：
+                            1. 最后一行是否包含"应收-未收额"或类似字样
+                            2. 合计列是否有对应的数值
+                            3. 数据格式是否为数字（而非文本）
+                            """)
+                            
+                            # 如果找到了一些相关数据，提供手动选择
+                            if 'debug_info' in analysis_results and analysis_results['debug_info'].get('target_rows_found'):
+                                target_rows = analysis_results['debug_info']['target_rows_found']
+                                total_col = analysis_results['debug_info']['total_column_used']
+                                
+                                if target_rows and total_col != "未找到":
+                                    st.write("**🎯 手动确认应收-未收额：**")
+                                    st.write("系统找到了一些可能的财务项目，请选择正确的应收-未收额：")
+                                    
+                                    # 为每个找到的项目显示数值
+                                    for target in target_rows:
+                                        try:
+                                            row_idx = target['index']
+                                            row_name = target['name']
+                                            
+                                            # 获取对应的数值
+                                            if total_col in df.columns:
+                                                val = df.loc[row_idx, total_col]
+                                                val_display = str(val) if pd.notna(val) else "无数据"
+                                                
+                                                # 创建选择按钮
+                                                button_key = f"select_row_{row_idx}"
+                                                col1, col2, col3 = st.columns([3, 2, 1])
+                                                
+                                                with col1:
+                                                    st.write(f"第{row_idx+2}行: **{row_name}**")
+                                                with col2:
+                                                    st.write(f"合计值: **{val_display}**")
+                                                with col3:
+                                                    if st.button("选择", key=button_key):
+                                                        # 处理选中的数据
+                                                        try:
+                                                            if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
+                                                                val_str = str(val).strip()
+                                                                cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '')
+                                                                
+                                                                if val_str.startswith('(') and val_str.endswith(')'):
+                                                                    cleaned_val = '-' + cleaned_val
+                                                                
+                                                                amount = float(cleaned_val)
+                                                                
+                                                                # 显示结果
+                                                                if amount < 0:
+                                                                    st.markdown(f"""
+                                                                        <div class="receivable-negative">
+                                                                            <h2 style="margin: 0; font-size: 2.5rem;">💚 ¥{abs(amount):,.2f}</h2>
+                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店将收到退款</p>
+                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
+                                                                        </div>
+                                                                    """, unsafe_allow_html=True)
+                                                                else:
+                                                                    st.markdown(f"""
+                                                                        <div class="receivable-positive">
+                                                                            <h2 style="margin: 0; font-size: 2.5rem;">💛 ¥{amount:,.2f}</h2>
+                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店需要付款</p>
+                                                                            <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
+                                                                        </div>
+                                                                    """, unsafe_allow_html=True)
+                                                                
+                                                                # 显示数据来源信息
+                                                                col_a, col_b, col_c = st.columns(3)
+                                                                with col_a:
+                                                                    st.metric("状态", "手动确认", "用户选择")
+                                                                with col_b:
+                                                                    st.metric("金额", f"¥{abs(amount):,.2f}")
+                                                                with col_c:
+                                                                    st.metric("数据位置", f"第{row_idx+2}行,{total_col}列")
+                                                                
+                                                                st.success(f"✅ 已选择：{row_name} = ¥{amount:,.2f}")
+                                                                
+                                                        except Exception as e:
+                                                            st.error(f"❌ 数据处理错误：{str(e)}")
+                                        except Exception as e:
+                                            continue
+                            
+                            st.write("**📞 需要帮助？**")
+                            st.warning("""
+                            如果仍无法识别数据，建议：
+                            1. 确保Excel表格最后一行明确标注"应收-未收额"
+                            2. 确保合计列有对应的数值（非空、非文本）
+                            3. 可以尝试在Excel中重新保存文件
+                            4. 联系技术支持检查文件格式
+                            """)
                 
                 except Exception as e:
                     st.error(f"❌ 分析数据时出错：{str(e)}")
                     with st.expander("🔧 错误详情"):
                         st.code(str(e))
+                        st.write("**可能的原因：**")
+                        st.write("1. Excel文件格式问题")
+                        st.write("2. 数据表结构不符合预期")
+                        st.write("3. 网络连接问题")
+                        st.write("4. 数据加载不完整")
                 
                 st.divider()
             
