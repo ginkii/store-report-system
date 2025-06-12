@@ -188,18 +188,22 @@ def save_permissions_to_sheets(df, gc):
         
         # 清空现有数据
         worksheet.clear()
+        time.sleep(1)  # 避免API频率限制
         
-        # 设置表头
-        headers = ['门店名称', '人员编号', '更新时间']
-        worksheet.append_row(headers)
-        
-        # 添加数据
+        # 准备所有数据（一次性写入，减少API调用）
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        all_data = [['门店名称', '人员编号', '更新时间']]  # 表头
+        
+        # 添加所有数据行
         for _, row in df.iterrows():
             data_row = [str(row.iloc[0]), str(row.iloc[1]), current_time]
-            worksheet.append_row(data_row)
+            all_data.append(data_row)
+        
+        # 一次性写入所有数据（减少API调用次数）
+        worksheet.update('A1', all_data)
         
         # 更新系统信息
+        time.sleep(1)  # 再次避免频率限制
         update_system_info(gc, {
             'permissions_updated': current_time,
             'total_users': len(df),
@@ -209,7 +213,11 @@ def save_permissions_to_sheets(df, gc):
         return True
     
     except Exception as e:
-        st.error(f"❌ 保存权限数据失败: {str(e)}")
+        if "429" in str(e) or "Quota exceeded" in str(e):
+            st.error("⚠️ API请求频率过高，请等待2-3分钟后重试")
+            st.info("💡 建议：尝试上传较小的文件，或等待片刻后重新上传")
+        else:
+            st.error(f"❌ 保存权限数据失败: {str(e)}")
         return False
 
 def load_permissions_from_sheets(gc):
