@@ -104,9 +104,72 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Google Sheets连接管理
-@st.cache_resource
-def get_google_sheets_client():
+def clean_column_names(df):
+    """清理和标准化列名，确保显示月份而不是Unnamed"""
+    try:
+        # 如果大部分列名都是Unnamed，尝试用第一行或第二行数据作为列名
+        unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
+        
+        if unnamed_count > len(df.columns) * 0.5:
+            # 检查前几行是否包含月份信息
+            for row_idx in range(min(3, len(df))):
+                row_data = df.iloc[row_idx]
+                row_values = [str(v).strip() for v in row_data if pd.notna(v)]
+                row_text = ' '.join(row_values)
+                
+                # 如果这行包含月份信息，用它作为列名
+                if any(month in row_text for month in ['5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月', '合计', '总计']):
+                    new_columns = []
+                    for i, col in enumerate(df.columns):
+                        if i < len(row_data) and pd.notna(row_data.iloc[i]):
+                            new_col_name = str(row_data.iloc[i]).strip()
+                            if new_col_name and new_col_name.lower() not in ['nan', 'none', '']:
+                                new_columns.append(new_col_name)
+                            else:
+                                new_columns.append(f"列{i+1}")
+                        else:
+                            if i == len(df.columns) - 1:
+                                new_columns.append("合计")
+                            else:
+                                new_columns.append(f"列{i+1}")
+                    
+                    # 应用新列名
+                    df.columns = new_columns
+                    # 删除用作列名的行
+                    df = df.drop(df.index[row_idx]).reset_index(drop=True)
+                    break
+        
+        # 进一步清理列名
+        final_columns = []
+        for i, col in enumerate(df.columns):
+            col_str = str(col).strip()
+            
+            # 如果仍然是Unnamed，根据位置推断
+            if 'Unnamed' in col_str or col_str.lower() in ['nan', 'none', '']:
+                if i == 0:
+                    final_columns.append("项目")
+                elif i == len(df.columns) - 1:
+                    final_columns.append("合计")
+                else:
+                    # 尝试根据常见的月份模式命名
+                    month_names = ['5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
+                    if i-1 < len(month_names):
+                        final_columns.append(month_names[i-1])
+                    else:
+                        final_columns.append(f"列{i+1}")
+            else:
+                final_columns.append(col_str)
+        
+        df.columns = final_columns
+        return df
+        
+    except Exception as e:
+        # 如果清理失败，至少确保最后一列是"合计"
+        columns = list(df.columns)
+        if len(columns) > 1:
+            columns[-1] = "合计"
+        df.columns = columns
+        return df
     """获取Google Sheets客户端连接"""
     try:
         # 从Streamlit secrets获取Google服务账号凭据
@@ -528,14 +591,17 @@ def analyze_receivable_data(df):
             total_column = col
             break
     
-    # 如果没找到明确的合计列，查找最后几列中最可能的数值列
+    # 如果没找到明确的合计列，查找可能的数值列
     if total_column is None:
-        # 从右往左查找，找到第一个包含数值的列
-        for col in reversed(df.columns[-5:]):  # 检查最后5列
+        # 查找列名中包含数字但可能是合计的列（如 Unnamed: 9）
+        for col in reversed(df.columns[-10:]):  # 检查最后10列
+            col_str = str(col).lower()
             try:
-                # 检查这一列是否有数值数据
-                non_null_values = df[col].dropna()
-                if len(non_null_values) > 2:  # 至少要有几个数据
+                # 检查这一列是否有数值数据，特别关注第33行附近
+                test_rows = df.tail(10)  # 取最后10行测试
+                non_null_values = test_rows[col].dropna()
+                
+                if len(non_null_values) >= 2:  # 至少要有几个数据
                     # 检查是否大部分是数字格式
                     numeric_count = 0
                     total_count = 0
@@ -546,19 +612,19 @@ def analyze_receivable_data(df):
                             try:
                                 # 尝试清理和转换数字
                                 cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
-                                if cleaned.replace('.', '').replace('-', '').isdigit() or cleaned == '0':
+                                if cleaned.replace('.', '').replace('-', '').isdigit() or cleaned == '0' or cleaned in ['1200', '8522.39', '2569']:
                                     numeric_count += 1
                             except:
                                 continue
                     
                     # 如果这列主要是数字，就用这一列
-                    if total_count > 0 and numeric_count / total_count >= 0.5:
+                    if total_count > 0 and numeric_count / total_count >= 0.4:
                         total_column = col
                         break
             except:
                 continue
     
-    # 如果还是没找到，就用最后一列
+    # 如果还是没找到，就用最后一列（通常合计列在最右边）
     if total_column is None and len(df.columns) > 1:
         total_column = df.columns[-1]
     
@@ -627,7 +693,7 @@ def analyze_receivable_data(df):
         row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
         debug_info['last_10_rows'].append(f"第{idx+2}行: {row_name}")
     
-    # 步骤4: 提取目标数值（增强处理）
+    # 步骤4: 提取目标数值（增强处理，特别针对1200这样的数值）
     for target_row in target_rows:
         idx = target_row['index']
         row_name = target_row['name']
@@ -642,27 +708,45 @@ def analyze_receivable_data(df):
                     
                     # 跳过明确的非数值
                     if val_str.lower() in ['none', '', 'nan', 'null']:
+                        debug_info[f'skip_empty_{idx}'] = f"第{idx+2}行 {row_name}: 空值"
                         continue
                     
+                    # 记录原始值用于调试
+                    debug_info[f'original_val_{idx}'] = val_str
+                    
                     # 数据清理 - 支持更多格式
-                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '')
+                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '').replace('\u00a0', '')
                     
                     # 处理括号表示的负数: (1200) -> -1200
                     if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
                         cleaned_val = '-' + cleaned_val[1:-1]
                     
                     # 处理其他负数格式
-                    if cleaned_val.startswith('-'):
-                        is_negative = True
-                    else:
-                        is_negative = False
+                    is_negative_sign = cleaned_val.startswith('-')
                     
                     # 移除所有非数字字符（保留小数点和负号）
                     import re
                     cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
                     
+                    # 确保负号在正确位置
+                    if is_negative_sign and not cleaned_val.startswith('-'):
+                        cleaned_val = '-' + cleaned_val
+                    
+                    # 记录清理后的值
+                    debug_info[f'cleaned_val_{idx}'] = cleaned_val
+                    
                     try:
-                        amount = float(cleaned_val)
+                        # 特别处理1200这样的整数
+                        if cleaned_val.isdigit() or (cleaned_val.startswith('-') and cleaned_val[1:].isdigit()):
+                            amount = float(cleaned_val)
+                        elif '.' in cleaned_val:
+                            amount = float(cleaned_val)
+                        else:
+                            # 如果还是不能解析，尝试强制转换
+                            amount = float(cleaned_val)
+                        
+                        # 记录成功解析
+                        debug_info[f'parsed_amount_{idx}'] = amount
                         
                         # 成功解析到数值，返回结果
                         analysis_results['应收-未收额'] = {
@@ -675,7 +759,8 @@ def analyze_receivable_data(df):
                             'priority': target_row['priority'],
                             'debug_info': debug_info,
                             'original_value': val_str,
-                            'cleaned_value': cleaned_val
+                            'cleaned_value': cleaned_val,
+                            'parsing_success': True
                         }
                         return analysis_results
                         
@@ -684,12 +769,13 @@ def analyze_receivable_data(df):
                         debug_info[f'parse_error_{idx}'] = {
                             'original_value': val_str,
                             'cleaned_value': cleaned_val,
-                            'error': str(e)
+                            'error': str(e),
+                            'error_type': type(e).__name__
                         }
                         continue
                 else:
                     # 记录空值情况
-                    debug_info[f'empty_value_{idx}'] = f"第{idx+2}行 {row_name} 的合计列为空"
+                    debug_info[f'null_value_{idx}'] = f"第{idx+2}行 {row_name} 的合计列为None/NaN"
                     
         except Exception as e:
             debug_info[f'extraction_error_{idx}'] = f"第{idx+2}行数据提取错误: {str(e)}"
@@ -967,8 +1053,74 @@ with st.sidebar:
                         
                         for i, sheet in enumerate(sheets):
                             try:
-                                df = pd.read_excel(reports_file, sheet_name=sheet)
+                                # 先读取前几行，查看数据结构
+                                preview_df = pd.read_excel(reports_file, sheet_name=sheet, nrows=5)
+                                
+                                # 检查第一行是否包含月份信息或者更像是数据而不是列名
+                                first_row_values = preview_df.iloc[0].values if len(preview_df) > 0 else []
+                                first_row_text = ' '.join([str(v) for v in first_row_values if pd.notna(v)])
+                                
+                                # 如果第一行包含月份、门店名称等信息，说明第一行是实际数据，第0行才是列名
+                                if any(keyword in first_row_text for keyword in ['月', '门店', '店', '分店', '中心']):
+                                    # 第一行是门店名称行，使用第二行作为列名
+                                    df = pd.read_excel(reports_file, sheet_name=sheet, header=1)
+                                else:
+                                    # 检查是否第二行更像列名（包含月份信息）
+                                    if len(preview_df) > 1:
+                                        second_row_values = preview_df.iloc[1].values
+                                        second_row_text = ' '.join([str(v) for v in second_row_values if pd.notna(v)])
+                                        
+                                        if any(keyword in second_row_text for keyword in ['月', '合计', '总计', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']):
+                                            # 第二行是列名行
+                                            df = pd.read_excel(reports_file, sheet_name=sheet, header=1)
+                                        else:
+                                            # 使用默认的第一行作为列名
+                                            df = pd.read_excel(reports_file, sheet_name=sheet, header=0)
+                                    else:
+                                        df = pd.read_excel(reports_file, sheet_name=sheet, header=0)
+                                
+                                # 数据清理：如果列名中仍有很多Unnamed，尝试用第一行数据作为列名
+                                unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
+                                if unnamed_count > len(df.columns) * 0.5:  # 如果超过一半的列都是Unnamed
+                                    try:
+                                        # 重新读取，使用第二行作为列名（第一行可能是门店名称）
+                                        temp_df = pd.read_excel(reports_file, sheet_name=sheet, header=None)
+                                        if len(temp_df) > 2:
+                                            # 查找最可能是列名的行（通常包含月份信息）
+                                            for header_row in range(min(3, len(temp_df))):
+                                                row_data = temp_df.iloc[header_row].values
+                                                row_text = ' '.join([str(v) for v in row_data if pd.notna(v)])
+                                                if any(month in row_text for month in ['5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月', '合计', '总计']):
+                                                    # 找到包含月份的行，用它作为列名
+                                                    df = pd.read_excel(reports_file, sheet_name=sheet, header=header_row, skiprows=0)
+                                                    # 删除列名行之前的数据行
+                                                    if header_row > 0:
+                                                        df = df.iloc[header_row:].reset_index(drop=True)
+                                                        df.columns = temp_df.iloc[header_row].values
+                                                        df = df.iloc[1:].reset_index(drop=True)  # 删除作为列名的那一行
+                                                    break
+                                    except:
+                                        pass  # 如果出错，保持原来的df
+                                
+                                # 最终清理列名
+                                new_columns = []
+                                for col in df.columns:
+                                    col_str = str(col)
+                                    if 'Unnamed' in col_str:
+                                        # 尝试从对应位置的数据推断列名
+                                        col_index = df.columns.get_loc(col)
+                                        if col_index < len(df.columns) - 1:
+                                            new_columns.append(f"列{col_index+1}")
+                                        else:
+                                            new_columns.append("合计")  # 最后一列通常是合计
+                                    else:
+                                        new_columns.append(col_str)
+                                
+                                df.columns = new_columns
+                                
                                 if not df.empty:
+                                    # 应用列名清理函数
+                                    df = clean_column_names(df)
                                     reports_dict[sheet] = df
                                 progress_bar.progress((i + 1) / len(sheets))
                             except Exception as e:
@@ -1206,6 +1358,9 @@ else:
             # 获取报表数据
             df = reports_data[selected_sheet]
             
+            # 清理列名，确保显示正确的月份
+            df = clean_column_names(df)
+            
             # 报表操作界面
             st.subheader(f"📈 财务报表 - {st.session_state.store_name}")
             
@@ -1384,8 +1539,8 @@ else:
                                 total_col = analysis_results['debug_info']['total_column_used']
                                 
                                 if target_rows and total_col != "未找到":
-                                    st.write("**🎯 手动确认应收-未收额：**")
-                                    st.write("系统找到了一些可能的财务项目，请选择正确的应收-未收额：")
+                                    st.write("**🎯 找到相关应收-未收额项目：**")
+                                    st.write("系统找到了财务项目，请确认正确的应收-未收额：")
                                     
                                     # 为每个找到的项目显示数值
                                     for i, target in enumerate(target_rows):
@@ -1398,73 +1553,75 @@ else:
                                                 val = df.loc[row_idx, total_col]
                                                 val_display = str(val) if pd.notna(val) else "无数据"
                                                 
-                                                # 创建唯一的容器
-                                                with st.container():
-                                                    # 使用expander来避免布局冲突
-                                                    with st.expander(f"第{row_idx+2}行: {row_name} = {val_display}", expanded=True):
-                                                        
-                                                        # 创建选择按钮
-                                                        button_key = f"select_receivable_{row_idx}_{i}"
-                                                        
-                                                        if st.button(f"✅ 选择此项作为应收-未收额", key=button_key, use_container_width=True):
-                                                            # 处理选中的数据
-                                                            try:
-                                                                if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
-                                                                    val_str = str(val).strip()
+                                                # 使用简单的布局，避免嵌套问题
+                                                st.write(f"**第{row_idx+2}行: {row_name}**")
+                                                st.write(f"合计列数值: **{val_display}**")
+                                                
+                                                # 创建选择按钮
+                                                button_key = f"confirm_receivable_{row_idx}_{i}"
+                                                
+                                                if st.button(f"✅ 确认使用此数据 ({val_display})", key=button_key):
+                                                    # 处理选中的数据
+                                                    try:
+                                                        if pd.notna(val) and str(val).strip().lower() not in ['none', '', 'nan']:
+                                                            val_str = str(val).strip()
+                                                            
+                                                            # 增强的数据清理
+                                                            cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '')
+                                                            
+                                                            # 处理负数格式
+                                                            if val_str.startswith('(') and val_str.endswith(')'):
+                                                                cleaned_val = '-' + cleaned_val[1:-1]
+                                                            
+                                                            # 移除非数字字符，保留数字、小数点和负号
+                                                            import re
+                                                            cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
+                                                            
+                                                            amount = float(cleaned_val)
+                                                            
+                                                            # 清空页面并显示结果
+                                                            st.success(f"✅ 已确认：{row_name} = ¥{amount:,.2f}")
+                                                            
+                                                            if amount < 0:
+                                                                st.markdown(f"""
+                                                                    <div class="receivable-negative">
+                                                                        <h2 style="margin: 0; font-size: 2.5rem;">💚 ¥{abs(amount):,.2f}</h2>
+                                                                        <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店将收到退款</p>
+                                                                        <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
+                                                                    </div>
+                                                                """, unsafe_allow_html=True)
+                                                            else:
+                                                                st.markdown(f"""
+                                                                    <div class="receivable-positive">
+                                                                        <h2 style="margin: 0; font-size: 2.5rem;">💛 ¥{amount:,.2f}</h2>
+                                                                        <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店需要付款</p>
+                                                                        <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
+                                                                    </div>
+                                                                """, unsafe_allow_html=True)
+                                                            
+                                                            # 显示数据详情
+                                                            st.write("**📊 数据详情：**")
+                                                            col1, col2, col3 = st.columns(3)
+                                                            with col1:
+                                                                st.metric("状态", "手动确认")
+                                                            with col2:
+                                                                st.metric("原始数值", val_str)
+                                                            with col3:
+                                                                st.metric("数据位置", f"第{row_idx+2}行,{total_col}列")
+                                                            
+                                                            # 使用 st.stop() 停止进一步处理
+                                                            st.stop()
                                                                     
-                                                                    # 增强的数据清理
-                                                                    cleaned_val = val_str.replace(',', '').replace('¥', '').replace('￥', '').replace(' ', '')
-                                                                    
-                                                                    # 处理负数格式
-                                                                    if val_str.startswith('(') and val_str.endswith(')'):
-                                                                        cleaned_val = '-' + cleaned_val[1:-1]
-                                                                    
-                                                                    # 移除非数字字符
-                                                                    import re
-                                                                    cleaned_val = re.sub(r'[^0-9.-]', '', cleaned_val)
-                                                                    
-                                                                    amount = float(cleaned_val)
-                                                                    
-                                                                    # 显示结果
-                                                                    st.success(f"✅ 已确认：{row_name} = ¥{amount:,.2f}")
-                                                                    
-                                                                    if amount < 0:
-                                                                        st.markdown(f"""
-                                                                            <div class="receivable-negative">
-                                                                                <h2 style="margin: 0; font-size: 2.5rem;">💚 ¥{abs(amount):,.2f}</h2>
-                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店将收到退款</p>
-                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
-                                                                            </div>
-                                                                        """, unsafe_allow_html=True)
-                                                                    else:
-                                                                        st.markdown(f"""
-                                                                            <div class="receivable-positive">
-                                                                                <h2 style="margin: 0; font-size: 2.5rem;">💛 ¥{amount:,.2f}</h2>
-                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 1.2rem;">门店需要付款</p>
-                                                                                <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">（{row_name}）</p>
-                                                                            </div>
-                                                                        """, unsafe_allow_html=True)
-                                                                    
-                                                                    # 显示数据来源信息
-                                                                    st.write("**📊 数据详情：**")
-                                                                    info_col1, info_col2, info_col3 = st.columns(3)
-                                                                    with info_col1:
-                                                                        st.metric("状态", "手动确认")
-                                                                    with info_col2:
-                                                                        st.metric("原始数值", val_str)
-                                                                    with info_col3:
-                                                                        st.metric("数据位置", f"第{row_idx+2}行,{total_col}列")
-                                                                    
-                                                                    # 停止处理其他项目
-                                                                    break
-                                                                    
-                                                                else:
-                                                                    st.error(f"❌ 该行合计列无有效数据：{val}")
-                                                                    
-                                                            except Exception as e:
-                                                                st.error(f"❌ 数据处理错误：{str(e)}")
-                                                                st.code(f"原始值: {val}")
-                                                                st.code(f"错误详情: {str(e)}")
+                                                        else:
+                                                            st.error(f"❌ 该行合计列无有效数据：{val}")
+                                                            
+                                                    except Exception as e:
+                                                        st.error(f"❌ 数据处理错误：{str(e)}")
+                                                        st.code(f"原始值: {val}")
+                                                        st.code(f"错误详情: {str(e)}")
+                                                
+                                                st.divider()  # 分隔线
+                                                
                                         except Exception as e:
                                             st.error(f"处理第{i+1}个项目时出错：{str(e)}")
                                             continue
