@@ -482,6 +482,13 @@ else:
                         months = ['1月', '2月', '3月', '4月', '5月', '6月', 
                                  '7月', '8月', '9月', '10月', '11月', '12月']
                         
+                        # 显示列信息帮助调试
+                        with st.expander("📋 查看报表列结构"):
+                            col_info = []
+                            for i, col in enumerate(df.columns):
+                                col_info.append(f"第{i+1}列: {col}")
+                            st.write("\n".join(col_info[:20]))  # 显示前20列
+                        
                         # 初始化数据存储
                         monthly_data = {
                             '毛利-线上': {},
@@ -491,50 +498,97 @@ else:
                             '应收-未收额': {}
                         }
                         
+                        # 用于存储应收-未收额的合计值
+                        uncollected_total = 0
+                        uncollected_row_found = False
+                        
                         # 查找指标行
                         for idx, row in df.iterrows():
                             row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
                             
-                            # 查找各个指标
+                            # 查找四个主要指标
                             metric_mapping = {
                                 '三. 毛利-线上': '毛利-线上',
-                                '毛利-线上': '毛利-线上',
                                 '五. 净利润': '净利润',
-                                '净利润': '净利润',
                                 '应收-收取金额': '应收-收取金额',
                                 '已分润款': '已分润款'
                             }
                             
+                            # 处理月度数据指标
                             for key, metric_name in metric_mapping.items():
                                 if key in row_name:
-                                    # 提取月度数据
+                                    # 遍历所有列，根据列名识别月份
                                     for col in df.columns[1:]:
                                         col_str = str(col)
+                                        
+                                        # 跳过合计列
+                                        if '合计' in col_str:
+                                            continue
+                                        
+                                        # 识别月份
                                         for month in months:
-                                            if month in col_str and '合计' not in col_str:
+                                            if month in col_str:
                                                 try:
                                                     val = row[col]
-                                                    if pd.notna(val) and str(val).replace('.', '').replace('-', '').replace(',', '').isdigit():
-                                                        num_val = float(str(val).replace(',', ''))
-                                                        monthly_data[metric_name][month] = num_val
+                                                    if pd.notna(val):
+                                                        # 处理各种数值格式
+                                                        val_str = str(val).replace(',', '').replace(' ', '')
+                                                        if val_str.replace('.', '').replace('-', '').isdigit():
+                                                            num_val = float(val_str)
+                                                            monthly_data[metric_name][month] = num_val
                                                 except:
                                                     pass
+                                                break
                                     break
+                            
+                            # 特别处理应收-未收额（从合计列获取）
+                            if '应收-未收额' in row_name or '应收未收额' in row_name:
+                                uncollected_row_found = True
+                                # 查找合计列
+                                for col in df.columns[1:]:
+                                    col_str = str(col)
+                                    if '合计' in col_str:
+                                        try:
+                                            val = row[col]
+                                            if pd.notna(val):
+                                                val_str = str(val).replace(',', '').replace(' ', '')
+                                                if val_str.replace('.', '').replace('-', '').isdigit():
+                                                    uncollected_total = float(val_str)
+                                        except:
+                                            pass
+                                        break
                         
-                        # 计算应收-未收额
+                        # 如果没有找到应收-未收额行，计算每月的应收-未收额
                         for month in months:
                             receivable = monthly_data['应收-收取金额'].get(month, 0)
                             distributed = monthly_data['已分润款'].get(month, 0)
-                            monthly_data['应收-未收额'][month] = receivable - distributed
+                            if receivable != 0 or distributed != 0:
+                                monthly_data['应收-未收额'][month] = receivable - distributed
                         
                         # 创建数据框用于可视化
                         viz_data = []
-                        for metric, data in monthly_data.items():
+                        
+                        # 只包含前四个指标的月度数据
+                        display_metrics = ['毛利-线上', '净利润', '应收-收取金额', '已分润款']
+                        for metric in display_metrics:
+                            data = monthly_data[metric]
                             for month, value in data.items():
-                                month_num = months.index(month) + 1
-                                viz_data.append({
+                                if value != 0:  # 只包含有数据的月份
+                                    month_num = months.index(month) + 1 if month in months else int(month.replace('月', ''))
+                                    viz_data.append({
+                                        '月份': f"{month_num:02d}月",
+                                        '指标': metric,
+                                        '金额': value
+                                    })
+                        
+                        # 应收-未收额单独处理
+                        uncollected_viz_data = []
+                        for month, value in monthly_data['应收-未收额'].items():
+                            if value != 0:
+                                month_num = months.index(month) + 1 if month in months else int(month.replace('月', ''))
+                                uncollected_viz_data.append({
                                     '月份': f"{month_num:02d}月",
-                                    '指标': metric,
+                                    '指标': '应收-未收额(计算值)',
                                     '金额': value
                                 })
                         
@@ -542,16 +596,16 @@ else:
                             viz_df = pd.DataFrame(viz_data)
                             
                             # 创建选项卡
-                            tab1, tab2, tab3 = st.tabs(["📊 柱状图", "📈 折线图", "📋 数据表"])
+                            tab1, tab2, tab3, tab4 = st.tabs(["📊 月度指标", "📈 趋势分析", "💰 应收未收额", "📋 数据表"])
                             
                             with tab1:
-                                # 柱状图
+                                # 柱状图 - 四个主要指标
                                 fig = px.bar(
                                     viz_df, 
                                     x='月份', 
                                     y='金额', 
                                     color='指标',
-                                    title='月度财务指标对比',
+                                    title='月度财务指标对比（毛利、净利润、应收、已分润）',
                                     labels={'金额': '金额 (元)'},
                                     barmode='group'
                                 )
@@ -559,7 +613,7 @@ else:
                                 st.plotly_chart(fig, use_container_width=True)
                             
                             with tab2:
-                                # 折线图
+                                # 折线图 - 趋势分析
                                 fig2 = px.line(
                                     viz_df, 
                                     x='月份', 
@@ -573,6 +627,58 @@ else:
                                 st.plotly_chart(fig2, use_container_width=True)
                             
                             with tab3:
+                                # 应收未收额分析
+                                st.write("#### 应收-未收额分析")
+                                
+                                # 显示合计值
+                                if uncollected_total != 0:
+                                    col1, col2 = st.columns([1, 2])
+                                    with col1:
+                                        if uncollected_total < 0:
+                                            st.metric("应收-未收额(合计列)", f"¥{uncollected_total:,.2f}", "门店应收款", delta_color="inverse")
+                                        else:
+                                            st.metric("应收-未收额(合计列)", f"¥{uncollected_total:,.2f}", "门店应付款")
+                                    with col2:
+                                        st.info("此数据来自报表的'合计'列中的'应收-未收额'行")
+                                
+                                # 显示月度计算值
+                                if uncollected_viz_data:
+                                    st.write("##### 月度应收-未收额（计算值）")
+                                    uncollected_df = pd.DataFrame(uncollected_viz_data)
+                                    
+                                    # 柱状图
+                                    fig3 = px.bar(
+                                        uncollected_df,
+                                        x='月份',
+                                        y='金额',
+                                        title='月度应收-未收额（应收-收取金额 减 已分润款）',
+                                        labels={'金额': '金额 (元)'},
+                                        color='金额',
+                                        color_continuous_scale=['red', 'yellow', 'green'],
+                                        color_continuous_midpoint=0
+                                    )
+                                    fig3.update_layout(height=400)
+                                    st.plotly_chart(fig3, use_container_width=True)
+                                    
+                                    # 月度明细表
+                                    monthly_uncollected = pd.DataFrame([
+                                        {
+                                            '月份': month,
+                                            '应收-收取金额': monthly_data['应收-收取金额'].get(month, 0),
+                                            '已分润款': monthly_data['已分润款'].get(month, 0),
+                                            '应收-未收额': monthly_data['应收-未收额'].get(month, 0)
+                                        }
+                                        for month in months
+                                        if month in monthly_data['应收-收取金额'] or month in monthly_data['已分润款']
+                                    ])
+                                    
+                                    if not monthly_uncollected.empty:
+                                        monthly_uncollected['应收-收取金额'] = monthly_uncollected['应收-收取金额'].apply(lambda x: f"¥{x:,.2f}")
+                                        monthly_uncollected['已分润款'] = monthly_uncollected['已分润款'].apply(lambda x: f"¥{x:,.2f}")
+                                        monthly_uncollected['应收-未收额'] = monthly_uncollected['应收-未收额'].apply(lambda x: f"¥{x:,.2f}")
+                                        st.dataframe(monthly_uncollected, use_container_width=True)
+                            
+                            with tab4:
                                 # 数据透视表
                                 pivot_df = viz_df.pivot(index='月份', columns='指标', values='金额').fillna(0)
                                 
@@ -583,7 +689,9 @@ else:
                                 # 汇总统计
                                 st.write("#### 📊 汇总统计")
                                 summary_data = []
-                                for metric in monthly_data.keys():
+                                
+                                # 只统计四个主要指标
+                                for metric in display_metrics:
                                     values = list(monthly_data[metric].values())
                                     if values:
                                         summary_data.append({
@@ -594,25 +702,31 @@ else:
                                             '最小值': min(values)
                                         })
                                 
-                                summary_df = pd.DataFrame(summary_data)
-                                summary_df['总计'] = summary_df['总计'].apply(lambda x: f"¥{x:,.2f}")
-                                summary_df['平均值'] = summary_df['平均值'].apply(lambda x: f"¥{x:,.2f}")
-                                summary_df['最大值'] = summary_df['最大值'].apply(lambda x: f"¥{x:,.2f}")
-                                summary_df['最小值'] = summary_df['最小值'].apply(lambda x: f"¥{x:,.2f}")
+                                if summary_data:
+                                    summary_df = pd.DataFrame(summary_data)
+                                    summary_df['总计'] = summary_df['总计'].apply(lambda x: f"¥{x:,.2f}")
+                                    summary_df['平均值'] = summary_df['平均值'].apply(lambda x: f"¥{x:,.2f}")
+                                    summary_df['最大值'] = summary_df['最大值'].apply(lambda x: f"¥{x:,.2f}")
+                                    summary_df['最小值'] = summary_df['最小值'].apply(lambda x: f"¥{x:,.2f}")
+                                    
+                                    st.dataframe(summary_df, use_container_width=True)
                                 
-                                st.dataframe(summary_df, use_container_width=True)
-                                
-                                # 特别提示应收-未收额
-                                if '应收-未收额' in monthly_data:
-                                    total_uncollected = sum(monthly_data['应收-未收额'].values())
-                                    if total_uncollected < 0:
-                                        st.warning(f"⚠️ 门店应收款总额：¥{abs(total_uncollected):,.2f}")
-                                    elif total_uncollected > 0:
-                                        st.info(f"💰 门店应付款总额：¥{total_uncollected:,.2f}")
-                                    else:
-                                        st.success("✅ 收支平衡")
+                                # 显示数据提取说明
+                                with st.expander("💡 数据提取说明"):
+                                    st.markdown("""
+                                    - **月份识别**：通过列名中的"1月"、"2月"等文字识别
+                                    - **四个主要指标**：从对应行提取月度数据
+                                      - 三. 毛利-线上
+                                      - 五. 净利润
+                                      - 应收-收取金额
+                                      - 已分润款
+                                    - **应收-未收额**：
+                                      - 合计值：从"合计"列的"应收-未收额"行提取
+                                      - 月度值：通过"应收-收取金额"减"已分润款"计算
+                                    - **负值说明**：应收-未收额为负表示门店应收款
+                                    """)
                         else:
-                            st.info("未找到可分析的月度数据")
+                            st.info("未找到可分析的月度数据，请检查报表格式是否包含月份列和指定的财务指标")
                         
                 except Exception as e:
                     st.error(f"分析时出错：{str(e)}")
