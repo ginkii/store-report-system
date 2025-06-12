@@ -2,29 +2,31 @@ import streamlit as st
 import pandas as pd
 import io
 import os
-import json
-from datetime import datetime
+import pickle
+import hashlib
+from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
+from pathlib import Path
+import time
 
 # 页面配置
 st.set_page_config(
     page_title="门店报表查询系统", 
     page_icon="📊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# 管理员密码（建议修改）
-ADMIN_PASSWORD = "admin123"  # 请修改为您的密码
-
-# 数据文件路径（用于持久化存储）
-DATA_DIR = "report_data"
-PERMISSIONS_FILE = os.path.join(DATA_DIR, "permissions.json")
-REPORTS_FILE = os.path.join(DATA_DIR, "reports.json")
+# 系统配置
+ADMIN_PASSWORD = "admin123"  # 建议修改为复杂密码
+DATA_DIR = "data"  # 数据存储目录
+PERMISSIONS_FILE = os.path.join(DATA_DIR, "permissions.pkl")
+REPORTS_FILE = os.path.join(DATA_DIR, "reports.pkl")
+SYSTEM_INFO_FILE = os.path.join(DATA_DIR, "system_info.pkl")
 
 # 创建数据目录
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # 自定义CSS样式
 st.markdown("""
@@ -34,95 +36,264 @@ st.markdown("""
         color: #1f77b4;
         text-align: center;
         padding: 1rem 0;
+        margin-bottom: 2rem;
     }
     .store-info {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 10px;
         margin: 1rem 0;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
     .admin-panel {
-        background-color: #fff3cd;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border: 1px solid #ffeaa7;
+        background: linear-gradient(135deg, #ffeaa7 0%, #fab1a0 100%);
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 2px solid #fdcb6e;
         margin: 1rem 0;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
     .metric-card {
         background-color: #f8f9fa;
         padding: 1rem;
-        border-radius: 0.5rem;
-        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        border-left: 4px solid #007bff;
         margin: 0.5rem 0;
+    }
+    .success-message {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 1rem;
+        border-radius: 5px;
+        border: 1px solid #c3e6cb;
+        margin: 1rem 0;
+    }
+    .warning-message {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 5px;
+        border: 1px solid #ffeaa7;
+        margin: 1rem 0;
+    }
+    .search-container {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 1rem 0;
     }
     </style>
 """, unsafe_allow_html=True)
 
 # 数据持久化函数
-def save_permissions_data(data):
-    """保存权限数据到文件"""
-    if data is not None:
-        data_dict = data.to_dict()
-        with open(PERMISSIONS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data_dict, f, ensure_ascii=False)
-
-def load_permissions_data():
-    """从文件加载权限数据"""
-    if os.path.exists(PERMISSIONS_FILE):
-        try:
-            with open(PERMISSIONS_FILE, 'r', encoding='utf-8') as f:
-                data_dict = json.load(f)
-            return pd.DataFrame(data_dict)
-        except:
-            return None
+@st.cache_data
+def load_data_from_file(filepath):
+    """从文件加载数据"""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                return pickle.load(f)
+    except Exception as e:
+        st.error(f"加载数据失败: {str(e)}")
     return None
 
-def save_reports_data(data):
-    """保存报表数据到文件"""
-    if data:
-        # 将DataFrame转换为可JSON序列化的格式
-        data_dict = {}
-        for sheet_name, df in data.items():
-            data_dict[sheet_name] = df.to_dict()
-        with open(REPORTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data_dict, f, ensure_ascii=False)
+def save_data_to_file(data, filepath):
+    """保存数据到文件"""
+    try:
+        with open(filepath, 'wb') as f:
+            pickle.dump(data, f)
+        return True
+    except Exception as e:
+        st.error(f"保存数据失败: {str(e)}")
+        return False
 
-def load_reports_data():
-    """从文件加载报表数据"""
-    if os.path.exists(REPORTS_FILE):
-        try:
-            with open(REPORTS_FILE, 'r', encoding='utf-8') as f:
-                data_dict = json.load(f)
-            # 将字典转换回DataFrame
-            reports_data = {}
-            for sheet_name, sheet_dict in data_dict.items():
-                reports_data[sheet_name] = pd.DataFrame(sheet_dict)
-            return reports_data
-        except:
-            return {}
-    return {}
+def get_file_hash(file_data):
+    """获取文件的MD5哈希值"""
+    return hashlib.md5(file_data).hexdigest()
+
+# 系统信息管理
+def get_system_info():
+    """获取系统信息"""
+    default_info = {
+        'last_update': None,
+        'total_stores': 0,
+        'total_users': 0,
+        'permissions_hash': None,
+        'reports_hash': None
+    }
+    info = load_data_from_file(SYSTEM_INFO_FILE)
+    return info if info else default_info
+
+def update_system_info(**kwargs):
+    """更新系统信息"""
+    info = get_system_info()
+    info.update(kwargs)
+    info['last_update'] = datetime.now()
+    save_data_to_file(info, SYSTEM_INFO_FILE)
+
+# 权限验证函数
+def verify_user_permission(store_name, user_id, permissions_data):
+    """验证用户权限"""
+    if permissions_data is None or len(permissions_data.columns) < 2:
+        return False
+    
+    store_column = permissions_data.columns[0]
+    id_column = permissions_data.columns[1]
+    
+    # 数据类型转换
+    permissions_data[store_column] = permissions_data[store_column].astype(str)
+    permissions_data[id_column] = permissions_data[id_column].astype(str)
+    
+    # 模糊匹配门店名称
+    for _, row in permissions_data.iterrows():
+        stored_store = str(row[store_column]).strip()
+        stored_id = str(row[id_column]).strip()
+        
+        # 门店名称匹配（支持包含关系）
+        if (store_name in stored_store or stored_store in store_name) and stored_id == str(user_id):
+            return True
+    
+    return False
+
+def find_matching_reports(store_name, reports_data):
+    """查找匹配的报表"""
+    matching_sheets = []
+    store_name_clean = store_name.strip()
+    
+    for sheet_name in reports_data.keys():
+        sheet_name_clean = sheet_name.strip()
+        # 支持多种匹配方式
+        if (store_name_clean in sheet_name_clean or 
+            sheet_name_clean in store_name_clean or
+            store_name_clean.replace(" ", "") in sheet_name_clean.replace(" ", "") or
+            sheet_name_clean.replace(" ", "") in store_name_clean.replace(" ", "")):
+            matching_sheets.append(sheet_name)
+    
+    return matching_sheets
+
+# 数据分析函数
+def analyze_financial_data(df):
+    """分析财务数据"""
+    analysis_results = {}
+    
+    if len(df.columns) == 0:
+        return analysis_results
+    
+    first_col = df.columns[0]
+    
+    # 查找关键财务指标
+    key_indicators = {
+        '营业收入': ['营业收入', '收入', '销售收入'],
+        '毛利润': ['毛利', '毛利润', '毛利-线上'],
+        '净利润': ['净利润', '净利'],
+        '成本': ['成本', '营业成本'],
+        '费用': ['费用', '管理费用', '销售费用'],
+        '应收款': ['应收', '应收款', '应收-未收']
+    }
+    
+    for indicator, keywords in key_indicators.items():
+        for idx, row in df.iterrows():
+            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+            
+            for keyword in keywords:
+                if keyword in row_name:
+                    # 计算该行的数值
+                    total = 0
+                    monthly_data = {}
+                    
+                    for col in df.columns[1:]:
+                        try:
+                            val = row[col]
+                            if pd.notna(val):
+                                # 清理数值
+                                val_str = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                                if val_str.replace('.', '').replace('-', '').isdigit():
+                                    num_val = float(val_str)
+                                    
+                                    # 识别月份
+                                    col_str = str(col)
+                                    for month_num in range(1, 13):
+                                        month_pattern = f"{month_num}月"
+                                        if month_pattern in col_str:
+                                            monthly_data[month_pattern] = num_val
+                                            break
+                                    
+                                    if '合计' not in col_str and '总计' not in col_str:
+                                        total += num_val
+                        except:
+                            continue
+                    
+                    if total != 0 or monthly_data:
+                        analysis_results[indicator] = {
+                            'total': total,
+                            'monthly': monthly_data,
+                            'row_index': idx
+                        }
+                    break
+                if indicator in analysis_results:
+                    break
+    
+    return analysis_results
 
 # 初始化会话状态
 def init_session_state():
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-        st.session_state.store_name = ""
-        st.session_state.user_id = ""
-        st.session_state.login_time = None
-        st.session_state.is_admin = False
+    """初始化会话状态"""
+    defaults = {
+        'logged_in': False,
+        'store_name': "",
+        'user_id': "",
+        'login_time': None,
+        'is_admin': False,
+        'permissions_data': None,
+        'reports_data': {},
+        'system_info': get_system_info(),
+        'data_loaded': False
+    }
     
-    # 从文件加载数据
-    if 'permissions_data' not in st.session_state:
-        st.session_state.permissions_data = load_permissions_data()
-    if 'reports_data' not in st.session_state:
-        st.session_state.reports_data = load_reports_data()
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+# 加载持久化数据
+def load_persistent_data():
+    """加载持久化数据"""
+    if not st.session_state.data_loaded:
+        # 加载权限数据
+        permissions = load_data_from_file(PERMISSIONS_FILE)
+        if permissions is not None:
+            st.session_state.permissions_data = permissions
+        
+        # 加载报表数据
+        reports = load_data_from_file(REPORTS_FILE)
+        if reports is not None:
+            st.session_state.reports_data = reports
+        
+        # 更新系统信息
+        st.session_state.system_info = get_system_info()
+        st.session_state.data_loaded = True
 
 init_session_state()
+load_persistent_data()
 
 # 主标题
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
-# 侧边栏 - 根据用户类型显示不同内容
+# 显示系统状态
+if st.session_state.system_info['last_update']:
+    last_update = st.session_state.system_info['last_update']
+    if isinstance(last_update, str):
+        last_update = datetime.fromisoformat(last_update)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("总门店数", st.session_state.system_info['total_stores'])
+    with col2:
+        st.metric("授权用户数", st.session_state.system_info['total_users'])
+    with col3:
+        st.metric("最后更新", last_update.strftime("%m-%d %H:%M"))
+
+# 侧边栏
 with st.sidebar:
     st.title("⚙️ 系统功能")
     
@@ -158,23 +329,56 @@ with st.sidebar:
             permissions_file = st.file_uploader(
                 "上传门店权限表", 
                 type=['xlsx', 'xls'],
-                help="包含门店名称和人员编号"
+                help="包含门店名称和人员编号的Excel文件"
             )
             
             if permissions_file:
                 try:
-                    df = pd.read_excel(permissions_file)
-                    st.session_state.permissions_data = df
-                    save_permissions_data(df)  # 保存到文件
-                    st.success(f"✅ 权限表已上传并保存：{len(df)} 条记录")
+                    # 检查文件是否有变化
+                    file_data = permissions_file.getvalue()
+                    current_hash = get_file_hash(file_data)
+                    
+                    if current_hash != st.session_state.system_info.get('permissions_hash'):
+                        df = pd.read_excel(permissions_file)
+                        
+                        # 验证文件格式
+                        if len(df.columns) >= 2:
+                            st.session_state.permissions_data = df
+                            
+                            # 保存到文件
+                            if save_data_to_file(df, PERMISSIONS_FILE):
+                                # 统计信息
+                                total_users = len(df)
+                                unique_stores = df.iloc[:, 0].nunique()
+                                
+                                update_system_info(
+                                    total_users=total_users,
+                                    permissions_hash=current_hash
+                                )
+                                
+                                st.success(f"✅ 权限表已上传：{total_users} 个用户，{unique_stores} 个门店")
+                            else:
+                                st.error("保存权限表失败")
+                        else:
+                            st.error("权限表格式错误：至少需要两列（门店名称、人员编号）")
+                    else:
+                        st.info("文件未发生变化")
+                        
                 except Exception as e:
                     st.error(f"读取权限表失败：{str(e)}")
             
             # 显示当前权限表状态
             if st.session_state.permissions_data is not None:
-                st.info(f"📋 当前权限表：{len(st.session_state.permissions_data)} 条记录")
-                if st.checkbox("查看权限表"):
-                    st.dataframe(st.session_state.permissions_data)
+                df = st.session_state.permissions_data
+                st.info(f"📋 当前权限表：{len(df)} 个用户，{df.iloc[:, 0].nunique()} 个门店")
+                
+                if st.checkbox("查看权限表预览"):
+                    st.dataframe(df.head(10), use_container_width=True)
+                    
+                    # 门店分布统计
+                    if st.checkbox("查看门店分布"):
+                        store_counts = df.iloc[:, 0].value_counts()
+                        st.bar_chart(store_counts)
             
             st.divider()
             
@@ -182,52 +386,97 @@ with st.sidebar:
             reports_file = st.file_uploader(
                 "上传财务报表", 
                 type=['xlsx', 'xls'],
-                help="包含多个门店Sheet的报表"
+                help="包含多个门店Sheet的Excel文件"
             )
             
             if reports_file:
                 try:
-                    excel_file = pd.ExcelFile(reports_file)
-                    sheets = excel_file.sheet_names
+                    # 检查文件是否有变化
+                    file_data = reports_file.getvalue()
+                    current_hash = get_file_hash(file_data)
                     
-                    # 保存所有sheet数据
-                    reports_data = {}
-                    for sheet in sheets:
-                        df = pd.read_excel(reports_file, sheet_name=sheet)
-                        reports_data[sheet] = df
-                    
-                    st.session_state.reports_data = reports_data
-                    save_reports_data(reports_data)  # 保存到文件
-                    
-                    st.success(f"✅ 报表已上传并保存：{len(sheets)} 个门店")
-                    st.info("包含的门店：" + ", ".join(sheets))
+                    if current_hash != st.session_state.system_info.get('reports_hash'):
+                        with st.spinner("正在处理报表文件..."):
+                            excel_file = pd.ExcelFile(reports_file)
+                            sheets = excel_file.sheet_names
+                            
+                            # 清空之前的数据
+                            st.session_state.reports_data = {}
+                            
+                            # 批量处理sheet
+                            progress_bar = st.progress(0)
+                            for i, sheet in enumerate(sheets):
+                                try:
+                                    df = pd.read_excel(reports_file, sheet_name=sheet)
+                                    if not df.empty:
+                                        st.session_state.reports_data[sheet] = df
+                                    progress_bar.progress((i + 1) / len(sheets))
+                                except Exception as e:
+                                    st.warning(f"跳过Sheet '{sheet}'：{str(e)}")
+                                    continue
+                            
+                            progress_bar.empty()
+                            
+                            # 保存到文件
+                            if save_data_to_file(st.session_state.reports_data, REPORTS_FILE):
+                                update_system_info(
+                                    total_stores=len(st.session_state.reports_data),
+                                    reports_hash=current_hash
+                                )
+                                
+                                st.success(f"✅ 报表已上传：{len(st.session_state.reports_data)} 个门店")
+                                st.info("包含的门店：" + ", ".join(list(st.session_state.reports_data.keys())[:10]) + 
+                                       ("..." if len(st.session_state.reports_data) > 10 else ""))
+                            else:
+                                st.error("保存报表失败")
+                    else:
+                        st.info("报表文件未发生变化")
+                        
                 except Exception as e:
                     st.error(f"读取报表失败：{str(e)}")
             
             # 显示当前报表状态
             if st.session_state.reports_data:
                 st.info(f"📊 当前报表：{len(st.session_state.reports_data)} 个门店")
-                if st.checkbox("查看已上传的门店"):
-                    for store in st.session_state.reports_data.keys():
-                        st.write(f"- {store}")
+                
+                if st.checkbox("查看已上传的门店列表"):
+                    stores = list(st.session_state.reports_data.keys())
+                    for i in range(0, len(stores), 3):
+                        cols = st.columns(3)
+                        for j, store in enumerate(stores[i:i+3]):
+                            with cols[j]:
+                                st.write(f"• {store}")
             
             st.divider()
             
             # 管理功能
             st.subheader("🛠️ 管理功能")
             
-            if st.button("🗑️ 清空所有数据", type="secondary"):
-                st.session_state.permissions_data = None
-                st.session_state.reports_data = {}
-                # 删除文件
-                if os.path.exists(PERMISSIONS_FILE):
-                    os.remove(PERMISSIONS_FILE)
-                if os.path.exists(REPORTS_FILE):
-                    os.remove(REPORTS_FILE)
-                st.success("已清空所有数据")
-                st.rerun()
+            col1, col2 = st.columns(2)
             
-            if st.button("🚪 退出管理员", type="secondary"):
+            with col1:
+                if st.button("🔄 重新加载数据", use_container_width=True):
+                    st.session_state.data_loaded = False
+                    load_persistent_data()
+                    st.success("数据已重新加载")
+                    st.rerun()
+            
+            with col2:
+                if st.button("🗑️ 清空所有数据", type="secondary", use_container_width=True):
+                    # 删除文件
+                    for filepath in [PERMISSIONS_FILE, REPORTS_FILE, SYSTEM_INFO_FILE]:
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                    
+                    # 重置状态
+                    st.session_state.permissions_data = None
+                    st.session_state.reports_data = {}
+                    st.session_state.system_info = get_system_info()
+                    
+                    st.success("所有数据已清空")
+                    st.rerun()
+            
+            if st.button("🚪 退出管理员", use_container_width=True):
                 st.session_state.is_admin = False
                 st.rerun()
     
@@ -236,10 +485,10 @@ with st.sidebar:
         if st.session_state.logged_in:
             st.divider()
             st.subheader("👤 当前登录")
-            st.info(f"门店：{st.session_state.store_name}")
-            st.info(f"编号：{st.session_state.user_id}")
+            st.info(f"**门店：** {st.session_state.store_name}")
+            st.info(f"**编号：** {st.session_state.user_id}")
             if st.session_state.login_time:
-                st.info(f"时间：{st.session_state.login_time}")
+                st.info(f"**时间：** {st.session_state.login_time}")
             
             if st.button("🚪 退出登录", use_container_width=True):
                 st.session_state.logged_in = False
@@ -254,58 +503,121 @@ if user_type == "管理员" and st.session_state.is_admin:
     st.markdown("""
         <div class="admin-panel">
             <h3>👨‍💼 管理员控制面板</h3>
-            <p>您可以在左侧边栏上传和管理文件</p>
+            <p>您可以在左侧边栏上传和管理权限表和财务报表文件</p>
         </div>
     """, unsafe_allow_html=True)
     
-    # 显示系统状态
-    col1, col2 = st.columns(2)
+    # 系统概览
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric(
-            "权限表状态", 
-            "已上传" if st.session_state.permissions_data is not None else "未上传",
-            len(st.session_state.permissions_data) if st.session_state.permissions_data is not None else 0
-        )
+        permissions_status = "已上传" if st.session_state.permissions_data is not None else "未上传"
+        permissions_count = len(st.session_state.permissions_data) if st.session_state.permissions_data is not None else 0
+        st.metric("权限表状态", permissions_status, f"{permissions_count} 用户")
     
     with col2:
-        st.metric(
-            "报表数量", 
-            f"{len(st.session_state.reports_data)} 个门店",
-            "已就绪" if st.session_state.reports_data else "未上传"
-        )
+        reports_count = len(st.session_state.reports_data)
+        st.metric("报表门店数", f"{reports_count} 个", "已就绪" if reports_count > 0 else "未上传")
+    
+    with col3:
+        if st.session_state.permissions_data is not None:
+            unique_stores = st.session_state.permissions_data.iloc[:, 0].nunique()
+            st.metric("授权门店数", f"{unique_stores} 个")
+        else:
+            st.metric("授权门店数", "0 个")
+    
+    with col4:
+        last_update = st.session_state.system_info.get('last_update')
+        if last_update:
+            if isinstance(last_update, str):
+                last_update = datetime.fromisoformat(last_update)
+            update_time = last_update.strftime("%H:%M")
+            st.metric("最后更新", update_time)
+        else:
+            st.metric("最后更新", "无")
+    
+    # 数据一致性检查
+    if st.session_state.permissions_data is not None and st.session_state.reports_data:
+        st.subheader("📋 数据一致性检查")
+        
+        # 获取权限表中的门店
+        permission_stores = set(st.session_state.permissions_data.iloc[:, 0].unique())
+        # 获取报表中的门店
+        report_stores = set(st.session_state.reports_data.keys())
+        
+        # 找出差异
+        missing_reports = permission_stores - report_stores
+        extra_reports = report_stores - permission_stores
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if missing_reports:
+                st.warning(f"⚠️ 有权限但缺少报表的门店 ({len(missing_reports)}个):")
+                for store in list(missing_reports)[:5]:
+                    st.write(f"• {store}")
+                if len(missing_reports) > 5:
+                    st.write(f"... 还有 {len(missing_reports) - 5} 个")
+            else:
+                st.success("✅ 所有授权门店都有对应报表")
+        
+        with col2:
+            if extra_reports:
+                st.info(f"ℹ️ 有报表但无权限的门店 ({len(extra_reports)}个):")
+                for store in list(extra_reports)[:5]:
+                    st.write(f"• {store}")
+                if len(extra_reports) > 5:
+                    st.write(f"... 还有 {len(extra_reports) - 5} 个")
+            else:
+                st.success("✅ 所有报表门店都有对应权限")
     
     # 使用说明
     with st.expander("📖 管理员操作指南"):
         st.markdown("""
-        ### 管理员操作步骤：
+        ### 🚀 快速开始：
         
-        1. **上传权限表**
-           - Excel文件，包含两列：门店名称、人员编号
-           - 每行代表一个有权限的用户
+        **第一步：上传权限表**
+        - Excel文件，包含两列：门店名称、人员编号
+        - 支持一个门店多个用户
+        - 建议使用标准化的门店名称
         
-        2. **上传财务报表**
-           - Excel文件，每个Sheet代表一个门店
-           - Sheet名称应与权限表中的门店名称对应
+        **第二步：上传财务报表**
+        - Excel文件，每个Sheet代表一个门店
+        - Sheet名称应与权限表中的门店名称对应（支持模糊匹配）
+        - 系统会自动处理70+门店的大型文件
         
-        3. **数据持久化**
-           - 上传的数据会自动保存
-           - 其他电脑的用户可以直接访问
+        **第三步：数据验证**
+        - 查看数据一致性检查结果
+        - 确认门店数量和用户数量
+        - 测试用户登录功能
         
-        4. **通知用户**
-           - 告知门店用户可以登录查询
-           - 提供门店名称和人员编号
+        ### 💡 最佳实践：
         
-        ### 注意事项：
-        - 上传新文件会覆盖旧文件
-        - 建议定期更新报表数据
-        - 请妥善保管管理员密码
-        - 数据会保存在服务器上，所有用户共享
+        - **门店命名规范**：保持权限表和报表中门店名称的一致性
+        - **定期更新**：建议每月更新一次报表数据
+        - **备份数据**：重要数据请做好本地备份
+        - **性能优化**：单个报表文件建议不超过50MB
+        
+        ### 🔧 故障排除：
+        
+        - **文件上传失败**：检查文件格式和大小
+        - **门店匹配失败**：检查门店名称是否一致
+        - **用户登录失败**：确认权限表中有对应记录
+        - **数据丢失**：重新上传文件即可恢复
         """)
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     # 提示输入管理员密码
-    st.info("👈 请在左侧边栏输入管理员密码")
+    st.info("👈 请在左侧边栏输入管理员密码以访问管理功能")
+    
+    # 显示系统状态（非敏感信息）
+    if st.session_state.system_info['last_update']:
+        st.markdown("""
+            <div class="warning-message">
+                <h4>🏪 系统状态</h4>
+                <p>系统已配置并正在运行，用户可以正常查询报表</p>
+            </div>
+        """, unsafe_allow_html=True)
 
 else:
     # 普通用户界面
@@ -315,7 +627,12 @@ else:
         
         # 检查是否有权限数据
         if st.session_state.permissions_data is None:
-            st.warning("⚠️ 系统暂无数据，请联系管理员上传文件")
+            st.markdown("""
+                <div class="warning-message">
+                    <h4>⚠️ 系统维护中</h4>
+                    <p>系统暂无数据，请联系管理员上传权限表和报表文件</p>
+                </div>
+            """, unsafe_allow_html=True)
         else:
             permissions_df = st.session_state.permissions_data
             
@@ -323,9 +640,9 @@ else:
                 store_column = permissions_df.columns[0]
                 id_column = permissions_df.columns[1]
                 
-                # 转换数据类型
-                permissions_df[store_column] = permissions_df[store_column].astype(str)
-                permissions_df[id_column] = permissions_df[id_column].astype(str)
+                # 数据清理和转换
+                permissions_df[store_column] = permissions_df[store_column].astype(str).str.strip()
+                permissions_df[id_column] = permissions_df[id_column].astype(str).str.strip()
                 
                 # 获取门店列表
                 stores = sorted(permissions_df[store_column].unique().tolist())
@@ -334,99 +651,139 @@ else:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 
                 with col2:
+                    st.markdown('<div class="search-container">', unsafe_allow_html=True)
+                    
                     with st.form("login_form"):
+                        st.markdown("#### 请输入登录信息")
+                        
+                        # 门店选择（支持搜索）
                         selected_store = st.selectbox(
                             "选择门店", 
                             stores,
                             help="请选择您所属的门店"
                         )
                         
+                        # 人员编号输入
                         user_id = st.text_input(
                             "人员编号", 
                             placeholder="请输入您的人员编号",
-                            help="请输入您的人员编号"
+                            help="请输入系统分配给您的人员编号"
                         )
                         
-                        submit = st.form_submit_button("登录", use_container_width=True)
+                        # 登录按钮
+                        col_a, col_b, col_c = st.columns([1, 1, 1])
+                        with col_b:
+                            submit = st.form_submit_button("🚀 登录", use_container_width=True)
                         
                         if submit:
-                            if selected_store and user_id:
+                            if selected_store and user_id.strip():
                                 # 验证权限
-                                user_check = permissions_df[
-                                    (permissions_df[store_column] == selected_store) & 
-                                    (permissions_df[id_column] == str(user_id))
-                                ]
-                                
-                                if len(user_check) > 0:
+                                if verify_user_permission(selected_store, user_id.strip(), permissions_df):
                                     st.session_state.logged_in = True
                                     st.session_state.store_name = selected_store
-                                    st.session_state.user_id = user_id
+                                    st.session_state.user_id = user_id.strip()
                                     st.session_state.login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                    st.success("✅ 登录成功！")
+                                    st.success("✅ 登录成功！正在跳转...")
                                     st.balloons()
+                                    time.sleep(1)
                                     st.rerun()
                                 else:
                                     st.error("❌ 门店或人员编号错误！请检查后重试。")
                             else:
                                 st.warning("⚠️ 请填写完整的登录信息")
+                    
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                # 登录提示
+                st.markdown("""
+                    <div style="text-align: center; margin-top: 2rem; color: #666;">
+                        <p>💡 <strong>登录提示：</strong></p>
+                        <p>请选择您的门店并输入管理员分配给您的人员编号</p>
+                        <p>如遇问题，请联系系统管理员</p>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.error("权限表格式错误，请联系管理员重新上传")
     
     else:
         # 已登录 - 显示报表
         st.markdown(f"""
             <div class="store-info">
-                <h3>当前门店：{st.session_state.store_name}</h3>
-                <p>操作员：{st.session_state.user_id} | 登录时间：{st.session_state.login_time}</p>
+                <h3>🏪 {st.session_state.store_name}</h3>
+                <p><strong>操作员：</strong>{st.session_state.user_id} &nbsp;|&nbsp; <strong>登录时间：</strong>{st.session_state.login_time}</p>
             </div>
         """, unsafe_allow_html=True)
         
         # 查找对应的报表
-        matching_sheets = []
-        for sheet_name in st.session_state.reports_data.keys():
-            if (st.session_state.store_name in sheet_name or 
-                sheet_name in st.session_state.store_name):
-                matching_sheets.append(sheet_name)
+        matching_sheets = find_matching_reports(st.session_state.store_name, st.session_state.reports_data)
         
         if matching_sheets:
             # 如果有多个匹配的sheet，让用户选择
             if len(matching_sheets) > 1:
                 selected_sheet = st.selectbox(
-                    "找到多个相关报表，请选择：", 
-                    matching_sheets
+                    "🔍 找到多个相关报表，请选择：", 
+                    matching_sheets,
+                    help="系统找到了多个可能匹配的报表"
                 )
             else:
                 selected_sheet = matching_sheets[0]
+                st.info(f"📊 已找到报表：{selected_sheet}")
             
             # 获取报表数据
             df = st.session_state.reports_data[selected_sheet]
             
-            # 报表显示和操作
-            st.subheader(f"📊 {st.session_state.store_name} - 财务报表")
+            # 报表操作界面
+            st.subheader(f"📈 财务报表 - {st.session_state.store_name}")
             
-            # 搜索功能
-            col1, col2 = st.columns([3, 1])
+            # 搜索和过滤工具
+            st.markdown('<div class="search-container">', unsafe_allow_html=True)
+            
+            col1, col2, col3 = st.columns([2, 1, 1])
+            
             with col1:
-                search_term = st.text_input("🔍 搜索报表内容", placeholder="输入关键词搜索...")
+                search_term = st.text_input(
+                    "🔍 搜索报表内容", 
+                    placeholder="输入关键词搜索...",
+                    help="支持搜索所有列的内容"
+                )
             
             with col2:
                 n_rows = st.selectbox("显示行数", [10, 25, 50, 100, "全部"])
             
+            with col3:
+                show_analysis = st.checkbox("📊 显示数据分析", value=False)
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+            
             # 应用搜索过滤
             if search_term:
-                mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
+                mask = df.astype(str).apply(
+                    lambda x: x.str.contains(search_term, case=False, na=False)
+                ).any(axis=1)
                 filtered_df = df[mask]
+                st.info(f"🔍 找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
             else:
                 filtered_df = df
             
             # 显示数据统计
-            st.info(f"📈 共 {len(filtered_df)} 条记录")
+            total_rows = len(filtered_df)
+            st.markdown(f"""
+                <div class="metric-card">
+                    📊 <strong>数据统计：</strong>共 {total_rows} 条记录 | 
+                    📅 <strong>报表列数：</strong>{len(df.columns)} 列
+                </div>
+            """, unsafe_allow_html=True)
             
             # 显示数据表
-            if n_rows == "全部":
-                st.dataframe(filtered_df, use_container_width=True)
+            if total_rows > 0:
+                display_df = filtered_df.head(n_rows) if n_rows != "全部" else filtered_df
+                st.dataframe(display_df, use_container_width=True, height=400)
             else:
-                st.dataframe(filtered_df.head(n_rows), use_container_width=True)
+                st.warning("没有找到符合条件的数据")
             
             # 下载功能
+            st.subheader("📥 数据下载")
+            
             col1, col2, col3 = st.columns(3)
             
             with col1:
@@ -436,7 +793,7 @@ else:
                     df.to_excel(writer, index=False, sheet_name=st.session_state.store_name)
                 
                 st.download_button(
-                    label="📥 下载完整报表",
+                    label="📥 下载完整报表 (Excel)",
                     data=buffer.getvalue(),
                     file_name=f"{st.session_state.store_name}_财务报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -451,12 +808,15 @@ else:
                         filtered_df.to_excel(writer, index=False, sheet_name=st.session_state.store_name)
                     
                     st.download_button(
-                        label="📥 下载筛选结果",
+                        label="📥 下载筛选结果 (Excel)",
                         data=buffer_filtered.getvalue(),
                         file_name=f"{st.session_state.store_name}_筛选报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
+                else:
+                    st.button("📥 下载筛选结果 (Excel)", disabled=True, use_container_width=True,
+                            help="没有筛选结果可下载")
             
             with col3:
                 # 下载CSV格式
@@ -469,277 +829,134 @@ else:
                     use_container_width=True
                 )
             
-            # 数据分析和可视化
-            if st.checkbox("📊 显示数据分析和可视化"):
+            # 数据分析模块
+            if show_analysis:
+                st.subheader("📊 财务数据分析")
+                
                 try:
-                    st.write("### 财务指标分析")
+                    analysis_results = analyze_financial_data(df)
                     
-                    # 查找关键财务指标
-                    first_col = df.columns[0] if len(df.columns) > 0 else None
-                    
-                    if first_col:
-                        # 月份列表
-                        months = ['1月', '2月', '3月', '4月', '5月', '6月', 
-                                 '7月', '8月', '9月', '10月', '11月', '12月']
+                    if analysis_results:
+                        # 关键指标展示
+                        st.markdown("#### 🎯 关键财务指标")
                         
-                        # 显示列信息帮助调试
-                        with st.expander("📋 查看报表列结构"):
-                            col_info = []
-                            for i, col in enumerate(df.columns):
-                                col_info.append(f"第{i+1}列: {col}")
-                            st.write("\n".join(col_info[:20]))  # 显示前20列
+                        # 创建指标卡片
+                        metric_cols = st.columns(min(len(analysis_results), 4))
                         
-                        # 初始化数据存储
-                        monthly_data = {
-                            '毛利-线上': {},
-                            '净利润': {},
-                            '应收-收取金额': {},
-                            '已分润款': {},
-                            '应收-未收额': {}
-                        }
+                        for i, (indicator, data) in enumerate(analysis_results.items()):
+                            with metric_cols[i % 4]:
+                                total_value = data['total']
+                                if total_value != 0:
+                                    formatted_value = f"¥{total_value:,.0f}"
+                                    if '应收' in indicator or '成本' in indicator or '费用' in indicator:
+                                        st.metric(indicator, formatted_value, delta="需关注", delta_color="inverse")
+                                    else:
+                                        st.metric(indicator, formatted_value)
                         
-                        # 用于存储应收-未收额的合计值
-                        uncollected_total = 0
-                        uncollected_row_found = False
+                        # 月度趋势分析
+                        st.markdown("#### 📈 月度趋势")
                         
-                        # 查找指标行
-                        for idx, row in df.iterrows():
-                            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+                        # 选择要分析的指标
+                        indicators_with_monthly = [k for k, v in analysis_results.items() if v['monthly']]
+                        
+                        if indicators_with_monthly:
+                            selected_indicator = st.selectbox(
+                                "选择指标进行月度分析", 
+                                indicators_with_monthly
+                            )
                             
-                            # 查找四个主要指标
-                            metric_mapping = {
-                                '三. 毛利-线上': '毛利-线上',
-                                '五. 净利润': '净利润',
-                                '应收-收取金额': '应收-收取金额',
-                                '已分润款': '已分润款'
-                            }
+                            monthly_data = analysis_results[selected_indicator]['monthly']
                             
-                            # 处理月度数据指标
-                            for key, metric_name in metric_mapping.items():
-                                if key in row_name:
-                                    # 遍历所有列，根据列名识别月份
-                                    for col in df.columns[1:]:
-                                        col_str = str(col)
-                                        
-                                        # 跳过合计列
-                                        if '合计' in col_str:
-                                            continue
-                                        
-                                        # 识别月份
-                                        for month in months:
-                                            if month in col_str:
-                                                try:
-                                                    val = row[col]
-                                                    if pd.notna(val):
-                                                        # 处理各种数值格式
-                                                        val_str = str(val).replace(',', '').replace(' ', '')
-                                                        if val_str.replace('.', '').replace('-', '').isdigit():
-                                                            num_val = float(val_str)
-                                                            monthly_data[metric_name][month] = num_val
-                                                except:
-                                                    pass
-                                                break
-                                    break
-                            
-                            # 特别处理应收-未收额（从合计列获取）
-                            if '应收-未收额' in row_name or '应收未收额' in row_name:
-                                uncollected_row_found = True
-                                # 查找合计列
-                                for col in df.columns[1:]:
-                                    col_str = str(col)
-                                    if '合计' in col_str:
-                                        try:
-                                            val = row[col]
-                                            if pd.notna(val):
-                                                val_str = str(val).replace(',', '').replace(' ', '')
-                                                if val_str.replace('.', '').replace('-', '').isdigit():
-                                                    uncollected_total = float(val_str)
-                                        except:
-                                            pass
-                                        break
-                        
-                        # 如果没有找到应收-未收额行，计算每月的应收-未收额
-                        for month in months:
-                            receivable = monthly_data['应收-收取金额'].get(month, 0)
-                            distributed = monthly_data['已分润款'].get(month, 0)
-                            if receivable != 0 or distributed != 0:
-                                monthly_data['应收-未收额'][month] = receivable - distributed
-                        
-                        # 创建数据框用于可视化
-                        viz_data = []
-                        
-                        # 只包含前四个指标的月度数据
-                        display_metrics = ['毛利-线上', '净利润', '应收-收取金额', '已分润款']
-                        for metric in display_metrics:
-                            data = monthly_data[metric]
-                            for month, value in data.items():
-                                if value != 0:  # 只包含有数据的月份
-                                    month_num = months.index(month) + 1 if month in months else int(month.replace('月', ''))
-                                    viz_data.append({
-                                        '月份': f"{month_num:02d}月",
-                                        '指标': metric,
-                                        '金额': value
-                                    })
-                        
-                        # 应收-未收额单独处理
-                        uncollected_viz_data = []
-                        for month, value in monthly_data['应收-未收额'].items():
-                            if value != 0:
-                                month_num = months.index(month) + 1 if month in months else int(month.replace('月', ''))
-                                uncollected_viz_data.append({
-                                    '月份': f"{month_num:02d}月",
-                                    '指标': '应收-未收额(计算值)',
-                                    '金额': value
-                                })
-                        
-                        if viz_data:
-                            viz_df = pd.DataFrame(viz_data)
-                            
-                            # 创建选项卡
-                            tab1, tab2, tab3, tab4 = st.tabs(["📊 月度指标", "📈 趋势分析", "💰 应收未收额", "📋 数据表"])
-                            
-                            with tab1:
-                                # 柱状图 - 四个主要指标
-                                fig = px.bar(
-                                    viz_df, 
-                                    x='月份', 
-                                    y='金额', 
-                                    color='指标',
-                                    title='月度财务指标对比（毛利、净利润、应收、已分润）',
-                                    labels={'金额': '金额 (元)'},
-                                    barmode='group'
-                                )
-                                fig.update_layout(height=500)
-                                st.plotly_chart(fig, use_container_width=True)
-                            
-                            with tab2:
-                                # 折线图 - 趋势分析
-                                fig2 = px.line(
-                                    viz_df, 
-                                    x='月份', 
-                                    y='金额', 
-                                    color='指标',
-                                    title='月度财务指标趋势',
-                                    labels={'金额': '金额 (元)'},
+                            if monthly_data:
+                                # 创建月度趋势图
+                                months = list(monthly_data.keys())
+                                values = list(monthly_data.values())
+                                
+                                fig = px.line(
+                                    x=months, 
+                                    y=values,
+                                    title=f"{selected_indicator} - 月度趋势",
+                                    labels={'x': '月份', 'y': '金额'},
                                     markers=True
                                 )
-                                fig2.update_layout(height=500)
-                                st.plotly_chart(fig2, use_container_width=True)
-                            
-                            with tab3:
-                                # 应收未收额分析
-                                st.write("#### 应收-未收额分析")
+                                fig.update_layout(height=400)
+                                st.plotly_chart(fig, use_container_width=True)
                                 
-                                # 显示合计值
-                                if uncollected_total != 0:
-                                    col1, col2 = st.columns([1, 2])
-                                    with col1:
-                                        if uncollected_total < 0:
-                                            st.metric("应收-未收额(合计列)", f"¥{uncollected_total:,.2f}", "门店应收款", delta_color="inverse")
-                                        else:
-                                            st.metric("应收-未收额(合计列)", f"¥{uncollected_total:,.2f}", "门店应付款")
-                                    with col2:
-                                        st.info("此数据来自报表的'合计'列中的'应收-未收额'行")
-                                
-                                # 显示月度计算值
-                                if uncollected_viz_data:
-                                    st.write("##### 月度应收-未收额（计算值）")
-                                    uncollected_df = pd.DataFrame(uncollected_viz_data)
-                                    
-                                    # 柱状图
-                                    fig3 = px.bar(
-                                        uncollected_df,
-                                        x='月份',
-                                        y='金额',
-                                        title='月度应收-未收额（应收-收取金额 减 已分润款）',
-                                        labels={'金额': '金额 (元)'},
-                                        color='金额',
-                                        color_continuous_scale=['red', 'yellow', 'green'],
-                                        color_continuous_midpoint=0
-                                    )
-                                    fig3.update_layout(height=400)
-                                    st.plotly_chart(fig3, use_container_width=True)
-                                    
-                                    # 月度明细表
-                                    monthly_uncollected = pd.DataFrame([
-                                        {
-                                            '月份': month,
-                                            '应收-收取金额': monthly_data['应收-收取金额'].get(month, 0),
-                                            '已分润款': monthly_data['已分润款'].get(month, 0),
-                                            '应收-未收额': monthly_data['应收-未收额'].get(month, 0)
-                                        }
-                                        for month in months
-                                        if month in monthly_data['应收-收取金额'] or month in monthly_data['已分润款']
-                                    ])
-                                    
-                                    if not monthly_uncollected.empty:
-                                        monthly_uncollected['应收-收取金额'] = monthly_uncollected['应收-收取金额'].apply(lambda x: f"¥{x:,.2f}")
-                                        monthly_uncollected['已分润款'] = monthly_uncollected['已分润款'].apply(lambda x: f"¥{x:,.2f}")
-                                        monthly_uncollected['应收-未收额'] = monthly_uncollected['应收-未收额'].apply(lambda x: f"¥{x:,.2f}")
-                                        st.dataframe(monthly_uncollected, use_container_width=True)
-                            
-                            with tab4:
-                                # 数据透视表
-                                pivot_df = viz_df.pivot(index='月份', columns='指标', values='金额').fillna(0)
-                                
-                                # 格式化显示
-                                formatted_df = pivot_df.applymap(lambda x: f"¥{x:,.2f}")
-                                st.dataframe(formatted_df, use_container_width=True)
-                                
-                                # 汇总统计
-                                st.write("#### 📊 汇总统计")
-                                summary_data = []
-                                
-                                # 只统计四个主要指标
-                                for metric in display_metrics:
-                                    values = list(monthly_data[metric].values())
-                                    if values:
-                                        summary_data.append({
-                                            '指标': metric,
-                                            '总计': sum(values),
-                                            '平均值': sum(values) / len(values),
-                                            '最大值': max(values),
-                                            '最小值': min(values)
-                                        })
-                                
-                                if summary_data:
-                                    summary_df = pd.DataFrame(summary_data)
-                                    summary_df['总计'] = summary_df['总计'].apply(lambda x: f"¥{x:,.2f}")
-                                    summary_df['平均值'] = summary_df['平均值'].apply(lambda x: f"¥{x:,.2f}")
-                                    summary_df['最大值'] = summary_df['最大值'].apply(lambda x: f"¥{x:,.2f}")
-                                    summary_df['最小值'] = summary_df['最小值'].apply(lambda x: f"¥{x:,.2f}")
-                                    
-                                    st.dataframe(summary_df, use_container_width=True)
-                                
-                                # 显示数据提取说明
-                                with st.expander("💡 数据提取说明"):
-                                    st.markdown("""
-                                    - **月份识别**：通过列名中的"1月"、"2月"等文字识别
-                                    - **四个主要指标**：从对应行提取月度数据
-                                      - 三. 毛利-线上
-                                      - 五. 净利润
-                                      - 应收-收取金额
-                                      - 已分润款
-                                    - **应收-未收额**：
-                                      - 合计值：从"合计"列的"应收-未收额"行提取
-                                      - 月度值：通过"应收-收取金额"减"已分润款"计算
-                                    - **负值说明**：应收-未收额为负表示门店应收款
-                                    """)
-                        else:
-                            st.info("未找到可分析的月度数据，请检查报表格式是否包含月份列和指定的财务指标")
+                                # 月度数据表
+                                monthly_df = pd.DataFrame({
+                                    '月份': months,
+                                    '金额': [f"¥{v:,.0f}" for v in values]
+                                })
+                                st.dataframe(monthly_df, use_container_width=True)
                         
+                        # 财务比率分析
+                        if '营业收入' in analysis_results and '净利润' in analysis_results:
+                            revenue = analysis_results['营业收入']['total']
+                            profit = analysis_results['净利润']['total']
+                            
+                            if revenue > 0:
+                                profit_margin = (profit / revenue) * 100
+                                st.markdown("#### 💹 财务比率")
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("净利率", f"{profit_margin:.1f}%")
+                                
+                                if '毛利润' in analysis_results:
+                                    gross_profit = analysis_results['毛利润']['total']
+                                    gross_margin = (gross_profit / revenue) * 100
+                                    with col2:
+                                        st.metric("毛利率", f"{gross_margin:.1f}%")
+                                
+                                if '成本' in analysis_results:
+                                    cost = analysis_results['成本']['total']
+                                    cost_ratio = (cost / revenue) * 100
+                                    with col3:
+                                        st.metric("成本率", f"{cost_ratio:.1f}%")
+                    
+                    else:
+                        st.info("🔍 无法识别标准财务指标，显示通用数据统计")
+                        
+                        # 通用统计分析
+                        numeric_cols = df.select_dtypes(include=['number']).columns
+                        
+                        if len(numeric_cols) > 0:
+                            st.markdown("#### 📊 数值列统计")
+                            stats_df = df[numeric_cols].describe().round(2)
+                            st.dataframe(stats_df, use_container_width=True)
+                        else:
+                            st.info("报表中没有可分析的数值数据")
+                
                 except Exception as e:
-                    st.error(f"分析时出错：{str(e)}")
-                    st.info("提示：请确保报表格式正确，包含月份列")
+                    st.error(f"数据分析时出错：{str(e)}")
+                    st.info("💡 建议：确保报表格式符合标准财务报表格式")
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
-            st.info("请联系管理员确认报表是否已上传")
+            st.markdown("""
+                <div class="warning-message">
+                    <h4>🔍 找不到报表？</h4>
+                    <p><strong>可能的原因：</strong></p>
+                    <ul>
+                        <li>管理员尚未上传包含该门店的报表文件</li>
+                        <li>报表中的Sheet名称与门店名称不匹配</li>
+                        <li>报表文件正在更新中</li>
+                    </ul>
+                    <p><strong>解决方案：</strong></p>
+                    <ul>
+                        <li>联系管理员确认报表是否已上传</li>
+                        <li>确认门店名称是否正确</li>
+                        <li>稍后重试或重新登录</li>
+                    </ul>
+                </div>
+            """, unsafe_allow_html=True)
 
 # 页脚
 st.divider()
 st.markdown("""
-    <div style="text-align: center; color: #888; font-size: 0.8rem;">
-        门店报表查询系统 v4.0 - 数据持久化增强版 | 技术支持：IT部门
+    <div style="text-align: center; color: #888; font-size: 0.8rem; padding: 1rem;">
+        <p>🏪 门店报表查询系统 v4.0 - 企业级版本</p>
+        <p>💡 支持70+门店 | 🔒 权限分离 | 💾 数据持久化 | 📊 智能分析</p>
+        <p>技术支持：IT部门 | 建议使用Chrome浏览器访问</p>
     </div>
 """, unsafe_allow_html=True)
