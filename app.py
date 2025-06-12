@@ -397,15 +397,188 @@ else:
                 )
             
             # 简单的数据分析（可选）
-            if st.checkbox("📊 显示基础统计"):
+            if st.checkbox("📊 显示数据分析和统计"):
                 try:
-                    # 找出数值列
-                    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-                    if len(numeric_cols) > 0:
-                        st.write("### 数值列统计")
-                        st.dataframe(df[numeric_cols].describe())
-                except:
-                    st.info("无法生成统计信息")
+                    # 分析报表结构
+                    st.write("### 财务指标分析")
+                    
+                    # 查找关键财务指标
+                    first_col = df.columns[0] if len(df.columns) > 0 else None
+                    
+                    if first_col:
+                        # 查找特定指标行
+                        gross_profit_row = None  # 毛利-线上
+                        net_profit_row = None    # 净利润
+                        receivable_row = None    # 应收-未收额
+                        
+                        for idx, row in df.iterrows():
+                            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+                            if "三. 毛利-线上" in row_name or "毛利-线上" in row_name:
+                                gross_profit_row = idx
+                            elif "五. 净利润" in row_name or "净利润" in row_name:
+                                net_profit_row = idx
+                            elif "应收-未收额" in row_name or "应收未收" in row_name:
+                                receivable_row = idx
+                        
+                        # 创建关键指标统计
+                        key_metrics = []
+                        
+                        # 统计毛利-线上
+                        if gross_profit_row is not None:
+                            row_data = df.iloc[gross_profit_row]
+                            total = 0
+                            monthly_values = {}
+                            
+                            for col in df.columns[1:]:
+                                col_str = str(col)
+                                try:
+                                    val = row_data[col]
+                                    if pd.notna(val) and str(val).replace('.', '').replace('-', '').replace(',', '').isdigit():
+                                        num_val = float(str(val).replace(',', ''))
+                                        # 识别月份
+                                        for month in ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']:
+                                            if month in col_str:
+                                                if month not in monthly_values:
+                                                    monthly_values[month] = 0
+                                                monthly_values[month] += num_val
+                                                break
+                                        if '合计' not in col_str.lower():
+                                            total += num_val
+                                except:
+                                    pass
+                            
+                            key_metrics.append({
+                                '指标': '三. 毛利-线上',
+                                '总计': f"¥{total:,.2f}",
+                                '月度明细': monthly_values
+                            })
+                        
+                        # 统计净利润
+                        if net_profit_row is not None:
+                            row_data = df.iloc[net_profit_row]
+                            total = 0
+                            
+                            for col in df.columns[1:]:
+                                col_str = str(col)
+                                if '合计' not in col_str.lower():
+                                    try:
+                                        val = row_data[col]
+                                        if pd.notna(val) and str(val).replace('.', '').replace('-', '').replace(',', '').isdigit():
+                                            total += float(str(val).replace(',', ''))
+                                    except:
+                                        pass
+                            
+                            key_metrics.append({
+                                '指标': '五. 净利润',
+                                '总计': f"¥{total:,.2f}",
+                                '月度明细': None
+                            })
+                        
+                        # 查找应收-未收额（在合计列）
+                        if receivable_row is not None:
+                            row_data = df.iloc[receivable_row]
+                            for col in df.columns[1:]:
+                                if '合计' in str(col).lower():
+                                    try:
+                                        val = row_data[col]
+                                        if pd.notna(val) and str(val).replace('.', '').replace('-', '').replace(',', '').isdigit():
+                                            receivable_amount = float(str(val).replace(',', ''))
+                                            key_metrics.append({
+                                                '指标': '应收-未收额',
+                                                '总计': f"¥{receivable_amount:,.2f}",
+                                                '月度明细': None
+                                            })
+                                            break
+                                    except:
+                                        pass
+                        
+                        # 显示关键指标
+                        if key_metrics:
+                            st.write("#### 🎯 关键财务指标")
+                            
+                            # 显示指标卡片
+                            cols = st.columns(len(key_metrics))
+                            for i, metric in enumerate(key_metrics):
+                                with cols[i]:
+                                    if '应收' in metric['指标']:
+                                        st.metric(metric['指标'], metric['总计'], delta="待收款", delta_color="inverse")
+                                    else:
+                                        st.metric(metric['指标'], metric['总计'])
+                            
+                            # 显示月度明细（如果有）
+                            for metric in key_metrics:
+                                if metric.get('月度明细'):
+                                    with st.expander(f"{metric['指标']} - 月度明细"):
+                                        monthly_df = pd.DataFrame(
+                                            list(metric['月度明细'].items()),
+                                            columns=['月份', '金额']
+                                        )
+                                        monthly_df['金额'] = monthly_df['金额'].apply(lambda x: f"¥{x:,.2f}")
+                                        st.dataframe(monthly_df, use_container_width=True)
+                        
+                        # 净利率计算
+                        if gross_profit_row is not None and net_profit_row is not None:
+                            try:
+                                gp_total = 0
+                                np_total = 0
+                                
+                                for col in df.columns[1:]:
+                                    if '合计' not in str(col).lower():
+                                        # 毛利
+                                        val = df.iloc[gross_profit_row][col]
+                                        if pd.notna(val) and str(val).replace('.', '').replace('-', '').replace(',', '').isdigit():
+                                            gp_total += float(str(val).replace(',', ''))
+                                        
+                                        # 净利润
+                                        val = df.iloc[net_profit_row][col]
+                                        if pd.notna(val) and str(val).replace('.', '').replace('-', '').replace(',', '').isdigit():
+                                            np_total += float(str(val).replace(',', ''))
+                                
+                                if gp_total > 0:
+                                    profit_margin = (np_total / gp_total) * 100
+                                    st.info(f"💹 净利率：{profit_margin:.1f}%")
+                            except:
+                                pass
+                    
+                    st.divider()
+                    
+                    # 通用数值列统计
+                    st.write("### 数值列统计")
+                    
+                    # 识别数值列（排除第一列）
+                    numeric_data = {}
+                    
+                    for col in df.columns[1:]:
+                        try:
+                            # 尝试转换为数值
+                            numeric_col = pd.to_numeric(df[col], errors='coerce')
+                            # 如果超过一半的值是数字，认为是数值列
+                            if numeric_col.notna().sum() > len(df) / 2:
+                                # 获取更友好的列名
+                                col_name = str(col).replace('Unnamed:', '列')
+                                if '\n' in col_name:
+                                    col_name = col_name.replace('\n', '_')
+                                
+                                numeric_data[col_name] = {
+                                    '计数': numeric_col.count(),
+                                    '总和': numeric_col.sum(),
+                                    '平均值': numeric_col.mean(),
+                                    '最小值': numeric_col.min(),
+                                    '最大值': numeric_col.max()
+                                }
+                        except:
+                            pass
+                    
+                    if numeric_data:
+                        stats_df = pd.DataFrame(numeric_data).T
+                        stats_df = stats_df.round(2)
+                        st.dataframe(stats_df, use_container_width=True)
+                    else:
+                        st.info("未找到可统计的数值列")
+                        
+                except Exception as e:
+                    st.error(f"分析时出错：{str(e)}")
+                    st.info("提示：请确保报表格式正确")
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
