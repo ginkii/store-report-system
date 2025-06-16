@@ -583,10 +583,6 @@ else:
                                     <p style="margin: 0;">应收未收额为零，账目平衡</p>
                                 </div>
                             ''', unsafe_allow_html=True)
-                    
-                    # 显示备注信息
-                    if 'note' in data:
-                        st.info(f"💡 {data['note']}")
                 
                 else:
                     st.warning("⚠️ 未找到应收-未收额数据")
