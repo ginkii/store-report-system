@@ -530,7 +530,6 @@ else:
                 selected_sheet = st.selectbox("选择报表", matching_sheets)
             else:
                 selected_sheet = matching_sheets[0]
-                st.info(f"📊 已找到报表：{selected_sheet}")
             
             df = reports_data[selected_sheet]
             
@@ -543,7 +542,6 @@ else:
                 # 如果第一行只有少数非空值，可能是门店名称，跳过它
                 if non_empty_count <= 2 and len(df) > 1:
                     df = df.iloc[1:].reset_index(drop=True)
-                    st.info("📌 已自动跳过门店名称行，使用月份行作为表头")
             
             # 应收-未收额看板
             st.subheader("💰 应收-未收额")
