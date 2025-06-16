@@ -256,15 +256,38 @@ def save_reports_to_sheets(reports_dict, gc):
         
         for store_name, df in reports_dict.items():
             try:
+                # 先尝试直接转换
                 json_data = df.to_json(orient='records', force_ascii=False)
-                if len(json_data) > 45000:
-                    json_data = df.head(100).to_json(orient='records', force_ascii=False)
-                    store_name += " (前100行)"
                 
-                all_data.append([store_name, json_data, len(df), len(df.columns), current_time])
+                # 检查JSON数据长度
+                if len(json_data) > 45000:
+                    # 如果数据太大，只保存前100行
+                    json_data = df.head(100).to_json(orient='records', force_ascii=False)
+                    store_name_updated = f"{store_name} (前100行)"
+                else:
+                    store_name_updated = store_name
+                
+                all_data.append([store_name_updated, json_data, len(df), len(df.columns), current_time])
             except Exception as e:
-                st.warning(f"处理 {store_name} 时出错: {str(e)}")
-                continue
+                # 如果转换失败，尝试清理数据后再转换
+                try:
+                    # 清理数据：将所有值转换为字符串，避免特殊类型导致的问题
+                    df_cleaned = df.copy()
+                    for col in df_cleaned.columns:
+                        df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
+                    
+                    json_data = df_cleaned.to_json(orient='records', force_ascii=False)
+                    
+                    if len(json_data) > 45000:
+                        json_data = df_cleaned.head(100).to_json(orient='records', force_ascii=False)
+                        store_name_updated = f"{store_name} (前100行)"
+                    else:
+                        store_name_updated = store_name
+                    
+                    all_data.append([store_name_updated, json_data, len(df), len(df.columns), current_time])
+                except Exception as e2:
+                    st.warning(f"处理 {store_name} 时出错: {str(e)} | {str(e2)}")
+                    continue
         
         if len(all_data) > 1:
             worksheet.update('A1', all_data)
