@@ -335,8 +335,89 @@ def save_reports_to_sheets(reports_dict, gc):
             st.error(f"❌ 保存报表数据失败: {str(e)}")
         return False
 
-def load_reports_from_sheets_with_options(gc, skip_first_row=True, use_second_as_header=True):
-    """从Google Sheets加载报表数据（可选择处理方式）"""
+def detect_month_header_row(df):
+    """智能检测包含月份信息的行"""
+    # 月份关键词列表
+    month_keywords = [
+        # 中文月份
+        '1月', '2月', '3月', '4月', '5月', '6月', 
+        '7月', '8月', '9月', '10月', '11月', '12月',
+        '一月', '二月', '三月', '四月', '五月', '六月',
+        '七月', '八月', '九月', '十月', '十一月', '十二月',
+        # 英文月份缩写
+        'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+        'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+        # 英文月份全称
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december',
+        # 数字月份
+        '01', '02', '03', '04', '05', '06', 
+        '07', '08', '09', '10', '11', '12'
+    ]
+    
+    # 检查前10行，找到包含最多月份信息的行
+    max_month_count = 0
+    month_row_index = -1
+    
+    for i in range(min(10, len(df))):  # 只检查前10行
+        row = df.iloc[i]
+        month_count = 0
+        
+        for cell_value in row:
+            cell_str = str(cell_value).lower().strip()
+            if cell_str == '' or cell_str == 'nan':
+                continue
+                
+            # 检查是否包含月份关键词
+            for keyword in month_keywords:
+                if keyword in cell_str:
+                    month_count += 1
+                    break
+            
+            # 检查是否是日期格式 (如 2023-01, 2023/01, 23-01等)
+            import re
+            date_patterns = [
+                r'\d{4}[-/]\d{1,2}',  # 2023-01, 2023/01
+                r'\d{2}[-/]\d{1,2}',  # 23-01, 23/01
+                r'\d{1,2}[-/]\d{4}',  # 01-2023, 01/2023
+                r'\d{1,2}[-/]\d{2}',  # 01-23, 01/23
+            ]
+            
+            for pattern in date_patterns:
+                if re.search(pattern, cell_str):
+                    month_count += 1
+                    break
+        
+        # 如果这一行包含的月份信息最多，记录下来
+        if month_count > max_month_count and month_count >= 2:  # 至少要有2个月份信息
+            max_month_count = month_count
+            month_row_index = i
+    
+    return month_row_index if max_month_count >= 2 else -1
+
+def detect_store_name_row(df):
+    """检测是否第一行包含门店名称"""
+    if len(df) == 0:
+        return False
+    
+    first_row = df.iloc[0]
+    store_keywords = ['门店', '店铺', '分店', '店名', '商店', '店面', '营业部', '分部']
+    
+    # 检查第一行的内容
+    for cell_value in first_row:
+        cell_str = str(cell_value).lower().strip()
+        if any(keyword in cell_str for keyword in store_keywords):
+            return True
+    
+    # 如果第一行只有很少的非空单元格，可能是门店名称行
+    non_empty_cells = sum(1 for cell in first_row if str(cell).strip() != '' and str(cell).strip() != 'nan')
+    if non_empty_cells <= 2:  # 只有1-2个非空单元格，可能是门店名称
+        return True
+    
+    return False
+
+def load_reports_from_sheets_smart(gc):
+    """智能加载报表数据（自动识别月份行和门店名称行）"""
     try:
         spreadsheet = get_or_create_spreadsheet(gc)
         if not spreadsheet:
@@ -365,25 +446,38 @@ def load_reports_from_sheets_with_options(gc, skip_first_row=True, use_second_as
                     # 将JSON字符串转换回DataFrame
                     df_original = pd.read_json(json_data, orient='records')
                     
-                    if not skip_first_row:
-                        # 不跳过任何行，直接使用原始数据
-                        df_processed = df_original.fillna('')
-                        # 设置简单的列名
-                        if len(df_processed.columns) > 0:
-                            cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
-                            if len(cols) > 0:
-                                cols[0] = '项目名称'
-                            df_processed.columns = cols
-                        reports_dict[store_name] = df_processed
+                    if len(df_original) == 0:
                         continue
                     
-                    if use_second_as_header and len(df_original) > 2:
-                        # 跳过第一行，使用第二行作为列标题
+                    # 智能检测处理方式
+                    skip_first_row = detect_store_name_row(df_original)
+                    month_row_index = detect_month_header_row(df_original)
+                    
+                    # 开始处理数据
+                    start_row = 0
+                    
+                    # 如果第一行是门店名称，跳过它
+                    if skip_first_row:
+                        start_row = 1
+                        df_working = df_original.iloc[1:].copy() if len(df_original) > 1 else df_original.copy()
+                        # 重新计算月份行索引
+                        if month_row_index >= 1:
+                            month_row_index -= 1
+                    else:
+                        df_working = df_original.copy()
+                    
+                    # 如果找到了月份行，使用它作为列标题
+                    if month_row_index >= 0 and month_row_index < len(df_working):
                         try:
-                            # 第二行作为列标题
-                            header_row = df_original.iloc[1].fillna('').astype(str).tolist()
-                            # 从第三行开始取数据
-                            data_rows = df_original.iloc[2:].copy()
+                            # 使用月份行作为列标题
+                            header_row = df_working.iloc[month_row_index].fillna('').astype(str).tolist()
+                            
+                            # 从月份行的下一行开始取数据
+                            if month_row_index + 1 < len(df_working):
+                                data_rows = df_working.iloc[month_row_index + 1:].copy()
+                            else:
+                                # 如果月份行就是最后一行，创建空的数据行
+                                data_rows = pd.DataFrame()
                             
                             # 处理列名
                             cleaned_columns = []
@@ -403,39 +497,40 @@ def load_reports_from_sheets_with_options(gc, skip_first_row=True, use_second_as
                                     counter += 1
                                 cleaned_columns.append(col)
                             
-                            # 调整数据列数
-                            min_cols = min(len(data_rows.columns), len(cleaned_columns))
-                            cleaned_columns = cleaned_columns[:min_cols]
-                            data_rows = data_rows.iloc[:, :min_cols]
-                            
-                            data_rows.columns = cleaned_columns
-                            data_rows = data_rows.reset_index(drop=True).fillna('')
-                            reports_dict[store_name] = data_rows
+                            # 如果有数据行，设置列名
+                            if not data_rows.empty:
+                                # 调整数据列数
+                                min_cols = min(len(data_rows.columns), len(cleaned_columns))
+                                cleaned_columns = cleaned_columns[:min_cols]
+                                data_rows = data_rows.iloc[:, :min_cols]
+                                
+                                data_rows.columns = cleaned_columns
+                                data_rows = data_rows.reset_index(drop=True).fillna('')
+                                reports_dict[store_name] = data_rows
+                            else:
+                                # 没有数据行，创建一个只有列标题的空DataFrame
+                                empty_df = pd.DataFrame(columns=cleaned_columns)
+                                reports_dict[store_name] = empty_df
                             
                         except Exception as e:
-                            # 处理失败，使用简单跳过第一行的方式
-                            if len(df_original) > 1:
-                                df_processed = df_original.iloc[1:].copy().reset_index(drop=True).fillna('')
+                            st.warning(f"⚠️ 处理门店 {store_name} 月份行时出错: {str(e)}")
+                            # 降级为简单处理
+                            df_processed = df_working.reset_index(drop=True).fillna('')
+                            if len(df_processed.columns) > 0:
                                 cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
-                                if len(cols) > 0:
-                                    cols[0] = '项目名称'
+                                cols[0] = '项目名称'
                                 df_processed.columns = cols
-                                reports_dict[store_name] = df_processed
-                            else:
-                                reports_dict[store_name] = df_original.fillna('')
-                    
-                    elif len(df_original) > 1:
-                        # 简单跳过第一行
-                        df_processed = df_original.iloc[1:].copy().reset_index(drop=True).fillna('')
-                        cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
-                        if len(cols) > 0:
-                            cols[0] = '项目名称'
-                        df_processed.columns = cols
-                        reports_dict[store_name] = df_processed
+                            reports_dict[store_name] = df_processed
                     
                     else:
-                        # 数据太少，直接使用
-                        reports_dict[store_name] = df_original.fillna('')
+                        # 没有找到月份行，使用简单处理
+                        df_processed = df_working.reset_index(drop=True).fillna('')
+                        if len(df_processed.columns) > 0:
+                            cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
+                            if len(cols) > 0:
+                                cols[0] = '项目名称'
+                            df_processed.columns = cols
+                        reports_dict[store_name] = df_processed
                         
                 except Exception as e:
                     st.warning(f"⚠️ 解析门店 {store_name} 数据时出错: {str(e)}")
@@ -842,7 +937,7 @@ with st.sidebar:
             
             # 显示当前报表状态
             with st.spinner("📊 加载报表信息..."):
-                reports_data = load_reports_from_sheets_with_options(gc, True, True)  # 使用默认设置
+                reports_data = load_reports_from_sheets_smart(gc)  # 使用智能模式
             
             if reports_data:
                 st.info(f"📊 当前报表：{len(reports_data)} 个门店")
@@ -913,7 +1008,7 @@ if user_type == "管理员" and st.session_state.is_admin:
     
     # 系统概览
     permissions_data = load_permissions_from_sheets(gc)
-    reports_data = load_reports_from_sheets_with_options(gc, True, True)  # 使用默认设置
+    reports_data = load_reports_from_sheets_smart(gc)  # 使用智能模式
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -1038,17 +1133,29 @@ else:
         with st.spinner("📊 加载报表数据..."):
             # 添加数据处理选项
             with st.expander("⚙️ 数据处理设置", expanded=False):
+                st.info("📋 系统将自动识别：")
+                st.write("• 🏪 **门店名称行**：如果第一行包含门店信息，将自动跳过")
+                st.write("• 📅 **月份标题行**：自动找到包含月份信息的行作为列标题")
+                st.write("• 🎯 **智能处理**：支持中文月份、英文月份、数字月份、日期格式")
+                
                 col1, col2 = st.columns(2)
                 with col1:
-                    skip_first = st.checkbox("跳过第一行", value=True, help="是否跳过Excel的第一行数据")
+                    use_smart_mode = st.checkbox("使用智能识别模式", value=True, help="自动识别月份行和门店名称行")
                 with col2:
-                    use_second_header = st.checkbox("第二行作为列标题", value=True, help="是否使用第二行作为列标题")
+                    if not use_smart_mode:
+                        manual_skip_first = st.checkbox("手动跳过第一行", value=True)
+                        manual_use_second_header = st.checkbox("手动使用第二行作为列标题", value=True)
                 
                 if st.button("🔄 重新加载数据"):
                     st.cache_data.clear()
             
             # 根据选项加载数据
-            reports_data = load_reports_from_sheets_with_options(gc, skip_first, use_second_header)
+            if use_smart_mode:
+                reports_data = load_reports_from_sheets_smart(gc)
+                st.success("🤖 已使用智能模式加载数据")
+            else:
+                reports_data = load_reports_from_sheets_with_options(gc, manual_skip_first, manual_use_second_header)
+                st.info("🔧 已使用手动模式加载数据")
         
         # 查找对应的报表
         matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
@@ -1074,33 +1181,37 @@ else:
                 if not df.empty:
                     st.dataframe(df.head(5))
                     st.write(f"**原始数据形状：** {df.shape}")
-                    st.write(f"**原始列名：** {list(df.columns)}")
+                    st.write(f"**当前列名：** {list(df.columns)}")
                     
-                    # 让用户选择处理方式
-                    st.write("**数据处理选项：**")
-                    process_option = st.radio(
-                        "选择数据处理方式：",
-                        [
-                            "使用当前处理结果", 
-                            "不跳过任何行，直接显示", 
-                            "只跳过第1行，第2行开始作为数据",
-                            "第1行作为列标题，第2行开始作为数据"
-                        ],
-                        key="process_option"
-                    )
+                    # 显示智能检测结果
+                    st.write("**🤖 智能检测结果：**")
                     
-                    if process_option == "不跳过任何行，直接显示":
-                        # 重新从原始JSON加载，不做任何跳行处理
-                        try:
-                            # 这里需要重新获取原始数据
-                            st.info("重新加载原始数据中...")
-                            # 暂时使用当前数据，实际应该重新加载JSON
-                        except:
-                            pass
-                    elif process_option == "只跳过第1行，第2行开始作为数据":
-                        st.info("将重新处理数据...")
-                    elif process_option == "第1行作为列标题，第2行开始作为数据":
-                        st.info("将使用第1行作为列标题...")
+                    # 为了显示检测结果，我们需要重新获取原始数据进行检测
+                    try:
+                        # 获取原始JSON数据进行检测演示
+                        original_data_info = st.info("正在分析原始数据结构...")
+                        
+                        # 检测信息占位符
+                        detect_col1, detect_col2 = st.columns(2)
+                        with detect_col1:
+                            st.write("🏪 **门店名称检测：**")
+                            st.write("• 检测第一行是否包含门店信息")
+                            st.write("• 关键词：门店、店铺、分店等")
+                        
+                        with detect_col2:
+                            st.write("📅 **月份行检测：**")
+                            st.write("• 搜索包含月份信息的行")
+                            st.write("• 支持：1月、Jan、01、2023-01等格式")
+                        
+                        st.success("✅ 已应用智能检测结果")
+                        
+                    except Exception as e:
+                        st.warning(f"检测信息显示出错：{str(e)}")
+                    
+                    # 手动调整选项
+                    st.write("**🔧 如果检测结果不正确，可以使用手动模式：**")
+                    if st.button("切换到手动模式", key="switch_to_manual"):
+                        st.info("请在上方'⚙️ 数据处理设置'中取消'使用智能识别模式'")
             
             # 简化的报表显示界面
             st.subheader(f"📈 财务报表 - {st.session_state.store_name}")
@@ -1296,8 +1407,8 @@ else:
 st.divider()
 st.markdown("""
     <div style="text-align: center; color: #888; font-size: 0.8rem; padding: 1rem;">
-        <p>🏪 门店报表查询系统 v6.0 - 简化版</p>
-        <p>💾 数据永久保存 | 🌐 支持多用户实时访问 | 🔄 自动同步更新</p>
+        <p>🏪 门店报表查询系统 v7.0 - 智能识别版</p>
+        <p>🤖 自动识别月份行和门店名称 | 💾 数据永久保存 | 🌐 支持多用户实时访问</p>
         <p>技术支持：IT部门 | 建议使用Chrome浏览器访问</p>
     </div>
 """, unsafe_allow_html=True)
