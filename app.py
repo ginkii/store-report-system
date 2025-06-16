@@ -243,7 +243,7 @@ def load_permissions_from_sheets(gc):
         return None
 
 def save_reports_to_sheets(reports_dict, gc):
-    """保存报表数据"""
+    """保存报表数据 - 支持大文件完整保存"""
     try:
         spreadsheet = get_or_create_spreadsheet(gc)
         worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME)
@@ -252,45 +252,63 @@ def save_reports_to_sheets(reports_dict, gc):
         time.sleep(1)
         
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        all_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间']]
+        all_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间', '分片序号', '总分片数']]
         
         for store_name, df in reports_dict.items():
             try:
-                # 先尝试直接转换
-                json_data = df.to_json(orient='records', force_ascii=False)
+                # 清理数据
+                df_cleaned = df.copy()
+                for col in df_cleaned.columns:
+                    df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
                 
-                # 检查JSON数据长度
-                if len(json_data) > 45000:
-                    # 如果数据太大，只保存前100行
-                    json_data = df.head(100).to_json(orient='records', force_ascii=False)
-                    store_name_updated = f"{store_name} (前100行)"
+                # 转换为JSON
+                json_data = df_cleaned.to_json(orient='records', force_ascii=False)
+                
+                # 检查是否需要分片（每片最大40000字符）
+                max_chunk_size = 40000
+                if len(json_data) <= max_chunk_size:
+                    # 不需要分片
+                    all_data.append([store_name, json_data, len(df), len(df.columns), current_time, "1", "1"])
                 else:
-                    store_name_updated = store_name
+                    # 需要分片存储
+                    chunks = []
+                    chunk_size = max_chunk_size
+                    
+                    # 将JSON数据分割成多个片段
+                    for i in range(0, len(json_data), chunk_size):
+                        chunks.append(json_data[i:i + chunk_size])
+                    
+                    total_chunks = len(chunks)
+                    
+                    # 保存每个分片
+                    for idx, chunk in enumerate(chunks):
+                        chunk_name = f"{store_name}_分片{idx+1}/{total_chunks}"
+                        all_data.append([chunk_name, chunk, len(df), len(df.columns), current_time, str(idx+1), str(total_chunks)])
                 
-                all_data.append([store_name_updated, json_data, len(df), len(df.columns), current_time])
             except Exception as e:
-                # 如果转换失败，尝试清理数据后再转换
-                try:
-                    # 清理数据：将所有值转换为字符串，避免特殊类型导致的问题
-                    df_cleaned = df.copy()
-                    for col in df_cleaned.columns:
-                        df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
-                    
-                    json_data = df_cleaned.to_json(orient='records', force_ascii=False)
-                    
-                    if len(json_data) > 45000:
-                        json_data = df_cleaned.head(100).to_json(orient='records', force_ascii=False)
-                        store_name_updated = f"{store_name} (前100行)"
-                    else:
-                        store_name_updated = store_name
-                    
-                    all_data.append([store_name_updated, json_data, len(df), len(df.columns), current_time])
-                except Exception as e2:
-                    st.warning(f"处理 {store_name} 时出错: {str(e)} | {str(e2)}")
-                    continue
+                st.warning(f"处理 {store_name} 时出错: {str(e)}")
+                # 保存错误信息
+                error_data = {
+                    "error": str(e),
+                    "rows": len(df),
+                    "columns": len(df.columns)
+                }
+                all_data.append([f"{store_name}_错误", json.dumps(error_data, ensure_ascii=False), len(df), len(df.columns), current_time, "1", "1"])
+                continue
         
         if len(all_data) > 1:
-            worksheet.update('A1', all_data)
+            # 分批上传数据
+            batch_size = 20
+            for i in range(1, len(all_data), batch_size):
+                batch_data = all_data[i:i+batch_size]
+                if i == 1:
+                    # 第一批包含标题行
+                    worksheet.update(f'A1', [all_data[0]] + batch_data)
+                else:
+                    # 计算正确的行号
+                    row_num = i + 1
+                    worksheet.update(f'A{row_num}', batch_data)
+                time.sleep(0.5)
         
         return True
     except Exception as e:
