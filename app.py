@@ -81,43 +81,109 @@ def analyze_receivable_data(df):
     if len(df.columns) == 0 or len(df) == 0:
         return result
     
-    # 目标关键词
-    keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收未收', '应收款', '应收账款', '收支差额', '净收入', '盈亏', '利润', '结余']
+    # 扩展关键词列表
+    keywords = [
+        '应收-未收额', '应收未收额', '应收-未收', '应收未收', 
+        '应收款', '应收账款', '收支差额', '净收入', '盈亏', 
+        '利润', '结余', '差额', '汇总金额', '总收支',
+        '收支合计', '最终结果', '应收应付', '净利润'
+    ]
     
-    # 查找合计列
+    # 查找合计列 - 改进策略
     total_cols = []
+    
+    # 1. 优先查找明确包含"合计"等关键词的列
     for col in df.columns[1:]:
-        if any(word in str(col).lower() for word in ['合计', '总计', '汇总', 'total']):
+        col_str = str(col).lower()
+        if any(word in col_str for word in ['合计', '总计', '汇总', '小计', 'total', 'sum']):
             total_cols.append(col)
     
+    # 2. 如果没找到，查找最后几列的数值列
     if not total_cols:
-        total_cols = df.columns[-3:]  # 取最后3列
+        for col in reversed(df.columns[-5:]):  # 检查最后5列
+            if col == df.columns[0]:  # 跳过第一列
+                continue
+            try:
+                # 检查该列是否包含数值数据
+                non_null = df[col].dropna()
+                if len(non_null) > 0:
+                    numeric_count = 0
+                    for val in non_null.head(5):  # 检查前5个值
+                        val_str = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                        if val_str.replace('.', '').replace('-', '').replace('(', '').replace(')', '').isdigit():
+                            numeric_count += 1
+                    
+                    if numeric_count >= 2:  # 至少2个数值
+                        total_cols.append(col)
+            except:
+                continue
     
-    # 查找目标行
+    # 3. 如果还没找到，使用所有非第一列的列
+    if not total_cols:
+        total_cols = [col for col in df.columns[1:] if col != df.columns[0]]
+    
+    # 在合计列中查找目标行
     for col in total_cols:
         for idx, row in df.iterrows():
-            row_name = str(row[df.columns[0]]) if pd.notna(row[df.columns[0]]) else ""
-            
-            for keyword in keywords:
-                if keyword in row_name:
-                    try:
-                        val = row[col]
-                        if pd.notna(val):
-                            cleaned = str(val).replace(',', '').replace('¥', '').strip()
-                            if cleaned.startswith('(') and cleaned.endswith(')'):
-                                cleaned = '-' + cleaned[1:-1]
-                            
+            try:
+                row_name = str(row[df.columns[0]]) if pd.notna(row[df.columns[0]]) else ""
+                
+                if not row_name.strip():
+                    continue
+                
+                # 检查是否匹配关键词
+                matched = False
+                matched_keyword = ""
+                
+                # 精确匹配
+                for keyword in keywords:
+                    if keyword in row_name:
+                        matched = True
+                        matched_keyword = keyword
+                        break
+                
+                # 模糊匹配
+                if not matched:
+                    clean_name = row_name.replace(' ', '').replace('-', '').replace('_', '')
+                    for keyword in keywords:
+                        clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '')
+                        if clean_keyword in clean_name:
+                            matched = True
+                            matched_keyword = keyword
+                            break
+                
+                if matched:
+                    val = row[col]
+                    if pd.notna(val) and str(val).strip() not in ['', 'None', 'nan']:
+                        # 清理数值
+                        cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                        
+                        # 处理括号表示的负数
+                        if cleaned.startswith('(') and cleaned.endswith(')'):
+                            cleaned = '-' + cleaned[1:-1]
+                        
+                        try:
                             amount = float(cleaned)
                             if amount != 0:
                                 result['应收-未收额'] = {
                                     'amount': amount,
                                     'column_name': str(col),
                                     'row_name': row_name,
-                                    'row_index': idx
+                                    'row_index': idx,
+                                    'matched_keyword': matched_keyword
                                 }
                                 return result
-                    except:
-                        continue
+                        except ValueError:
+                            continue
+            except Exception:
+                continue
+    
+    # 如果没找到，返回调试信息
+    result['debug_info'] = {
+        'total_columns_found': [str(col) for col in total_cols],
+        'all_columns': [str(col) for col in df.columns],
+        'total_rows': len(df)
+    }
     
     return result
 
@@ -237,28 +303,46 @@ def load_reports_from_sheets(gc):
                         header_row = df.iloc[1].fillna('').astype(str).tolist()
                         data_rows = df.iloc[2:].copy()
                         
-                        # 清理列名
+                        # 清理列名并处理重复
                         cols = []
                         for i, col in enumerate(header_row):
                             col = str(col).strip()
-                            if col == '' or col == 'nan':
+                            if col == '' or col == 'nan' or col == '0':
                                 col = f'列{i+1}' if i > 0 else '项目名称'
+                            
+                            # 处理重复列名
+                            original_col = col
+                            counter = 1
+                            while col in cols:
+                                col = f"{original_col}_{counter}"
+                                counter += 1
                             cols.append(col)
                         
-                        if len(data_rows.columns) == len(cols):
-                            data_rows.columns = cols
-                            data_rows = data_rows.reset_index(drop=True).fillna('')
-                            reports_dict[store_name] = data_rows
-                        else:
-                            reports_dict[store_name] = df.fillna('')
+                        # 确保列数匹配
+                        min_cols = min(len(data_rows.columns), len(cols))
+                        cols = cols[:min_cols]
+                        data_rows = data_rows.iloc[:, :min_cols]
+                        
+                        data_rows.columns = cols
+                        data_rows = data_rows.reset_index(drop=True).fillna('')
+                        reports_dict[store_name] = data_rows
                     else:
-                        reports_dict[store_name] = df.fillna('')
+                        # 处理少于3行的数据
+                        df_clean = df.fillna('')
+                        # 设置默认列名避免重复
+                        default_cols = []
+                        for i in range(len(df_clean.columns)):
+                            col_name = f'列{i+1}' if i > 0 else '项目名称'
+                            default_cols.append(col_name)
+                        df_clean.columns = default_cols
+                        reports_dict[store_name] = df_clean
                 except Exception as e:
                     st.warning(f"解析 {store_name} 数据失败: {str(e)}")
                     continue
         
         return reports_dict
-    except:
+    except Exception as e:
+        st.error(f"加载报表数据失败: {str(e)}")
         return {}
 
 def verify_user_permission(store_name, user_id, permissions_data):
@@ -500,9 +584,68 @@ else:
                 
                 else:
                     st.warning("⚠️ 未找到应收-未收额数据")
+                    
+                    # 提供详细的帮助信息
+                    with st.expander("🔍 数据查找帮助", expanded=True):
+                        st.markdown("""
+                        ### 📋 系统查找说明
+                        
+                        系统会在以下列中搜索财务数据：
+                        """)
+                        
+                        # 显示调试信息
+                        debug_info = analysis_results.get('debug_info', {})
+                        
+                        if debug_info.get('total_columns_found'):
+                            st.write("**🎯 已检查的列：**")
+                            for i, col in enumerate(debug_info['total_columns_found']):
+                                st.write(f"{i+1}. {col}")
+                        
+                        if debug_info.get('all_columns'):
+                            st.write("**📊 所有可用列：**")
+                            cols_text = "、".join(debug_info['all_columns'][:10])
+                            if len(debug_info['all_columns']) > 10:
+                                cols_text += f"...（共{len(debug_info['all_columns'])}列）"
+                            st.write(cols_text)
+                        
+                        st.markdown("""
+                        ### 🔍 支持的关键词
+                        
+                        系统会搜索包含以下关键词的行：
+                        - `应收-未收额` `应收未收额` `应收-未收` `应收未收`
+                        - `应收款` `应收账款` `收支差额` `净收入` 
+                        - `盈亏` `利润` `结余` `差额` `汇总金额`
+                        
+                        ### 💡 可能的原因
+                        
+                        1. **报表中没有相关行**：Excel文件可能缺少应收未收相关的计算行
+                        2. **关键词不匹配**：实际使用的名称可能与系统支持的不同
+                        3. **数据在其他列**：相关数据可能不在合计列中
+                        
+                        ### 🛠️ 建议解决方案
+                        
+                        1. **检查Excel文件**：确认是否有包含"应收"、"未收"、"结余"等关键词的行
+                        2. **添加标准行**：在Excel中添加名为"应收-未收额"的行
+                        3. **查看完整数据**：在下方数据表格中手动查找相关信息
+                        4. **联系技术支持**：如需要支持新的关键词，请联系IT部门
+                        """)
+                        
+                        # 显示前几行数据帮助用户了解结构
+                        if not df.empty:
+                            st.write("**📝 数据前5行预览：**")
+                            try:
+                                preview_df = df.head(5).copy()
+                                # 只显示前几列避免过宽
+                                max_cols = min(6, len(preview_df.columns))
+                                preview_df = preview_df.iloc[:, :max_cols]
+                                st.dataframe(preview_df)
+            
+                            except Exception as preview_error:
+                                st.write(f"预览数据时出错：{str(preview_error)}")
             
             except Exception as e:
                 st.error(f"❌ 分析数据时出错：{str(e)}")
+                st.info("系统将继续显示报表数据")
             
             st.divider()
             
@@ -511,22 +654,98 @@ else:
             
             search_term = st.text_input("🔍 搜索报表内容")
             
-            if search_term:
-                mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
-                filtered_df = df[mask]
-                st.info(f"找到 {len(filtered_df)} 条记录")
-            else:
-                filtered_df = df
-            
-            if len(filtered_df) > 0:
-                st.dataframe(filtered_df, use_container_width=True, height=400)
+            # 数据过滤
+            try:
+                if search_term:
+                    # 安全的搜索实现
+                    search_df = df.copy()
+                    # 确保所有数据都是字符串
+                    for col in search_df.columns:
+                        search_df[col] = search_df[col].astype(str).fillna('')
+                    
+                    mask = search_df.apply(
+                        lambda x: x.str.contains(search_term, case=False, na=False, regex=False)
+                    ).any(axis=1)
+                    filtered_df = df[mask]
+                    st.info(f"找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
+                else:
+                    filtered_df = df
                 
-                # 下载功能
-                col1, col2 = st.columns(2)
-                with col1:
+                # 数据统计
+                st.info(f"📊 数据统计：共 {len(filtered_df)} 条记录，{len(df.columns)} 列")
+                
+                # 显示数据表格
+                if len(filtered_df) > 0:
+                    # 清理数据以确保显示正常
+                    display_df = filtered_df.copy()
+                    
+                    # 确保列名唯一
+                    unique_columns = []
+                    for i, col in enumerate(display_df.columns):
+                        col_name = str(col)
+                        if col_name in unique_columns:
+                            col_name = f"{col_name}_{i}"
+                        unique_columns.append(col_name)
+                    display_df.columns = unique_columns
+                    
+                    # 清理数据内容
+                    for col in display_df.columns:
+                        display_df[col] = display_df[col].astype(str).fillna('')
+                    
+                    # 显示数据
+                    st.dataframe(display_df, use_container_width=True, height=400)
+                    
+                    # 数据详情
+                    with st.expander("📋 数据详情"):
+                        st.write(f"**数据行数：** {len(display_df)}")
+                        st.write(f"**数据列数：** {len(display_df.columns)}")
+                        st.write("**列名列表：**")
+                        for i, col in enumerate(display_df.columns):
+                            st.write(f"{i+1}. {col}")
+                
+                else:
+                    st.warning("没有找到符合条件的数据")
+                    
+            except Exception as e:
+                st.error(f"❌ 数据处理时出错：{str(e)}")
+                st.info("正在尝试显示原始数据...")
+                
+                # 备用显示方案
+                try:
+                    st.write("**原始数据信息：**")
+                    st.write(f"数据形状：{df.shape}")
+                    st.write(f"列名：{list(df.columns)}")
+                    
+                    if not df.empty:
+                        # 显示前几行
+                        sample_df = df.head(10).copy()
+                        # 重新设置列名避免冲突
+                        sample_df.columns = [f"列{i+1}" for i in range(len(sample_df.columns))]
+                        st.dataframe(sample_df)
+                except Exception as e2:
+                    st.error(f"❌ 显示原始数据也失败：{str(e2)}")
+                    st.write("请联系管理员检查数据格式")
+            
+            # 下载功能
+            st.subheader("📥 数据下载")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                try:
                     buffer = io.BytesIO()
+                    # 准备下载数据
+                    download_df = df.copy()
+                    # 确保列名唯一
+                    unique_cols = []
+                    for i, col in enumerate(download_df.columns):
+                        col_name = str(col)
+                        if col_name in unique_cols:
+                            col_name = f"{col_name}_{i}"
+                        unique_cols.append(col_name)
+                    download_df.columns = unique_cols
+                    
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df.to_excel(writer, index=False)
+                        download_df.to_excel(writer, index=False)
                     
                     st.download_button(
                         "📥 下载完整报表 (Excel)",
@@ -534,17 +753,31 @@ else:
                         f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                
-                with col2:
-                    csv = df.to_csv(index=False, encoding='utf-8-sig')
+                except Exception as e:
+                    st.error(f"Excel下载准备失败：{str(e)}")
+            
+            with col2:
+                try:
+                    # CSV下载
+                    csv_df = df.copy()
+                    # 处理列名
+                    unique_cols = []
+                    for i, col in enumerate(csv_df.columns):
+                        col_name = str(col)
+                        if col_name in unique_cols:
+                            col_name = f"{col_name}_{i}"
+                        unique_cols.append(col_name)
+                    csv_df.columns = unique_cols
+                    
+                    csv = csv_df.to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
                         "📥 下载CSV格式",
                         csv,
                         f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
                         "text/csv"
                     )
-            else:
-                st.warning("没有找到数据")
+                except Exception as e:
+                    st.error(f"CSV下载准备失败：{str(e)}")
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
