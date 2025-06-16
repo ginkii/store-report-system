@@ -727,12 +727,3 @@ else:
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
-
-# 页脚
-st.divider()
-st.markdown("""
-    <div style="text-align: center; color: #888; font-size: 0.8rem; padding: 1rem;">
-        <p>🏪 门店报表查询系统 v9.0 - 精准定位版</p>
-        <p>💾 云端数据存储 | 🎯 精准查找第69行应收-未收额</p>
-    </div>
-""", unsafe_allow_html=True)
