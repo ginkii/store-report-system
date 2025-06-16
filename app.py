@@ -600,8 +600,8 @@ else:
                             st.markdown(f'''
                                 <div class="receivable-positive">
                                     <h1 style="margin: 0; font-size: 3rem;">💳 ¥{amount:,.2f}</h1>
-                                    <h3 style="margin: 0.5rem 0;">门店应付款金额</h3>
-                                    <p style="margin: 0; font-size: 1rem;">金额为正数，表示门店需要向总部支付的款项</p>
+                                    <h3 style="margin: 0.5rem 0;">门店应付款</h3>
+                                    <p style="margin: 0; font-size: 1rem;">应收未收额为正数，表示门店需要向总部支付款项</p>
                                     <p style="margin: 0.5rem 0; font-size: 0.9rem; opacity: 0.8;">数据位置：第{data["actual_row_number"]}行</p>
                                 </div>
                             ''', unsafe_allow_html=True)
@@ -609,9 +609,9 @@ else:
                         elif amount < 0:
                             st.markdown(f'''
                                 <div class="receivable-negative">
-                                    <h1 style="margin: 0; font-size: 3rem;">💚 ¥{abs(amount):,.2f}</h1>
-                                    <h3 style="margin: 0.5rem 0;">门店应收款金额</h3>
-                                    <p style="margin: 0; font-size: 1rem;">金额为负数，表示总部需要向门店支付的款项</p>
+                                    <h1 style="margin: 0; font-size: 3rem;">💚 ¥{amount:,.2f}</h1>
+                                    <h3 style="margin: 0.5rem 0;">总部应退款</h3>
+                                    <p style="margin: 0; font-size: 1rem;">应收未收额为负数，表示总部需要向门店退款</p>
                                     <p style="margin: 0.5rem 0; font-size: 0.9rem; opacity: 0.8;">数据位置：第{data["actual_row_number"]}行</p>
                                 </div>
                             ''', unsafe_allow_html=True)
