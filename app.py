@@ -636,14 +636,6 @@ else:
                     
                     # 显示数据
                     st.dataframe(display_df, use_container_width=True, height=400)
-                    
-                    # 数据详情
-                    with st.expander("📋 数据详情"):
-                        st.write(f"**数据行数：** {len(display_df)}")
-                        st.write(f"**数据列数：** {len(display_df.columns)}")
-                        st.write("**列名列表：**")
-                        for i, col in enumerate(display_df.columns):
-                            st.write(f"{i+1}. {col}")
                 
                 else:
                     st.warning("没有找到符合条件的数据")
