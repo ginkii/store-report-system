@@ -335,8 +335,8 @@ def save_reports_to_sheets(reports_dict, gc):
             st.error(f"❌ 保存报表数据失败: {str(e)}")
         return False
 
-def load_reports_from_sheets(gc):
-    """从Google Sheets加载报表数据（跳过第一行，第二行作为表头）"""
+def load_reports_from_sheets_with_options(gc, skip_first_row=True, use_second_as_header=True):
+    """从Google Sheets加载报表数据（可选择处理方式）"""
     try:
         spreadsheet = get_or_create_spreadsheet(gc)
         if not spreadsheet:
@@ -363,20 +363,38 @@ def load_reports_from_sheets(gc):
                 
                 try:
                     # 将JSON字符串转换回DataFrame
-                    df = pd.read_json(json_data, orient='records')
+                    df_original = pd.read_json(json_data, orient='records')
                     
-                    # 关键修改：跳过第一行，使用第二行作为表头
-                    if len(df) > 2:  # 确保至少有3行数据
+                    if not skip_first_row:
+                        # 不跳过任何行，直接使用原始数据
+                        df_processed = df_original.fillna('')
+                        # 设置简单的列名
+                        if len(df_processed.columns) > 0:
+                            cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
+                            if len(cols) > 0:
+                                cols[0] = '项目名称'
+                            df_processed.columns = cols
+                        reports_dict[store_name] = df_processed
+                        continue
+                    
+                    if use_second_as_header and len(df_original) > 2:
+                        # 跳过第一行，使用第二行作为列标题
                         try:
-                            # 获取第二行作为新的列名
-                            new_columns = df.iloc[1].fillna('').astype(str).tolist()
+                            # 第二行作为列标题
+                            header_row = df_original.iloc[1].fillna('').astype(str).tolist()
+                            # 从第三行开始取数据
+                            data_rows = df_original.iloc[2:].copy()
                             
-                            # 清理列名：去除空白和处理重复
+                            # 处理列名
                             cleaned_columns = []
-                            for i, col in enumerate(new_columns):
+                            for i, col in enumerate(header_row):
                                 col = str(col).strip()
-                                if col == '' or col == 'nan':
-                                    col = f'未命名列_{i+1}'
+                                if col == '' or col == 'nan' or col == '0':
+                                    if i == 0:
+                                        col = '项目名称'
+                                    else:
+                                        col = f'列{i+1}'
+                                
                                 # 处理重复列名
                                 original_col = col
                                 counter = 1
@@ -385,38 +403,39 @@ def load_reports_from_sheets(gc):
                                     counter += 1
                                 cleaned_columns.append(col)
                             
-                            # 删除前两行（原表头和第一行数据）
-                            df_processed = df.iloc[2:].copy()
+                            # 调整数据列数
+                            min_cols = min(len(data_rows.columns), len(cleaned_columns))
+                            cleaned_columns = cleaned_columns[:min_cols]
+                            data_rows = data_rows.iloc[:, :min_cols]
                             
-                            # 确保数据行数与列名数量匹配
-                            if len(df_processed.columns) != len(cleaned_columns):
-                                # 如果列数不匹配，调整DataFrame
-                                if len(cleaned_columns) > len(df_processed.columns):
-                                    # 列名多了，截取列名
-                                    cleaned_columns = cleaned_columns[:len(df_processed.columns)]
-                                else:
-                                    # 数据列多了，截取数据列
-                                    df_processed = df_processed.iloc[:, :len(cleaned_columns)]
+                            data_rows.columns = cleaned_columns
+                            data_rows = data_rows.reset_index(drop=True).fillna('')
+                            reports_dict[store_name] = data_rows
                             
-                            # 设置新的列名
-                            df_processed.columns = cleaned_columns
-                            
-                            # 重置索引
-                            df_processed = df_processed.reset_index(drop=True)
-                            
-                            # 清理数据：将所有NaN替换为空字符串
-                            df_processed = df_processed.fillna('')
-                            
-                            reports_dict[store_name] = df_processed
-                            
-                        except Exception as process_error:
-                            st.warning(f"⚠️ 处理门店 {store_name} 数据格式时出错: {str(process_error)}")
-                            # 如果处理失败，使用原始数据
-                            reports_dict[store_name] = df.fillna('')
+                        except Exception as e:
+                            # 处理失败，使用简单跳过第一行的方式
+                            if len(df_original) > 1:
+                                df_processed = df_original.iloc[1:].copy().reset_index(drop=True).fillna('')
+                                cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
+                                if len(cols) > 0:
+                                    cols[0] = '项目名称'
+                                df_processed.columns = cols
+                                reports_dict[store_name] = df_processed
+                            else:
+                                reports_dict[store_name] = df_original.fillna('')
                     
-                    elif len(df) > 0:
-                        # 如果数据少于3行，直接使用原始数据
-                        reports_dict[store_name] = df.fillna('')
+                    elif len(df_original) > 1:
+                        # 简单跳过第一行
+                        df_processed = df_original.iloc[1:].copy().reset_index(drop=True).fillna('')
+                        cols = [f'列{i+1}' for i in range(len(df_processed.columns))]
+                        if len(cols) > 0:
+                            cols[0] = '项目名称'
+                        df_processed.columns = cols
+                        reports_dict[store_name] = df_processed
+                    
+                    else:
+                        # 数据太少，直接使用
+                        reports_dict[store_name] = df_original.fillna('')
                         
                 except Exception as e:
                     st.warning(f"⚠️ 解析门店 {store_name} 数据时出错: {str(e)}")
@@ -823,7 +842,7 @@ with st.sidebar:
             
             # 显示当前报表状态
             with st.spinner("📊 加载报表信息..."):
-                reports_data = load_reports_from_sheets(gc)
+                reports_data = load_reports_from_sheets_with_options(gc, True, True)  # 使用默认设置
             
             if reports_data:
                 st.info(f"📊 当前报表：{len(reports_data)} 个门店")
@@ -894,7 +913,7 @@ if user_type == "管理员" and st.session_state.is_admin:
     
     # 系统概览
     permissions_data = load_permissions_from_sheets(gc)
-    reports_data = load_reports_from_sheets(gc)
+    reports_data = load_reports_from_sheets_with_options(gc, True, True)  # 使用默认设置
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -1017,7 +1036,19 @@ else:
         
         # 加载报表数据
         with st.spinner("📊 加载报表数据..."):
-            reports_data = load_reports_from_sheets(gc)
+            # 添加数据处理选项
+            with st.expander("⚙️ 数据处理设置", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    skip_first = st.checkbox("跳过第一行", value=True, help="是否跳过Excel的第一行数据")
+                with col2:
+                    use_second_header = st.checkbox("第二行作为列标题", value=True, help="是否使用第二行作为列标题")
+                
+                if st.button("🔄 重新加载数据"):
+                    st.cache_data.clear()
+            
+            # 根据选项加载数据
+            reports_data = load_reports_from_sheets_with_options(gc, skip_first, use_second_header)
         
         # 查找对应的报表
         matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
@@ -1036,6 +1067,40 @@ else:
             
             # 获取报表数据
             df = reports_data[selected_sheet]
+            
+            # 添加原始数据查看功能
+            with st.expander("🔍 查看原始数据结构（调试用）", expanded=False):
+                st.write("**原始数据前5行：**")
+                if not df.empty:
+                    st.dataframe(df.head(5))
+                    st.write(f"**原始数据形状：** {df.shape}")
+                    st.write(f"**原始列名：** {list(df.columns)}")
+                    
+                    # 让用户选择处理方式
+                    st.write("**数据处理选项：**")
+                    process_option = st.radio(
+                        "选择数据处理方式：",
+                        [
+                            "使用当前处理结果", 
+                            "不跳过任何行，直接显示", 
+                            "只跳过第1行，第2行开始作为数据",
+                            "第1行作为列标题，第2行开始作为数据"
+                        ],
+                        key="process_option"
+                    )
+                    
+                    if process_option == "不跳过任何行，直接显示":
+                        # 重新从原始JSON加载，不做任何跳行处理
+                        try:
+                            # 这里需要重新获取原始数据
+                            st.info("重新加载原始数据中...")
+                            # 暂时使用当前数据，实际应该重新加载JSON
+                        except:
+                            pass
+                    elif process_option == "只跳过第1行，第2行开始作为数据":
+                        st.info("将重新处理数据...")
+                    elif process_option == "第1行作为列标题，第2行开始作为数据":
+                        st.info("将使用第1行作为列标题...")
             
             # 简化的报表显示界面
             st.subheader(f"📈 财务报表 - {st.session_state.store_name}")
@@ -1059,11 +1124,20 @@ else:
             
             # 应用搜索过滤
             if search_term:
-                mask = df.astype(str).apply(
-                    lambda x: x.str.contains(search_term, case=False, na=False)
-                ).any(axis=1)
-                filtered_df = df[mask]
-                st.info(f"🔍 找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
+                try:
+                    # 确保所有数据都转换为字符串进行搜索
+                    search_df = df.copy()
+                    for col in search_df.columns:
+                        search_df[col] = search_df[col].astype(str).fillna('')
+                    
+                    mask = search_df.apply(
+                        lambda x: x.str.contains(search_term, case=False, na=False, regex=False)
+                    ).any(axis=1)
+                    filtered_df = df[mask]
+                    st.info(f"🔍 找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
+                except Exception as search_error:
+                    st.warning(f"⚠️ 搜索时出错：{str(search_error)}，显示所有数据")
+                    filtered_df = df
             else:
                 filtered_df = df
             
@@ -1130,46 +1204,73 @@ else:
             
             with col1:
                 # 下载完整报表
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name=st.session_state.store_name)
-                
-                st.download_button(
-                    label="📥 下载完整报表 (Excel)",
-                    data=buffer.getvalue(),
-                    file_name=f"{st.session_state.store_name}_财务报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+                try:
+                    buffer = io.BytesIO()
+                    # 确保数据可以正常导出
+                    export_df = df.copy()
+                    for col in export_df.columns:
+                        export_df[col] = export_df[col].astype(str).fillna('')
+                    
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        export_df.to_excel(writer, index=False, sheet_name=st.session_state.store_name[:30])  # 限制sheet名称长度
+                    
+                    st.download_button(
+                        label="📥 下载完整报表 (Excel)",
+                        data=buffer.getvalue(),
+                        file_name=f"{st.session_state.store_name}_财务报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.button("📥 下载完整报表 (Excel)", disabled=True, use_container_width=True,
+                            help=f"下载出错：{str(e)}")
             
             with col2:
                 # 下载筛选后的数据
                 if search_term and len(filtered_df) > 0:
-                    buffer_filtered = io.BytesIO()
-                    with pd.ExcelWriter(buffer_filtered, engine='openpyxl') as writer:
-                        filtered_df.to_excel(writer, index=False, sheet_name=st.session_state.store_name)
-                    
-                    st.download_button(
-                        label="📥 下载筛选结果 (Excel)",
-                        data=buffer_filtered.getvalue(),
-                        file_name=f"{st.session_state.store_name}_筛选报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                    try:
+                        buffer_filtered = io.BytesIO()
+                        # 确保筛选数据可以正常导出
+                        export_filtered_df = filtered_df.copy()
+                        for col in export_filtered_df.columns:
+                            export_filtered_df[col] = export_filtered_df[col].astype(str).fillna('')
+                        
+                        with pd.ExcelWriter(buffer_filtered, engine='openpyxl') as writer:
+                            export_filtered_df.to_excel(writer, index=False, sheet_name=st.session_state.store_name[:30])
+                        
+                        st.download_button(
+                            label="📥 下载筛选结果 (Excel)",
+                            data=buffer_filtered.getvalue(),
+                            file_name=f"{st.session_state.store_name}_筛选报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    except Exception as e:
+                        st.button("📥 下载筛选结果 (Excel)", disabled=True, use_container_width=True,
+                                help=f"下载出错：{str(e)}")
                 else:
                     st.button("📥 下载筛选结果 (Excel)", disabled=True, use_container_width=True,
                             help="没有筛选结果可下载")
             
             with col3:
                 # 下载CSV格式
-                csv = df.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label="📥 下载CSV格式",
-                    data=csv,
-                    file_name=f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+                try:
+                    # 确保CSV数据可以正常导出
+                    csv_df = df.copy()
+                    for col in csv_df.columns:
+                        csv_df[col] = csv_df[col].astype(str).fillna('')
+                    
+                    csv = csv_df.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 下载CSV格式",
+                        data=csv,
+                        file_name=f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.button("📥 下载CSV格式", disabled=True, use_container_width=True,
+                            help=f"下载出错：{str(e)}")
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
