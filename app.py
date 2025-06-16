@@ -81,7 +81,17 @@ def analyze_receivable_data(df):
     if len(df.columns) == 0 or len(df) == 0:
         return result
     
-    # 查找第69行（索引68，因为索引从0开始）
+    # 检查第一行是否是门店名称（通常第一行只有第一个单元格有值）
+    first_row = df.iloc[0] if len(df) > 0 else None
+    if first_row is not None:
+        non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+        # 如果第一行只有1-2个非空值，可能是门店名称行
+        if non_empty_count <= 2:
+            # 跳过第一行，使用第二行作为新的第一行
+            df = df.iloc[1:].reset_index(drop=True)
+            result['skipped_store_name_row'] = True
+    
+    # 查找第69行（如果跳过了第一行，实际是原始数据的第70行）
     target_row_index = 68  # 第69行
     
     if len(df) > target_row_index:
@@ -281,10 +291,20 @@ def load_reports_from_sheets(gc):
                 json_data = row[1]
                 try:
                     df = pd.read_json(json_data, orient='records')
-                    # 跳过第一行，第二行作为表头
-                    if len(df) > 2:
-                        header_row = df.iloc[1].fillna('').astype(str).tolist()
-                        data_rows = df.iloc[2:].copy()
+                    
+                    # 检查第一行是否是门店名称
+                    if len(df) > 0:
+                        first_row = df.iloc[0]
+                        non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+                        
+                        # 如果第一行只有少数非空值，可能是门店名称，跳过它
+                        if non_empty_count <= 2 and len(df) > 1:
+                            df = df.iloc[1:]
+                    
+                    # 如果有足够的行，使用第二行作为表头
+                    if len(df) > 1:
+                        header_row = df.iloc[0].fillna('').astype(str).tolist()
+                        data_rows = df.iloc[1:].copy()
                         
                         # 清理列名并处理重复
                         cols = []
@@ -513,6 +533,17 @@ else:
                 st.info(f"📊 已找到报表：{selected_sheet}")
             
             df = reports_data[selected_sheet]
+            
+            # 检查并处理第一行是否为门店名称
+            original_df = df.copy()
+            if len(df) > 0:
+                first_row = df.iloc[0]
+                non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+                
+                # 如果第一行只有少数非空值，可能是门店名称，跳过它
+                if non_empty_count <= 2 and len(df) > 1:
+                    df = df.iloc[1:].reset_index(drop=True)
+                    st.info("📌 已自动跳过门店名称行，使用月份行作为表头")
             
             # 应收-未收额看板
             st.subheader("💰 应收-未收额")
