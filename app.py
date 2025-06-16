@@ -1,4 +1,150 @@
-import streamlit as st
+def analyze_receivable_data(df):
+    """分析应收未收额数据 - 智能识别合计列和应收未收额"""
+    analysis_results = {}
+    
+    if len(df.columns) == 0 or len(df) == 0:
+        return analysis_results
+    
+    first_col = df.columns[0]
+    
+    # 扩展目标关键词，支持更多格式
+    target_keywords = [
+        '应收-未收额', '应收未收额', '应收-未收', '应收 未收额',
+        '应收未收', '应收-未收金额', '应收未收金额', '未收金额',
+        '应收款', '应收账款', '应收余额', '收支差额', '净收入',
+        '盈亏', '利润', '净利润', '收支结余', '结余', '差额',
+        '总收支', '收支合计', '最终结果', '汇总金额', '应收应付'
+    ]
+    
+    # 智能查找合计列 - 多种策略
+    total_columns = []
+    
+    # 策略1: 明确包含"合计"、"总计"等关键词的列
+    for col in df.columns[1:]:  # 跳过第一列（通常是项目名称）
+        col_str = str(col).lower()
+        if any(keyword in col_str for keyword in ['合计', '总计', '合并', '汇总', '小计', '总和', '总额', 'total', 'sum']):
+            total_columns.append(col)
+    
+    # 策略2: 查找最后几列中的数值列（通常合计在最后）
+    if not total_columns:
+        for col in reversed(df.columns[-6:]):  # 检查最后6列
+            if col == first_col:  # 跳过第一列
+                continue
+            try:
+                non_null_values = df[col].dropna()
+                if len(non_null_values) > 0:
+                    # 尝试转换一些值看是否是数值
+                    test_values = non_null_values.head(10)
+                    numeric_count = 0
+                    for val in test_values:
+                        try:
+                            cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').replace('(', '').replace(')', '').strip()
+                            if cleaned.replace('.', '').replace('-', '').isdigit() or cleaned == '0':
+                                numeric_count += 1
+                        except:
+                            continue
+                    
+                    # 如果大部分值都是数字，认为是数值列
+                    if numeric_count >= len(test_values) * 0.5:  # 50%以上是数字
+                        total_columns.append(col)
+            except:
+                continue
+    
+    # 策略3: 如果还没找到，使用所有数值列（除第一列外）
+    if not total_columns:
+        for col in df.columns[1:]:
+            try:
+                pd.to_numeric(df[col], errors='coerce')
+                total_columns.append(col)
+            except:
+                continue
+    
+    # 调试信息
+    debug_info = {
+        'total_columns_found': [str(col) for col in total_columns],
+        'all_columns': [str(col) for col in df.columns],
+        'matches_found': []
+    }
+    
+    # 在每个可能的合计列中查找目标指标
+    for total_column in total_columns:
+        for idx, row in df.iterrows():
+            row_name = str(row[first_col]) if pd.notna(row[first_col]) else ""
+            
+            # 跳过空行
+            if not row_name.strip():
+                continue
+            
+            # 更宽松的匹配策略
+            matched = False
+            matched_keyword = ""
+            
+            # 精确匹配
+            for keyword in target_keywords:
+                if keyword in row_name:
+                    matched = True
+                    matched_keyword = keyword
+                    break
+            
+            # 模糊匹配 - 去除空格和特殊字符后匹配
+            if not matched:
+                clean_row_name = row_name.replace(' ', '').replace('-', '').replace('_', '').replace('（', '').replace('）', '').replace('(', '').replace(')', '')
+                for keyword in target_keywords:
+                    clean_keyword = keyword.replace(' ', '').replace('-', '').replace('_', '')
+                    if clean_keyword in clean_row_name:
+                        matched = True
+                        matched_keyword = keyword
+                        break
+            
+            # 记录匹配尝试
+            val = row[total_column] if total_column in row.index else None
+            debug_info['matches_found'].append({
+                'row_index': idx,
+                'row_name': row_name,
+                'column': str(total_column),
+                'value': str(val),
+                'matched': matched,
+                'keyword': matched_keyword if matched else '未匹配'
+            })
+            
+            if matched:
+                try:
+                    val = row[total_column]
+                    if pd.notna(val) and str(val).strip() != '' and str(val).lower() != 'none':
+                        # 更强的数据清理
+                        cleaned_val = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                        
+                        # 处理负数格式 (1200) -> -1200
+                        if cleaned_val.startswith('(') and cleaned_val.endswith(')'):
+                            cleaned_val = '-' + cleaned_val[1:-1]
+                        
+                        # 验证是否为数字
+                        try:
+                            amount = float(cleaned_val)
+                            
+                            # 只有非零值才记录
+                            if amount != 0:
+                                analysis_results['应收-未收额'] = {
+                                    'amount': amount,
+                                    'column_name': str(total_column),
+                                    'row_index': idx,
+                                    'row_name': row_name,
+                                    'is_negative': amount < 0,
+                                    'is_positive': amount > 0,
+                                    'matched_keyword': matched_keyword,
+                                    'debug_info': debug_info
+                                }
+                                # 找到第一个有效值就返回
+                                return analysis_results
+                        except ValueError:
+                            continue
+                except Exception as e:
+                    continue
+    
+    # 如果没有找到，返回调试信息
+    analysis_results['debug_info'] = debug_info
+    
+    return analysis_resultsimport streamlit as st
 import pandas as pd
 import io
 import json
@@ -71,6 +217,53 @@ st.markdown("""
         background-color: #f8f9fa;
         padding: 1rem;
         border-radius: 8px;
+        margin: 1rem 0;
+    }
+    .receivable-positive {
+        background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%);
+        color: #721c24;
+        padding: 2rem;
+        border-radius: 15px;
+        border: 3px solid #f093fb;
+        margin: 1rem 0;
+        text-align: center;
+        box-shadow: 0 8px 32px rgba(240, 147, 251, 0.3);
+    }
+    .receivable-negative {
+        background: linear-gradient(135deg, #a8edea 0%, #fed6e3 50%, #d299c2 100%);
+        color: #0c4128;
+        padding: 2rem;
+        border-radius: 15px;
+        border: 3px solid #48cab2;
+        margin: 1rem 0;
+        text-align: center;
+        box-shadow: 0 8px 32px rgba(72, 202, 178, 0.3);
+    }
+    .receivable-zero {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 50%, #4ec5d4 100%);
+        color: #2d1b69;
+        padding: 2rem;
+        border-radius: 15px;
+        border: 3px solid #667eea;
+        margin: 1rem 0;
+        text-align: center;
+        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
+    }
+    .dashboard-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        margin: 0.5rem 0;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
+    }
+    .explanation-box {
+        background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+        color: #0d47a1;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 4px solid #1976d2;
         margin: 1rem 0;
     }
     .setup-guide {
@@ -950,6 +1143,32 @@ with st.sidebar:
                             if j < len(cols):
                                 with cols[j]:
                                     st.write(f"• {store}")
+                    
+                    # 添加数据预览功能
+                    if st.checkbox("预览门店报表数据"):
+                        selected_preview_store = st.selectbox(
+                            "选择要预览的门店",
+                            stores,
+                            key="preview_store"
+                        )
+                        
+                        if selected_preview_store in reports_data:
+                            preview_df = reports_data[selected_preview_store]
+                            st.write(f"**{selected_preview_store} 数据预览：**")
+                            st.dataframe(preview_df.head(10))
+                            
+                            # 显示应收未收额分析
+                            try:
+                                analysis_results = analyze_receivable_data(preview_df)
+                                if '应收-未收额' in analysis_results:
+                                    data = analysis_results['应收-未收额']
+                                    amount = data['amount']
+                                    status = "门店应付款" if amount > 0 else "门店应收款" if amount < 0 else "收支平衡"
+                                    st.success(f"💰 应收未收额：¥{abs(amount):,.2f} ({status})")
+                                else:
+                                    st.info("未找到应收未收额数据")
+                            except Exception as e:
+                                st.warning(f"分析数据时出错：{str(e)}")
             
             st.divider()
             
@@ -1233,6 +1452,208 @@ else:
             
             st.markdown('</div>', unsafe_allow_html=True)
             
+            # 🆕 可视化看板 - 应收未收额分析
+            st.subheader("💰 财务概览看板")
+            
+            try:
+                analysis_results = analyze_receivable_data(df)
+                
+                if '应收-未收额' in analysis_results:
+                    data = analysis_results['应收-未收额']
+                    amount = data['amount']
+                    
+                    # 创建三列布局
+                    overview_col1, overview_col2, overview_col3 = st.columns([1, 2, 1])
+                    
+                    with overview_col2:
+                        # 根据金额正负显示不同样式和说明
+                        if amount > 0:
+                            # 正数 - 门店应付款
+                            st.markdown(f"""
+                                <div class="receivable-positive">
+                                    <h1 style="margin: 0; font-size: 3rem;">💳 ¥{amount:,.2f}</h1>
+                                    <h3 style="margin: 0.5rem 0; color: #721c24;">门店应付款金额</h3>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 1rem; opacity: 0.8;">
+                                        该金额为正数，表示门店需要向总部支付的款项
+                                    </p>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # 显示详细指标卡
+                            metric_col1, metric_col2, metric_col3 = st.columns(3)
+                            with metric_col1:
+                                st.markdown(f"""
+                                    <div class="dashboard-card">
+                                        <h4 style="margin: 0;">支付状态</h4>
+                                        <h2 style="margin: 0.5rem 0; color: #ffeb3b;">待支付</h2>
+                                        <p style="margin: 0; font-size: 0.9rem;">需要处理</p>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                            
+                            with metric_col2:
+                                st.markdown(f"""
+                                    <div class="dashboard-card">
+                                        <h4 style="margin: 0;">应付金额</h4>
+                                        <h2 style="margin: 0.5rem 0; color: #ff5722;">¥{amount:,.2f}</h2>
+                                        <p style="margin: 0; font-size: 0.9rem;">门店付款</p>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                            
+                            with metric_col3:
+                                st.markdown(f"""
+                                    <div class="dashboard-card">
+                                        <h4 style="margin: 0;">数据来源</h4>
+                                        <h2 style="margin: 0.5rem 0; color: #4caf50;">{data['column_name']}</h2>
+                                        <p style="margin: 0; font-size: 0.9rem;">第{data['row_index']+1}行</p>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                        
+                        elif amount < 0:
+                            # 负数 - 门店应收款
+                            st.markdown(f"""
+                                <div class="receivable-negative">
+                                    <h1 style="margin: 0; font-size: 3rem;">💚 ¥{abs(amount):,.2f}</h1>
+                                    <h3 style="margin: 0.5rem 0; color: #0c4128;">门店应收款金额</h3>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 1rem; opacity: 0.8;">
+                                        该金额为负数，表示总部需要向门店支付的款项
+                                    </p>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # 显示详细指标卡
+                            metric_col1, metric_col2, metric_col3 = st.columns(3)
+                            with metric_col1:
+                                st.markdown(f"""
+                                    <div class="dashboard-card">
+                                        <h4 style="margin: 0;">收款状态</h4>
+                                        <h2 style="margin: 0.5rem 0; color: #4caf50;">待收款</h2>
+                                        <p style="margin: 0; font-size: 0.9rem;">等待到账</p>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                            
+                            with metric_col2:
+                                st.markdown(f"""
+                                    <div class="dashboard-card">
+                                        <h4 style="margin: 0;">应收金额</h4>
+                                        <h2 style="margin: 0.5rem 0; color: #2196f3;">¥{abs(amount):,.2f}</h2>
+                                        <p style="margin: 0; font-size: 0.9rem;">门店收款</p>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                            
+                            with metric_col3:
+                                st.markdown(f"""
+                                    <div class="dashboard-card">
+                                        <h4 style="margin: 0;">数据来源</h4>
+                                        <h2 style="margin: 0.5rem 0; color: #4caf50;">{data['column_name']}</h2>
+                                        <p style="margin: 0; font-size: 0.9rem;">第{data['row_index']+1}行</p>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                        
+                        else:
+                            # 零金额
+                            st.markdown(f"""
+                                <div class="receivable-zero">
+                                    <h1 style="margin: 0; font-size: 3rem;">⚖️ ¥0.00</h1>
+                                    <h3 style="margin: 0.5rem 0; color: #2d1b69;">收支平衡</h3>
+                                    <p style="margin: 0.5rem 0 0 0; font-size: 1rem; opacity: 0.8;">
+                                        应收未收额为零，门店与总部账目平衡
+                                    </p>
+                                </div>
+                            """, unsafe_allow_html=True)
+                    
+                    # 详细说明和操作建议
+                    with st.expander("📋 详细说明与操作建议", expanded=False):
+                        st.markdown(f"""
+                        ### 💡 应收未收额说明
+                        
+                        **数据解读：**
+                        - **项目名称**：{data['row_name']}
+                        - **匹配关键词**：{data.get('matched_keyword', '应收-未收额')}
+                        - **数据位置**：{data['column_name']}列，第{data['row_index']+1}行
+                        - **原始数值**：{data['amount']}
+                        
+                        ### 📊 金额含义
+                        
+                        - **正数金额**：表示门店对总部有欠款，门店需要向总部支付
+                        - **负数金额**：表示总部对门店有欠款，总部需要向门店支付  
+                        - **零金额**：表示双方账目平衡，无需额外支付
+                        
+                        ### 🔄 处理建议
+                        
+                        {"**门店应付款处理：**" if amount > 0 else "**门店应收款处理：**" if amount < 0 else "**账目平衡：**"}
+                        
+                        {"1. 请联系财务部门确认付款方式和时间" if amount > 0 else "1. 请联系财务部门确认到账时间和方式" if amount < 0 else "1. 继续保持良好的财务管理"}
+                        {"2. 核实应付款项的具体构成和明细" if amount > 0 else "2. 核实应收款项的具体构成和明细" if amount < 0 else "2. 定期核对账目确保持续平衡"}
+                        {"3. 按时完成付款以维护信用记录" if amount > 0 else "3. 跟进收款进度确保及时到账" if amount < 0 else "3. 继续优化营业额和成本控制"}
+                        {"4. 如有疑问请截图保存并联系财务核实" if amount != 0 else "4. 如有疑问请联系财务部门进行核实"}
+                        
+                        ### ⚠️ 注意事项
+                        
+                        - 此数据基于当前报表自动计算得出
+                        - 如发现异常请及时联系财务部门核实
+                        - 建议定期查看和跟进财务状况
+                        """)
+                
+                else:
+                    # 未找到应收未收额数据
+                    st.warning("⚠️ 未在当前报表中找到'应收-未收额'相关数据")
+                    
+                    # 提供查找帮助
+                    with st.expander("🔍 数据查找帮助", expanded=True):
+                        st.markdown("""
+                        ### 📋 系统查找说明
+                        
+                        系统会自动在**合计列**中搜索包含以下关键词的行：
+                        
+                        **主要关键词：**
+                        - `应收-未收额` `应收未收额` `应收-未收` `应收未收`
+                        - `应收款` `应收账款` `应收余额` `未收金额`
+                        - `收支差额` `净收入` `盈亏` `利润` `结余`
+                        
+                        ### 💡 可能的原因
+                        
+                        1. **报表中没有相关汇总行**：Excel文件可能缺少应收未收额的计算行
+                        2. **关键词不匹配**：实际使用的名称可能与系统支持的关键词不同
+                        3. **数据格式问题**：相关数据可能不在合计列中
+                        
+                        ### 🛠️ 解决建议
+                        
+                        1. **检查Excel文件**：确认是否包含应收未收额相关的汇总行
+                        2. **添加计算行**：在Excel中添加名为"应收-未收额"的行并填入相应数值
+                        3. **联系技术支持**：如果问题持续存在，请联系IT部门
+                        """)
+                        
+                        # 显示调试信息
+                        if 'debug_info' in analysis_results:
+                            debug = analysis_results['debug_info']
+                            
+                            st.write("**🔧 调试信息：**")
+                            st.write(f"• 找到的合计列：{len(debug['total_columns_found'])} 个")
+                            if debug['total_columns_found']:
+                                st.write("  " + "、".join(debug['total_columns_found']))
+                            
+                            st.write(f"• 所有列名：{', '.join(debug['all_columns'])}")
+                            
+                            if debug.get('matches_found'):
+                                st.write("**🔍 相关数据项：**")
+                                for match in debug['matches_found'][:5]:  # 只显示前5个
+                                    st.write(f"  • 第{match['row_index']+1}行: {match['row_name']} = {match['value']}")
+            
+            except Exception as e:
+                st.error(f"❌ 财务分析时出错：{str(e)}")
+                with st.expander("🔧 错误详情"):
+                    st.code(str(e))
+                    st.write("**建议：**")
+                    st.write("1. 检查Excel文件格式是否正确")
+                    st.write("2. 确认数据表中包含财务汇总信息")
+                    st.write("3. 联系技术支持获取帮助")
+            
+            # 分隔线
+            st.divider()
+            
+            # 数据搜索和过滤
+            st.subheader("📋 报表数据")
+            
             # 应用搜索过滤
             if search_term:
                 try:
@@ -1407,8 +1828,8 @@ else:
 st.divider()
 st.markdown("""
     <div style="text-align: center; color: #888; font-size: 0.8rem; padding: 1rem;">
-        <p>🏪 门店报表查询系统 v7.0 - 智能识别版</p>
-        <p>🤖 自动识别月份行和门店名称 | 💾 数据永久保存 | 🌐 支持多用户实时访问</p>
+        <p>🏪 门店报表查询系统 v8.0 - 智能识别+可视化看板版</p>
+        <p>🤖 智能识别月份行和门店名称 | 💰 可视化财务看板 | 💾 云端数据存储 | 🌐 多用户实时访问</p>
         <p>技术支持：IT部门 | 建议使用Chrome浏览器访问</p>
     </div>
 """, unsafe_allow_html=True)
