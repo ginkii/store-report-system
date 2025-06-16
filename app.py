@@ -366,19 +366,57 @@ def load_reports_from_sheets(gc):
                     df = pd.read_json(json_data, orient='records')
                     
                     # 关键修改：跳过第一行，使用第二行作为表头
-                    if len(df) > 1:
-                        # 获取第二行作为新的列名
-                        new_columns = df.iloc[1].astype(str).tolist()
-                        # 删除前两行（原表头和第一行数据）
-                        df_processed = df.iloc[2:].copy()
-                        # 设置新的列名
-                        df_processed.columns = new_columns
-                        # 重置索引
-                        df_processed = df_processed.reset_index(drop=True)
-                        reports_dict[store_name] = df_processed
-                    else:
-                        # 如果数据少于2行，直接使用原始数据
-                        reports_dict[store_name] = df
+                    if len(df) > 2:  # 确保至少有3行数据
+                        try:
+                            # 获取第二行作为新的列名
+                            new_columns = df.iloc[1].fillna('').astype(str).tolist()
+                            
+                            # 清理列名：去除空白和处理重复
+                            cleaned_columns = []
+                            for i, col in enumerate(new_columns):
+                                col = str(col).strip()
+                                if col == '' or col == 'nan':
+                                    col = f'未命名列_{i+1}'
+                                # 处理重复列名
+                                original_col = col
+                                counter = 1
+                                while col in cleaned_columns:
+                                    col = f"{original_col}_{counter}"
+                                    counter += 1
+                                cleaned_columns.append(col)
+                            
+                            # 删除前两行（原表头和第一行数据）
+                            df_processed = df.iloc[2:].copy()
+                            
+                            # 确保数据行数与列名数量匹配
+                            if len(df_processed.columns) != len(cleaned_columns):
+                                # 如果列数不匹配，调整DataFrame
+                                if len(cleaned_columns) > len(df_processed.columns):
+                                    # 列名多了，截取列名
+                                    cleaned_columns = cleaned_columns[:len(df_processed.columns)]
+                                else:
+                                    # 数据列多了，截取数据列
+                                    df_processed = df_processed.iloc[:, :len(cleaned_columns)]
+                            
+                            # 设置新的列名
+                            df_processed.columns = cleaned_columns
+                            
+                            # 重置索引
+                            df_processed = df_processed.reset_index(drop=True)
+                            
+                            # 清理数据：将所有NaN替换为空字符串
+                            df_processed = df_processed.fillna('')
+                            
+                            reports_dict[store_name] = df_processed
+                            
+                        except Exception as process_error:
+                            st.warning(f"⚠️ 处理门店 {store_name} 数据格式时出错: {str(process_error)}")
+                            # 如果处理失败，使用原始数据
+                            reports_dict[store_name] = df.fillna('')
+                    
+                    elif len(df) > 0:
+                        # 如果数据少于3行，直接使用原始数据
+                        reports_dict[store_name] = df.fillna('')
                         
                 except Exception as e:
                     st.warning(f"⚠️ 解析门店 {store_name} 数据时出错: {str(e)}")
@@ -1040,8 +1078,48 @@ else:
             
             # 显示数据表
             if total_rows > 0:
-                display_df = filtered_df.head(n_rows) if n_rows != "全部" else filtered_df
-                st.dataframe(display_df, use_container_width=True, height=500)
+                try:
+                    display_df = filtered_df.head(n_rows) if n_rows != "全部" else filtered_df
+                    
+                    # 数据验证和清理
+                    if not display_df.empty:
+                        # 确保所有列名都是字符串
+                        display_df.columns = [str(col) for col in display_df.columns]
+                        
+                        # 清理数据，确保没有问题的数据类型
+                        for col in display_df.columns:
+                            display_df[col] = display_df[col].astype(str).fillna('')
+                        
+                        # 显示数据表格
+                        st.dataframe(display_df, use_container_width=True, height=500)
+                        
+                        # 显示数据样本信息
+                        with st.expander("📋 数据详情"):
+                            st.write(f"**列名列表：**")
+                            for i, col in enumerate(display_df.columns):
+                                st.write(f"{i+1}. {col}")
+                            
+                            if len(display_df) > 0:
+                                st.write(f"**数据样本（前3行）：**")
+                                st.dataframe(display_df.head(3))
+                    else:
+                        st.warning("数据为空或格式有误")
+                        
+                except Exception as display_error:
+                    st.error(f"❌ 显示数据时出错：{str(display_error)}")
+                    st.info("正在尝试备用显示方式...")
+                    
+                    # 备用显示方式：显示原始数据
+                    try:
+                        st.write("**原始数据预览：**")
+                        st.write(f"数据形状：{df.shape}")
+                        st.write(f"列名：{list(df.columns)}")
+                        
+                        # 显示前几行的原始数据
+                        if not df.empty:
+                            st.dataframe(df.head(10), use_container_width=True)
+                    except:
+                        st.error("❌ 无法显示数据，请联系管理员检查数据格式")
             else:
                 st.warning("没有找到符合条件的数据")
             
