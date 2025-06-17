@@ -902,73 +902,37 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"❌ 读取失败：{str(e)}")
             
-            # 上传财务报表（支持备注）
-            reports_file = st.file_uploader("上传财务报表（支持单元格备注）", type=['xlsx', 'xls'])
+            # 上传财务报表
+            reports_file = st.file_uploader("上传财务报表", type=['xlsx', 'xls'])
             if reports_file:
                 try:
-                    with st.spinner("正在读取Excel文件和备注信息..."):
+                    with st.spinner("正在读取Excel文件..."):
                         # 重置文件指针到开始位置
                         reports_file.seek(0)
                         
-                        # 使用新的函数读取Excel文件，包括备注
+                        # 使用简化的函数读取Excel文件
                         sheets_data = read_excel_with_comments(reports_file)
                         
-                        # 详细调试信息
-                        st.write("🔍 **详细调试信息**：")
+                        # 显示读取结果
+                        st.write("📋 **读取结果**：")
                         if sheets_data:
-                            total_comments = 0
                             for sheet_name, sheet_info in sheets_data.items():
-                                comments_count = len(sheet_info.get('comments', {}))
-                                total_comments += comments_count
-                                
-                                with st.expander(f"📋 {sheet_name} ({comments_count} 个备注)", expanded=comments_count > 0):
-                                    st.write(f"- 数据行数: {len(sheet_info['dataframe'])}")
-                                    st.write(f"- 数据列数: {len(sheet_info['dataframe'].columns)}")
-                                    st.write(f"- 备注数量: {comments_count}")
-                                    
-                                    if comments_count > 0:
-                                        st.write("**发现的备注:**")
-                                        comments = sheet_info.get('comments', {})
-                                        for i, (key, comment) in enumerate(comments.items()):
-                                            if i < 5:  # 只显示前5个备注
-                                                row, col = key.split('_')
-                                                st.write(f"  • 位置[{int(row)+1},{int(col)+1}]: {comment['text'][:50]}...")
-                                        if len(comments) > 5:
-                                            st.write(f"  ... 还有 {len(comments)-5} 个备注")
-                                    else:
-                                        st.write("❗ **未发现备注，可能原因：**")
-                                        st.write("  - Excel文件中没有添加备注")
-                                        st.write("  - 文件格式不是.xlsx")
-                                        st.write("  - 备注内容为空")
+                                st.write("- " + sheet_name + ": " + str(len(sheet_info['dataframe'])) + " 行数据")
                             
-                            st.write(f"**总计:** {len(sheets_data)} 个工作表，{total_comments} 个备注")
+                            st.write("总计: " + str(len(sheets_data)) + " 个工作表")
                         else:
-                            st.write("- ❌ 未读取到任何数据")
+                            st.write("- 未读取到任何数据")
                     
                     if sheets_data:
                         if save_reports_to_sheets(sheets_data, gc):
-                            total_comments = sum(len(sheet_info.get('comments', {})) for sheet_info in sheets_data.values())
-                            st.success(f"✅ 报表已上传：{len(sheets_data)} 个门店，{total_comments} 个备注")
-                            if total_comments == 0:
-                                st.warning("⚠️ **注意：未检测到备注内容**")
-                                st.info("""
-                                💡 **如何确保备注被正确读取：**
-                                1. 确保使用 .xlsx 格式（不是 .xls）
-                                2. 在Excel中右键单元格 → "插入批注" 或 "新建批注"
-                                3. 确保备注内容不为空
-                                4. 保存文件后重新上传
-                                """)
-                            else:
-                                st.balloons()
+                            st.success("✅ 报表已上传：" + str(len(sheets_data)) + " 个门店")
+                            st.balloons()
                         else:
                             st.error("❌ 保存失败")
                     else:
                         st.error("❌ 无法读取Excel文件")
                 except Exception as e:
-                    st.error(f"❌ 读取失败：{str(e)}")
-                    import traceback
-                    with st.expander("🐛 错误详情", expanded=False):
-                        st.code(traceback.format_exc())
+                    st.error("❌ 读取失败：" + str(e))
     
     else:
         if st.session_state.logged_in:
