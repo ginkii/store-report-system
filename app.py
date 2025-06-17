@@ -124,6 +124,29 @@ def analyze_receivable_data(df):
                                     'row_index': target_row_index,
                                     'actual_row_number': target_row_index + 1  # 实际行号
                                 }
+                                
+                                # 查找备注信息（通常在最后几列或特定的备注列）
+                                remarks = []
+                                for col in df.columns:
+                                    col_lower = str(col).lower()
+                                    if any(keyword in col_lower for keyword in ['备注', '说明', '注释', 'remark', 'note', '参考资', '单位']):
+                                        # 找到备注列，提取第69行的备注
+                                        remark_val = str(row[col]) if col in row.index else ""
+                                        if remark_val and remark_val.strip() not in ['', 'nan', 'None', '0']:
+                                            remarks.append(f"{col}: {remark_val}")
+                                
+                                # 也检查最后几列是否有备注信息
+                                for col_idx in range(max(0, len(row)-3), len(row)):
+                                    if col_idx < len(row) and col_idx != len(row)-1:  # 排除已经作为金额的列
+                                        val = str(row.iloc[col_idx]) if pd.notna(row.iloc[col_idx]) else ""
+                                        if val and val.strip() not in ['', 'nan', 'None', '0'] and not val.replace('.', '').replace('-', '').isdigit():
+                                            col_name = df.columns[col_idx]
+                                            if col_name not in [r.split(':')[0] for r in remarks]:  # 避免重复
+                                                remarks.append(f"{col_name}: {val}")
+                                
+                                if remarks:
+                                    result['应收-未收额']['remarks'] = remarks
+                                
                                 return result
                         except ValueError:
                             continue
@@ -164,6 +187,19 @@ def analyze_receivable_data(df):
                                             'actual_row_number': idx + 1,
                                             'note': f'在第{idx+1}行找到（非第69行）'
                                         }
+                                        
+                                        # 查找备注信息
+                                        remarks = []
+                                        for col in df.columns:
+                                            col_lower = str(col).lower()
+                                            if any(keyword in col_lower for keyword in ['备注', '说明', '注释', 'remark', 'note', '参考资', '单位']):
+                                                remark_val = str(row[col]) if col in row.index else ""
+                                                if remark_val and remark_val.strip() not in ['', 'nan', 'None', '0']:
+                                                    remarks.append(f"{col}: {remark_val}")
+                                        
+                                        if remarks:
+                                            result['应收-未收额']['remarks'] = remarks
+                                        
                                         return result
                                 except ValueError:
                                     continue
@@ -607,7 +643,7 @@ else:
                         elif amount < 0:
                             st.markdown(f'''
                                 <div class="receivable-negative">
-                                    <h1 style="margin: 0; font-size: 3rem;">💚 ¥{amount:,.2f}</h1>
+                                    <h1 style="margin: 0; font-size: 3rem;">💚 ¥{abs(amount):,.2f}</h1>
                                     <h3 style="margin: 0.5rem 0;">总部应退款</h3>
                                 </div>
                             ''', unsafe_allow_html=True)
