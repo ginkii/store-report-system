@@ -10,7 +10,6 @@ import openpyxl
 from openpyxl import load_workbook
 import tempfile
 import os
-import re
 
 # 页面配置
 st.set_page_config(
