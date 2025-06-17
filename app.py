@@ -8,6 +8,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 import openpyxl
 from openpyxl import load_workbook
+import tempfile
+import os
 
 # 页面配置
 st.set_page_config(
@@ -104,10 +106,26 @@ st.markdown("""
 def read_excel_with_comments(file_path_or_buffer):
     """读取Excel文件，包括单元格备注"""
     try:
-        # 使用openpyxl读取工作簿
+        import tempfile
+        import os
+        
+        # 如果是文件对象，保存为临时文件
         if hasattr(file_path_or_buffer, 'read'):
-            # 如果是文件对象，先读取内容
-            workbook = load_workbook(file_path_or_buffer, data_only=False)
+            file_path_or_buffer.seek(0)  # 重置文件指针
+            
+            # 创建临时文件
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+                tmp_file.write(file_path_or_buffer.read())
+                temp_path = tmp_file.name
+            
+            try:
+                workbook = load_workbook(temp_path, data_only=False)
+            finally:
+                # 清理临时文件
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
         else:
             workbook = load_workbook(file_path_or_buffer, data_only=False)
         
@@ -127,6 +145,9 @@ def read_excel_with_comments(file_path_or_buffer):
             data = []
             comments_data = {}
             
+            # 先扫描所有单元格查找备注
+            print(f"正在扫描工作表 {sheet_name}，最大行: {max_row}，最大列: {max_col}")
+            
             for row in range(1, max_row + 1):
                 row_data = []
                 for col in range(1, max_col + 1):
@@ -140,12 +161,15 @@ def read_excel_with_comments(file_path_or_buffer):
                     row_data.append(cell_value)
                     
                     # 检查是否有备注
-                    if cell.comment:
+                    if cell.comment is not None:
                         cell_address = f"{row-1}_{col-1}"  # 转换为0基索引
                         comment_text = cell.comment.text
-                        if comment_text:
+                        
+                        print(f"发现备注在 {cell_address}: {comment_text}")
+                        
+                        if comment_text and comment_text.strip():
                             comments_data[cell_address] = {
-                                'text': comment_text,
+                                'text': comment_text.strip(),
                                 'row': row - 1,
                                 'col': col - 1,
                                 'cell_value': str(cell_value),
@@ -157,14 +181,20 @@ def read_excel_with_comments(file_path_or_buffer):
             if data:
                 # 创建DataFrame
                 df = pd.DataFrame(data)
+                print(f"工作表 {sheet_name}: {len(data)} 行, {len(data[0]) if data else 0} 列, {len(comments_data)} 个备注")
+                
                 sheets_data[sheet_name] = {
                     'dataframe': df,
                     'comments': comments_data
                 }
         
+        print(f"总共读取到 {len(sheets_data)} 个工作表")
         return sheets_data
     
     except Exception as e:
+        print(f"读取Excel文件时出错: {str(e)}")
+        import traceback
+        print(f"详细错误: {traceback.format_exc()}")
         st.error(f"读取Excel文件时出错: {str(e)}")
         return None
 
@@ -520,8 +550,10 @@ def load_reports_from_sheets(gc):
         try:
             comments_worksheet = spreadsheet.worksheet(COMMENTS_SHEET_NAME)
             comments_data = comments_worksheet.get_all_values()
+            print(f"加载到 {len(comments_data)} 行备注数据")
         except:
             comments_data = []
+            print("未找到备注数据工作表")
         
         # 处理备注数据
         comments_dict = {}
@@ -531,88 +563,135 @@ def load_reports_from_sheets(gc):
                     store_name = row[0]
                     comments_json = row[1]
                     try:
-                        comments_dict[store_name] = json.loads(comments_json)
-                    except:
+                        parsed_comments = json.loads(comments_json)
+                        comments_dict[store_name] = parsed_comments
+                        print(f"加载门店 {store_name} 的 {len(parsed_comments)} 个备注")
+                    except Exception as e:
+                        print(f"解析备注数据失败 {store_name}: {e}")
                         continue
+        
+        print(f"总共加载 {len(comments_dict)} 个门店的备注数据")
         
         if len(reports_data) <= 1:
             return {}
         
         reports_dict = {}
+        
+        # 处理分片数据的合并
+        store_chunks = {}
+        
         for row in reports_data[1:]:
-            if len(row) >= 2:
+            if len(row) >= 7:  # 确保有足够的列
                 store_name = row[0]
                 json_data = row[1]
-                try:
-                    df = pd.read_json(json_data, orient='records')
-                    
-                    # 检查第一行是否是门店名称
-                    if len(df) > 0:
-                        first_row = df.iloc[0]
-                        non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+                chunk_num = row[5] if len(row) > 5 else "1"
+                total_chunks = row[6] if len(row) > 6 else "1"
+                
+                # 处理分片数据
+                if "_分片" in store_name:
+                    base_store_name = store_name.split("_分片")[0]
+                    if base_store_name not in store_chunks:
+                        store_chunks[base_store_name] = {}
+                    store_chunks[base_store_name][int(chunk_num)] = json_data
+                else:
+                    # 非分片数据，直接处理
+                    try:
+                        df = pd.read_json(json_data, orient='records')
                         
-                        # 如果第一行只有少数非空值，可能是门店名称，跳过它
-                        if non_empty_count <= 2 and len(df) > 1:
-                            df = df.iloc[1:]
-                    
-                    # 如果有足够的行，使用第二行作为表头
-                    if len(df) > 1:
-                        header_row = df.iloc[0].fillna('').astype(str).tolist()
-                        data_rows = df.iloc[1:].copy()
-                        
-                        # 清理列名并处理重复
-                        cols = []
-                        for i, col in enumerate(header_row):
-                            col = str(col).strip()
-                            if col == '' or col == 'nan' or col == '0':
-                                col = f'列{i+1}' if i > 0 else '项目名称'
-                            
-                            # 处理重复列名
-                            original_col = col
-                            counter = 1
-                            while col in cols:
-                                col = f"{original_col}_{counter}"
-                                counter += 1
-                            cols.append(col)
-                        
-                        # 确保列数匹配
-                        min_cols = min(len(data_rows.columns), len(cols))
-                        cols = cols[:min_cols]
-                        data_rows = data_rows.iloc[:, :min_cols]
-                        
-                        data_rows.columns = cols
-                        data_rows = data_rows.reset_index(drop=True).fillna('')
+                        # 处理DataFrame
+                        df = process_dataframe(df)
                         
                         # 获取备注信息
                         store_comments = comments_dict.get(store_name, {})
                         
                         reports_dict[store_name] = {
-                            'dataframe': data_rows,
+                            'dataframe': df,
                             'comments': store_comments
                         }
-                    else:
-                        # 处理少于3行的数据
-                        df_clean = df.fillna('')
-                        # 设置默认列名避免重复
-                        default_cols = []
-                        for i in range(len(df_clean.columns)):
-                            col_name = f'列{i+1}' if i > 0 else '项目名称'
-                            default_cols.append(col_name)
-                        df_clean.columns = default_cols
-                        
-                        store_comments = comments_dict.get(store_name, {})
-                        reports_dict[store_name] = {
-                            'dataframe': df_clean,
-                            'comments': store_comments
-                        }
-                except Exception as e:
-                    st.warning(f"解析 {store_name} 数据失败: {str(e)}")
-                    continue
+                    except Exception as e:
+                        print(f"解析 {store_name} 数据失败: {str(e)}")
+                        continue
         
+        # 处理分片数据
+        for base_store_name, chunks in store_chunks.items():
+            try:
+                # 按顺序合并分片
+                combined_json = ""
+                for i in range(1, max(chunks.keys()) + 1):
+                    if i in chunks:
+                        combined_json += chunks[i]
+                
+                df = pd.read_json(combined_json, orient='records')
+                df = process_dataframe(df)
+                
+                # 获取备注信息
+                store_comments = comments_dict.get(base_store_name, {})
+                
+                reports_dict[base_store_name] = {
+                    'dataframe': df,
+                    'comments': store_comments
+                }
+            except Exception as e:
+                print(f"合并分片数据失败 {base_store_name}: {str(e)}")
+                continue
+        
+        print(f"最终加载 {len(reports_dict)} 个门店数据")
         return reports_dict
+    
     except Exception as e:
+        print(f"加载报表数据失败: {str(e)}")
         st.error(f"加载报表数据失败: {str(e)}")
         return {}
+
+def process_dataframe(df):
+    """处理DataFrame的通用方法"""
+    # 检查第一行是否是门店名称
+    if len(df) > 0:
+        first_row = df.iloc[0]
+        non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+        
+        # 如果第一行只有少数非空值，可能是门店名称，跳过它
+        if non_empty_count <= 2 and len(df) > 1:
+            df = df.iloc[1:]
+    
+    # 如果有足够的行，使用第二行作为表头
+    if len(df) > 1:
+        header_row = df.iloc[0].fillna('').astype(str).tolist()
+        data_rows = df.iloc[1:].copy()
+        
+        # 清理列名并处理重复
+        cols = []
+        for i, col in enumerate(header_row):
+            col = str(col).strip()
+            if col == '' or col == 'nan' or col == '0':
+                col = f'列{i+1}' if i > 0 else '项目名称'
+            
+            # 处理重复列名
+            original_col = col
+            counter = 1
+            while col in cols:
+                col = f"{original_col}_{counter}"
+                counter += 1
+            cols.append(col)
+        
+        # 确保列数匹配
+        min_cols = min(len(data_rows.columns), len(cols))
+        cols = cols[:min_cols]
+        data_rows = data_rows.iloc[:, :min_cols]
+        
+        data_rows.columns = cols
+        data_rows = data_rows.reset_index(drop=True).fillna('')
+        return data_rows
+    else:
+        # 处理少于3行的数据
+        df_clean = df.fillna('')
+        # 设置默认列名避免重复
+        default_cols = []
+        for i in range(len(df_clean.columns)):
+            col_name = f'列{i+1}' if i > 0 else '项目名称'
+            default_cols.append(col_name)
+        df_clean.columns = default_cols
+        return df_clean
 
 def verify_user_permission(store_name, user_id, permissions_data):
     """验证用户权限"""
@@ -763,13 +842,29 @@ with st.sidebar:
             if reports_file:
                 try:
                     with st.spinner("正在读取Excel文件和备注信息..."):
+                        # 重置文件指针到开始位置
+                        reports_file.seek(0)
+                        
                         # 使用新的函数读取Excel文件，包括备注
                         sheets_data = read_excel_with_comments(reports_file)
+                        
+                        # 调试信息
+                        st.write("🔍 调试信息：")
+                        if sheets_data:
+                            for sheet_name, sheet_info in sheets_data.items():
+                                comments_count = len(sheet_info.get('comments', {}))
+                                st.write(f"- {sheet_name}: {comments_count} 个备注")
+                                if comments_count > 0:
+                                    st.write(f"  备注示例: {list(sheet_info['comments'].keys())[:3]}")
+                        else:
+                            st.write("- 未读取到任何数据")
                     
                     if sheets_data:
                         if save_reports_to_sheets(sheets_data, gc):
                             total_comments = sum(len(sheet_info.get('comments', {})) for sheet_info in sheets_data.values())
                             st.success(f"✅ 报表已上传：{len(sheets_data)} 个门店，{total_comments} 个备注")
+                            if total_comments == 0:
+                                st.info("💡 提示：如果您的Excel文件包含备注，请确保使用.xlsx格式并且备注不为空")
                             st.balloons()
                         else:
                             st.error("❌ 保存失败")
@@ -777,6 +872,8 @@ with st.sidebar:
                         st.error("❌ 无法读取Excel文件")
                 except Exception as e:
                     st.error(f"❌ 读取失败：{str(e)}")
+                    import traceback
+                    st.error(f"详细错误：{traceback.format_exc()}")
     
     else:
         if st.session_state.logged_in:
