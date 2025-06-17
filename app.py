@@ -8,6 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import openpyxl
 from openpyxl import load_workbook
+from openpyxl.utils import coordinate_from_string
 import tempfile
 import os
 
@@ -119,7 +120,8 @@ def read_excel_with_comments(file_path_or_buffer):
                 temp_path = tmp_file.name
             
             try:
-                workbook = load_workbook(temp_path, data_only=False)
+                # 使用keep_vba=True和keep_links=True来保留更多信息
+                workbook = load_workbook(temp_path, data_only=False, keep_vba=True, keep_links=True)
             finally:
                 # 清理临时文件
                 try:
@@ -127,9 +129,10 @@ def read_excel_with_comments(file_path_or_buffer):
                 except:
                     pass
         else:
-            workbook = load_workbook(file_path_or_buffer, data_only=False)
+            workbook = load_workbook(file_path_or_buffer, data_only=False, keep_vba=True, keep_links=True)
         
         sheets_data = {}
+        total_comments_found = 0
         
         for sheet_name in workbook.sheetnames:
             worksheet = workbook[sheet_name]
@@ -145,9 +148,10 @@ def read_excel_with_comments(file_path_or_buffer):
             data = []
             comments_data = {}
             
-            # 先扫描所有单元格查找备注
-            print(f"正在扫描工作表 {sheet_name}，最大行: {max_row}，最大列: {max_col}")
+            print(f"🔍 正在扫描工作表 '{sheet_name}'")
+            print(f"   数据范围: {max_row} 行 x {max_col} 列")
             
+            # 方法1: 遍历所有单元格查找备注
             for row in range(1, max_row + 1):
                 row_data = []
                 for col in range(1, max_col + 1):
@@ -160,39 +164,96 @@ def read_excel_with_comments(file_path_or_buffer):
                     
                     row_data.append(cell_value)
                     
-                    # 检查是否有备注
-                    if cell.comment is not None:
+                    # 多种方法检查备注
+                    has_comment = False
+                    comment_text = ""
+                    comment_author = "Unknown"
+                    
+                    # 方法1: 直接检查comment属性
+                    if hasattr(cell, 'comment') and cell.comment is not None:
+                        comment_text = str(cell.comment.text) if cell.comment.text else ""
+                        comment_author = getattr(cell.comment, 'author', 'Unknown')
+                        has_comment = True
+                        print(f"   📝 方法1发现备注 [{row},{col}]: '{comment_text[:50]}...'")
+                    
+                    # 方法2: 检查单元格坐标
+                    cell_coord = f"{chr(64 + col)}{row}"
+                    
+                    # 方法3: 检查worksheet的comments集合
+                    if not has_comment:
+                        try:
+                            for comment_coord, comment_obj in worksheet.comments.items():
+                                if comment_coord == cell_coord or (comment_obj.ref == cell_coord):
+                                    comment_text = str(comment_obj.text) if comment_obj.text else ""
+                                    comment_author = getattr(comment_obj, 'author', 'Unknown')
+                                    has_comment = True
+                                    print(f"   📝 方法3发现备注 [{row},{col}] ({cell_coord}): '{comment_text[:50]}...'")
+                                    break
+                        except Exception as e:
+                            pass
+                    
+                    # 如果找到备注，保存
+                    if has_comment and comment_text.strip():
                         cell_address = f"{row-1}_{col-1}"  # 转换为0基索引
-                        comment_text = cell.comment.text
-                        
-                        print(f"发现备注在 {cell_address}: {comment_text}")
-                        
-                        if comment_text and comment_text.strip():
-                            comments_data[cell_address] = {
-                                'text': comment_text.strip(),
-                                'row': row - 1,
-                                'col': col - 1,
-                                'cell_value': str(cell_value),
-                                'author': getattr(cell.comment, 'author', 'Unknown')
-                            }
+                        comments_data[cell_address] = {
+                            'text': comment_text.strip(),
+                            'row': row - 1,
+                            'col': col - 1,
+                            'cell_value': str(cell_value),
+                            'cell_coord': cell_coord,
+                            'author': comment_author
+                        }
+                        total_comments_found += 1
+                        print(f"   ✅ 保存备注: {cell_address} -> '{comment_text.strip()[:30]}...'")
                 
                 data.append(row_data)
+            
+            # 方法4: 直接遍历worksheet.comments
+            print(f"   🔍 方法4: 直接检查worksheet.comments")
+            try:
+                for comment_coord, comment_obj in worksheet.comments.items():
+                    print(f"   📍 发现备注坐标: {comment_coord}")
+                    try:
+                        # 解析坐标
+                        col_letter, row_num = coordinate_from_string(comment_coord)
+                        col_num = ord(col_letter) - ord('A') + 1
+                        
+                        cell_address = f"{row_num-1}_{col_num-1}"
+                        comment_text = str(comment_obj.text) if comment_obj.text else ""
+                        
+                        if comment_text.strip() and cell_address not in comments_data:
+                            # 获取单元格值
+                            cell_value = worksheet.cell(row=row_num, column=col_num).value
+                            comments_data[cell_address] = {
+                                'text': comment_text.strip(),
+                                'row': row_num - 1,
+                                'col': col_num - 1,
+                                'cell_value': str(cell_value) if cell_value else "",
+                                'cell_coord': comment_coord,
+                                'author': getattr(comment_obj, 'author', 'Unknown')
+                            }
+                            total_comments_found += 1
+                            print(f"   ✅ 方法4保存备注: {cell_address} -> '{comment_text.strip()[:30]}...'")
+                    except Exception as e:
+                        print(f"   ❌ 解析备注坐标失败 {comment_coord}: {e}")
+            except Exception as e:
+                print(f"   ❌ 遍历comments失败: {e}")
             
             if data:
                 # 创建DataFrame
                 df = pd.DataFrame(data)
-                print(f"工作表 {sheet_name}: {len(data)} 行, {len(data[0]) if data else 0} 列, {len(comments_data)} 个备注")
+                print(f"📊 工作表 '{sheet_name}': {len(data)} 行, {len(data[0]) if data else 0} 列, {len(comments_data)} 个备注")
                 
                 sheets_data[sheet_name] = {
                     'dataframe': df,
                     'comments': comments_data
                 }
         
-        print(f"总共读取到 {len(sheets_data)} 个工作表")
+        print(f"🎉 总结: 读取到 {len(sheets_data)} 个工作表, {total_comments_found} 个备注")
         return sheets_data
     
     except Exception as e:
-        print(f"读取Excel文件时出错: {str(e)}")
+        print(f"❌ 读取Excel文件时出错: {str(e)}")
         import traceback
         print(f"详细错误: {traceback.format_exc()}")
         st.error(f"读取Excel文件时出错: {str(e)}")
@@ -848,24 +909,53 @@ with st.sidebar:
                         # 使用新的函数读取Excel文件，包括备注
                         sheets_data = read_excel_with_comments(reports_file)
                         
-                        # 调试信息
-                        st.write("🔍 调试信息：")
+                        # 详细调试信息
+                        st.write("🔍 **详细调试信息**：")
                         if sheets_data:
+                            total_comments = 0
                             for sheet_name, sheet_info in sheets_data.items():
                                 comments_count = len(sheet_info.get('comments', {}))
-                                st.write(f"- {sheet_name}: {comments_count} 个备注")
-                                if comments_count > 0:
-                                    st.write(f"  备注示例: {list(sheet_info['comments'].keys())[:3]}")
+                                total_comments += comments_count
+                                
+                                with st.expander(f"📋 {sheet_name} ({comments_count} 个备注)", expanded=comments_count > 0):
+                                    st.write(f"- 数据行数: {len(sheet_info['dataframe'])}")
+                                    st.write(f"- 数据列数: {len(sheet_info['dataframe'].columns)}")
+                                    st.write(f"- 备注数量: {comments_count}")
+                                    
+                                    if comments_count > 0:
+                                        st.write("**发现的备注:**")
+                                        comments = sheet_info.get('comments', {})
+                                        for i, (key, comment) in enumerate(comments.items()):
+                                            if i < 5:  # 只显示前5个备注
+                                                row, col = key.split('_')
+                                                st.write(f"  • 位置[{int(row)+1},{int(col)+1}]: {comment['text'][:50]}...")
+                                        if len(comments) > 5:
+                                            st.write(f"  ... 还有 {len(comments)-5} 个备注")
+                                    else:
+                                        st.write("❗ **未发现备注，可能原因：**")
+                                        st.write("  - Excel文件中没有添加备注")
+                                        st.write("  - 文件格式不是.xlsx")
+                                        st.write("  - 备注内容为空")
+                            
+                            st.write(f"**总计:** {len(sheets_data)} 个工作表，{total_comments} 个备注")
                         else:
-                            st.write("- 未读取到任何数据")
+                            st.write("- ❌ 未读取到任何数据")
                     
                     if sheets_data:
                         if save_reports_to_sheets(sheets_data, gc):
                             total_comments = sum(len(sheet_info.get('comments', {})) for sheet_info in sheets_data.values())
                             st.success(f"✅ 报表已上传：{len(sheets_data)} 个门店，{total_comments} 个备注")
                             if total_comments == 0:
-                                st.info("💡 提示：如果您的Excel文件包含备注，请确保使用.xlsx格式并且备注不为空")
-                            st.balloons()
+                                st.warning("⚠️ **注意：未检测到备注内容**")
+                                st.info("""
+                                💡 **如何确保备注被正确读取：**
+                                1. 确保使用 .xlsx 格式（不是 .xls）
+                                2. 在Excel中右键单元格 → "插入批注" 或 "新建批注"
+                                3. 确保备注内容不为空
+                                4. 保存文件后重新上传
+                                """)
+                            else:
+                                st.balloons()
                         else:
                             st.error("❌ 保存失败")
                     else:
@@ -873,7 +963,8 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"❌ 读取失败：{str(e)}")
                     import traceback
-                    st.error(f"详细错误：{traceback.format_exc()}")
+                    with st.expander("🐛 错误详情", expanded=False):
+                        st.code(traceback.format_exc())
     
     else:
         if st.session_state.logged_in:
