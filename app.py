@@ -6,6 +6,14 @@ from datetime import datetime
 import time
 import gspread
 from google.oauth2.service_account import Credentials
+import logging
+import traceback
+from typing import Dict, Optional, List, Tuple
+import hashlib
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 页面配置
 st.set_page_config(
@@ -19,8 +27,11 @@ ADMIN_PASSWORD = "admin123"
 PERMISSIONS_SHEET_NAME = "store_permissions"
 REPORTS_SHEET_NAME = "store_reports"
 SYSTEM_INFO_SHEET_NAME = "system_info"
+BACKUP_SHEET_NAME = "backup_metadata"
+MAX_RETRIES = 3
+RETRY_DELAY = 2
 
-# CSS样式
+# CSS样式（保持原有样式）
 st.markdown("""
     <style>
     .main-header {
@@ -71,11 +82,386 @@ st.markdown("""
         margin: 0.5rem 0;
         text-align: center;
     }
+    .status-good {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 0.5rem;
+        border-radius: 5px;
+        margin: 0.5rem 0;
+    }
+    .status-warning {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 0.5rem;
+        border-radius: 5px;
+        margin: 0.5rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
+def retry_on_failure(func, *args, max_retries=MAX_RETRIES, delay=RETRY_DELAY, **kwargs):
+    """重试装饰器"""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
+            time.sleep(delay * (attempt + 1))  # 递增延迟
+
+def get_google_sheets_client(force_new=False):
+    """获取Google Sheets客户端，支持强制刷新"""
+    try:
+        if force_new or 'google_sheets_client' not in st.session_state or st.session_state.google_sheets_client is None:
+            credentials_info = st.secrets["google_sheets"]
+            scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+            credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
+            client = gspread.authorize(credentials)
+            st.session_state.google_sheets_client = client
+            logger.info("Google Sheets client created successfully")
+        return st.session_state.google_sheets_client
+    except Exception as e:
+        logger.error(f"Failed to create Google Sheets client: {str(e)}")
+        st.error(f"连接失败: {str(e)}")
+        return None
+
+def verify_connection(gc):
+    """验证连接是否有效"""
+    try:
+        # 尝试列出文件来验证连接
+        gc.list_spreadsheet_files()
+        return True
+    except Exception as e:
+        logger.error(f"Connection verification failed: {str(e)}")
+        return False
+
+def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
+    """获取或创建表格，增加错误处理"""
+    try:
+        # 首先尝试打开
+        spreadsheet = gc.open(name)
+        logger.info(f"Opened existing spreadsheet: {name}")
+        return spreadsheet
+    except gspread.SpreadsheetNotFound:
+        # 如果不存在，创建新的
+        try:
+            spreadsheet = gc.create(name)
+            logger.info(f"Created new spreadsheet: {name}")
+            # 分享给服务账号邮箱，确保访问权限
+            spreadsheet.share('', perm_type='anyone', role='reader')
+            return spreadsheet
+        except Exception as e:
+            logger.error(f"Failed to create spreadsheet: {str(e)}")
+            raise
+    except Exception as e:
+        logger.error(f"Error accessing spreadsheet: {str(e)}")
+        # 如果连接失效，尝试重新连接
+        gc = get_google_sheets_client(force_new=True)
+        if gc and verify_connection(gc):
+            return get_or_create_spreadsheet(gc, name)
+        raise
+
+def get_or_create_worksheet(spreadsheet, name):
+    """获取或创建工作表"""
+    try:
+        return spreadsheet.worksheet(name)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=name, rows=1000, cols=20)
+        logger.info(f"Created new worksheet: {name}")
+        return worksheet
+    except Exception as e:
+        logger.error(f"Error accessing worksheet {name}: {str(e)}")
+        raise
+
+def calculate_data_hash(data):
+    """计算数据的哈希值用于验证"""
+    if isinstance(data, pd.DataFrame):
+        data_str = data.to_json(orient='records', force_ascii=False)
+    else:
+        data_str = json.dumps(data, ensure_ascii=False)
+    return hashlib.md5(data_str.encode()).hexdigest()
+
+def save_backup_metadata(gc, data_type, data_hash, row_count):
+    """保存备份元数据"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        worksheet = get_or_create_worksheet(spreadsheet, BACKUP_SHEET_NAME)
+        
+        metadata = [
+            data_type,
+            data_hash,
+            str(row_count),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ]
+        
+        # 获取现有数据
+        try:
+            existing_data = worksheet.get_all_values()
+            if not existing_data:
+                worksheet.update('A1', [['Data Type', 'Hash', 'Row Count', 'Timestamp']])
+                row_num = 2
+            else:
+                row_num = len(existing_data) + 1
+        except:
+            worksheet.update('A1', [['Data Type', 'Hash', 'Row Count', 'Timestamp']])
+            row_num = 2
+        
+        # 添加新记录
+        worksheet.update(f'A{row_num}', [metadata])
+        logger.info(f"Backup metadata saved for {data_type}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save backup metadata: {str(e)}")
+        return False
+
+def save_permissions_to_sheets(df, gc):
+    """保存权限数据，增强稳定性"""
+    try:
+        # 验证连接
+        if not verify_connection(gc):
+            gc = get_google_sheets_client(force_new=True)
+            if not gc:
+                return False
+        
+        spreadsheet = retry_on_failure(get_or_create_spreadsheet, gc)
+        worksheet = retry_on_failure(get_or_create_worksheet, spreadsheet, PERMISSIONS_SHEET_NAME)
+        
+        # 准备数据
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        all_data = [['门店名称', '人员编号', '更新时间']]
+        
+        for _, row in df.iterrows():
+            all_data.append([str(row.iloc[0]), str(row.iloc[1]), current_time])
+        
+        # 计算数据哈希
+        data_hash = calculate_data_hash(df)
+        
+        # 先保存备份元数据
+        save_backup_metadata(gc, 'permissions', data_hash, len(df))
+        
+        # 不清空工作表，而是创建新的版本
+        # 获取当前数据行数
+        try:
+            current_data = worksheet.get_all_values()
+            if current_data and len(current_data) > 0:
+                # 在数据后添加分隔行
+                separator_row = len(current_data) + 2
+                worksheet.update(f'A{separator_row}', [['=== 更新于 ' + current_time + ' ===']])
+                start_row = separator_row + 1
+            else:
+                start_row = 1
+        except:
+            start_row = 1
+        
+        # 批量更新数据
+        batch_size = 50
+        for i in range(0, len(all_data), batch_size):
+            batch = all_data[i:i+batch_size]
+            retry_on_failure(
+                worksheet.update,
+                f'A{start_row + i}',
+                batch
+            )
+            time.sleep(0.5)  # 避免速率限制
+        
+        logger.info(f"Successfully saved {len(df)} permission records")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to save permissions: {str(e)}\n{traceback.format_exc()}")
+        st.error(f"保存失败: {str(e)}")
+        return False
+
+def load_permissions_from_sheets(gc):
+    """加载权限数据，增加容错处理"""
+    try:
+        # 验证连接
+        if not verify_connection(gc):
+            gc = get_google_sheets_client(force_new=True)
+            if not gc:
+                return None
+        
+        spreadsheet = retry_on_failure(get_or_create_spreadsheet, gc)
+        worksheet = retry_on_failure(get_or_create_worksheet, spreadsheet, PERMISSIONS_SHEET_NAME)
+        
+        data = retry_on_failure(worksheet.get_all_values)
+        
+        if not data or len(data) <= 1:
+            return None
+        
+        # 查找最新的数据块（跳过分隔行）
+        latest_data = []
+        headers_found = False
+        
+        for row in reversed(data):
+            if row and len(row) >= 2:
+                # 跳过分隔行
+                if any('===' in str(cell) for cell in row):
+                    if headers_found:  # 找到了上一个版本的分隔行
+                        break
+                    continue
+                
+                # 检查是否是标题行
+                if row[0] == '门店名称' and row[1] == '人员编号':
+                    headers_found = True
+                    continue
+                
+                # 添加数据行
+                if headers_found and row[0] and row[1]:
+                    latest_data.append(row[:2])
+        
+        if not latest_data:
+            # 如果没找到最新数据，使用所有非空数据
+            for row in data[1:]:
+                if len(row) >= 2 and row[0] and row[1] and '===' not in str(row[0]):
+                    latest_data.append(row[:2])
+        
+        if latest_data:
+            df = pd.DataFrame(latest_data, columns=['门店名称', '人员编号'])
+            logger.info(f"Loaded {len(df)} permission records")
+            return df
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Failed to load permissions: {str(e)}")
+        return None
+
+def save_reports_to_sheets(reports_dict, gc):
+    """保存报表数据，增强稳定性和分片处理"""
+    try:
+        # 验证连接
+        if not verify_connection(gc):
+            gc = get_google_sheets_client(force_new=True)
+            if not gc:
+                return False
+        
+        spreadsheet = retry_on_failure(get_or_create_spreadsheet, gc)
+        
+        # 保存每个门店的数据到单独的工作表
+        success_count = 0
+        
+        for store_name, df in reports_dict.items():
+            try:
+                # 创建安全的工作表名称
+                safe_sheet_name = store_name.replace('/', '_').replace('\\', '_')[:31]  # 工作表名称限制
+                
+                worksheet = retry_on_failure(get_or_create_worksheet, spreadsheet, safe_sheet_name)
+                
+                # 清理数据
+                df_cleaned = df.copy()
+                for col in df_cleaned.columns:
+                    df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
+                
+                # 转换为列表格式
+                data_list = [df_cleaned.columns.tolist()] + df_cleaned.values.tolist()
+                
+                # 计算数据哈希
+                data_hash = calculate_data_hash(df)
+                
+                # 保存备份元数据
+                save_backup_metadata(gc, f'report_{store_name}', data_hash, len(df))
+                
+                # 分批上传
+                batch_size = 100
+                worksheet.clear()
+                time.sleep(0.5)
+                
+                for i in range(0, len(data_list), batch_size):
+                    batch = data_list[i:i+batch_size]
+                    retry_on_failure(
+                        worksheet.update,
+                        f'A{i+1}',
+                        batch
+                    )
+                    time.sleep(0.5)
+                
+                success_count += 1
+                logger.info(f"Successfully saved report for {store_name}")
+                
+            except Exception as e:
+                logger.error(f"Failed to save report for {store_name}: {str(e)}")
+                st.warning(f"保存 {store_name} 失败: {str(e)}")
+        
+        # 更新系统信息
+        try:
+            info_worksheet = get_or_create_worksheet(spreadsheet, SYSTEM_INFO_SHEET_NAME)
+            info_data = [
+                ['Last Update', datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+                ['Total Stores', str(len(reports_dict))],
+                ['Success Count', str(success_count)],
+                ['Status', 'Active']
+            ]
+            retry_on_failure(info_worksheet.update, 'A1', info_data)
+        except Exception as e:
+            logger.warning(f"Failed to update system info: {str(e)}")
+        
+        return success_count > 0
+        
+    except Exception as e:
+        logger.error(f"Failed to save reports: {str(e)}\n{traceback.format_exc()}")
+        st.error(f"保存报表失败: {str(e)}")
+        return False
+
+def load_reports_from_sheets(gc):
+    """加载报表数据，支持从单独的工作表加载"""
+    try:
+        # 验证连接
+        if not verify_connection(gc):
+            gc = get_google_sheets_client(force_new=True)
+            if not gc:
+                return {}
+        
+        spreadsheet = retry_on_failure(get_or_create_spreadsheet, gc)
+        
+        # 获取所有工作表
+        worksheets = retry_on_failure(spreadsheet.worksheets)
+        
+        reports_dict = {}
+        
+        for worksheet in worksheets:
+            # 跳过系统工作表
+            if worksheet.title in [PERMISSIONS_SHEET_NAME, SYSTEM_INFO_SHEET_NAME, BACKUP_SHEET_NAME]:
+                continue
+            
+            try:
+                data = retry_on_failure(worksheet.get_all_values)
+                
+                if len(data) > 1:
+                    # 第一行作为列名
+                    df = pd.DataFrame(data[1:], columns=data[0])
+                    reports_dict[worksheet.title] = df
+                    logger.info(f"Loaded report for {worksheet.title}")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to load worksheet {worksheet.title}: {str(e)}")
+                continue
+        
+        return reports_dict
+        
+    except Exception as e:
+        logger.error(f"Failed to load reports: {str(e)}")
+        return {}
+
+def check_system_status(gc):
+    """检查系统状态"""
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        try:
+            info_worksheet = spreadsheet.worksheet(SYSTEM_INFO_SHEET_NAME)
+            info_data = info_worksheet.get_all_values()
+            
+            if info_data:
+                status_dict = {row[0]: row[1] for row in info_data if len(row) >= 2}
+                return status_dict
+        except:
+            return {'Status': 'Unknown'}
+    except:
+        return {'Status': 'Error'}
+
 def analyze_receivable_data(df):
-    """分析应收未收额数据 - 专门查找第69行"""
+    """分析应收未收额数据 - 专门查找第69行（保持原有逻辑）"""
     result = {}
     
     if len(df.columns) == 0 or len(df) == 0:
@@ -216,215 +602,6 @@ def analyze_receivable_data(df):
     
     return result
 
-@st.cache_resource
-def get_google_sheets_client():
-    """获取Google Sheets客户端"""
-    try:
-        credentials_info = st.secrets["google_sheets"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-        return gspread.authorize(credentials)
-    except Exception as e:
-        st.error(f"连接失败: {str(e)}")
-        return None
-
-def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
-    """获取或创建表格"""
-    try:
-        return gc.open(name)
-    except:
-        return gc.create(name)
-
-def get_or_create_worksheet(spreadsheet, name):
-    """获取或创建工作表"""
-    try:
-        return spreadsheet.worksheet(name)
-    except:
-        return spreadsheet.add_worksheet(title=name, rows=1000, cols=20)
-
-def save_permissions_to_sheets(df, gc):
-    """保存权限数据"""
-    try:
-        spreadsheet = get_or_create_spreadsheet(gc)
-        worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
-        
-        worksheet.clear()
-        time.sleep(1)
-        
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        all_data = [['门店名称', '人员编号', '更新时间']]
-        
-        for _, row in df.iterrows():
-            all_data.append([str(row.iloc[0]), str(row.iloc[1]), current_time])
-        
-        worksheet.update('A1', all_data)
-        return True
-    except Exception as e:
-        st.error(f"保存失败: {str(e)}")
-        return False
-
-def load_permissions_from_sheets(gc):
-    """加载权限数据"""
-    try:
-        spreadsheet = get_or_create_spreadsheet(gc)
-        worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
-        data = worksheet.get_all_values()
-        
-        if len(data) <= 1:
-            return None
-        
-        df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
-        return df[['门店名称', '人员编号']]
-    except:
-        return None
-
-def save_reports_to_sheets(reports_dict, gc):
-    """保存报表数据 - 支持大文件完整保存"""
-    try:
-        spreadsheet = get_or_create_spreadsheet(gc)
-        worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME)
-        
-        worksheet.clear()
-        time.sleep(1)
-        
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        all_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间', '分片序号', '总分片数']]
-        
-        for store_name, df in reports_dict.items():
-            try:
-                # 清理数据
-                df_cleaned = df.copy()
-                for col in df_cleaned.columns:
-                    df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
-                
-                # 转换为JSON
-                json_data = df_cleaned.to_json(orient='records', force_ascii=False)
-                
-                # 检查是否需要分片（每片最大40000字符）
-                max_chunk_size = 40000
-                if len(json_data) <= max_chunk_size:
-                    # 不需要分片
-                    all_data.append([store_name, json_data, len(df), len(df.columns), current_time, "1", "1"])
-                else:
-                    # 需要分片存储
-                    chunks = []
-                    chunk_size = max_chunk_size
-                    
-                    # 将JSON数据分割成多个片段
-                    for i in range(0, len(json_data), chunk_size):
-                        chunks.append(json_data[i:i + chunk_size])
-                    
-                    total_chunks = len(chunks)
-                    
-                    # 保存每个分片
-                    for idx, chunk in enumerate(chunks):
-                        chunk_name = f"{store_name}_分片{idx+1}/{total_chunks}"
-                        all_data.append([chunk_name, chunk, len(df), len(df.columns), current_time, str(idx+1), str(total_chunks)])
-                
-            except Exception as e:
-                st.warning(f"处理 {store_name} 时出错: {str(e)}")
-                # 保存错误信息
-                error_data = {
-                    "error": str(e),
-                    "rows": len(df),
-                    "columns": len(df.columns)
-                }
-                all_data.append([f"{store_name}_错误", json.dumps(error_data, ensure_ascii=False), len(df), len(df.columns), current_time, "1", "1"])
-                continue
-        
-        if len(all_data) > 1:
-            # 分批上传数据
-            batch_size = 20
-            for i in range(1, len(all_data), batch_size):
-                batch_data = all_data[i:i+batch_size]
-                if i == 1:
-                    # 第一批包含标题行
-                    worksheet.update(f'A1', [all_data[0]] + batch_data)
-                else:
-                    # 计算正确的行号
-                    row_num = i + 1
-                    worksheet.update(f'A{row_num}', batch_data)
-                time.sleep(0.5)
-        
-        return True
-    except Exception as e:
-        st.error(f"保存报表失败: {str(e)}")
-        return False
-
-def load_reports_from_sheets(gc):
-    """加载报表数据"""
-    try:
-        spreadsheet = get_or_create_spreadsheet(gc)
-        worksheet = spreadsheet.worksheet(REPORTS_SHEET_NAME)
-        data = worksheet.get_all_values()
-        
-        if len(data) <= 1:
-            return {}
-        
-        reports_dict = {}
-        for row in data[1:]:
-            if len(row) >= 2:
-                store_name = row[0]
-                json_data = row[1]
-                try:
-                    df = pd.read_json(json_data, orient='records')
-                    
-                    # 检查第一行是否是门店名称
-                    if len(df) > 0:
-                        first_row = df.iloc[0]
-                        non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
-                        
-                        # 如果第一行只有少数非空值，可能是门店名称，跳过它
-                        if non_empty_count <= 2 and len(df) > 1:
-                            df = df.iloc[1:]
-                    
-                    # 如果有足够的行，使用第二行作为表头
-                    if len(df) > 1:
-                        header_row = df.iloc[0].fillna('').astype(str).tolist()
-                        data_rows = df.iloc[1:].copy()
-                        
-                        # 清理列名并处理重复
-                        cols = []
-                        for i, col in enumerate(header_row):
-                            col = str(col).strip()
-                            if col == '' or col == 'nan' or col == '0':
-                                col = f'列{i+1}' if i > 0 else '项目名称'
-                            
-                            # 处理重复列名
-                            original_col = col
-                            counter = 1
-                            while col in cols:
-                                col = f"{original_col}_{counter}"
-                                counter += 1
-                            cols.append(col)
-                        
-                        # 确保列数匹配
-                        min_cols = min(len(data_rows.columns), len(cols))
-                        cols = cols[:min_cols]
-                        data_rows = data_rows.iloc[:, :min_cols]
-                        
-                        data_rows.columns = cols
-                        data_rows = data_rows.reset_index(drop=True).fillna('')
-                        reports_dict[store_name] = data_rows
-                    else:
-                        # 处理少于3行的数据
-                        df_clean = df.fillna('')
-                        # 设置默认列名避免重复
-                        default_cols = []
-                        for i in range(len(df_clean.columns)):
-                            col_name = f'列{i+1}' if i > 0 else '项目名称'
-                            default_cols.append(col_name)
-                        df_clean.columns = default_cols
-                        reports_dict[store_name] = df_clean
-                except Exception as e:
-                    st.warning(f"解析 {store_name} 数据失败: {str(e)}")
-                    continue
-        
-        return reports_dict
-    except Exception as e:
-        st.error(f"加载报表数据失败: {str(e)}")
-        return {}
-
 def verify_user_permission(store_name, user_id, permissions_data):
     """验证用户权限"""
     if permissions_data is None or len(permissions_data.columns) < 2:
@@ -461,22 +638,34 @@ if 'is_admin' not in st.session_state:
     st.session_state.is_admin = False
 if 'google_sheets_client' not in st.session_state:
     st.session_state.google_sheets_client = None
+if 'last_connection_check' not in st.session_state:
+    st.session_state.last_connection_check = None
 
 # 主标题
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
-# 初始化Google Sheets客户端
-if not st.session_state.google_sheets_client:
+# 初始化或检查Google Sheets客户端
+current_time = time.time()
+if (not st.session_state.google_sheets_client or 
+    st.session_state.last_connection_check is None or
+    current_time - st.session_state.last_connection_check > 300):  # 每5分钟检查一次
+    
     with st.spinner("连接云数据库..."):
-        gc = get_google_sheets_client()
-        if gc:
+        gc = get_google_sheets_client(force_new=True)
+        if gc and verify_connection(gc):
             st.session_state.google_sheets_client = gc
+            st.session_state.last_connection_check = current_time
             st.success("✅ 连接成功！")
         else:
             st.error("❌ 连接失败，请检查配置")
             st.stop()
 
 gc = st.session_state.google_sheets_client
+
+# 显示系统状态
+system_status = check_system_status(gc)
+status_html = f'<div class="status-good">系统状态: {system_status.get("Status", "Unknown")} | 最后更新: {system_status.get("Last Update", "N/A")}</div>'
+st.markdown(status_html, unsafe_allow_html=True)
 
 # 侧边栏
 with st.sidebar:
@@ -505,15 +694,17 @@ with st.sidebar:
                 try:
                     df = pd.read_excel(permissions_file)
                     if len(df.columns) >= 2:
-                        if save_permissions_to_sheets(df, gc):
-                            st.success(f"✅ 权限表已上传：{len(df)} 个用户")
-                            st.balloons()
-                        else:
-                            st.error("❌ 保存失败")
+                        with st.spinner("正在保存权限数据..."):
+                            if save_permissions_to_sheets(df, gc):
+                                st.success(f"✅ 权限表已上传：{len(df)} 个用户")
+                                st.balloons()
+                            else:
+                                st.error("❌ 保存失败，请重试")
                     else:
-                        st.error("❌ 格式错误：需要至少两列")
+                        st.error("❌ 格式错误：需要至少两列（门店名称、人员编号）")
                 except Exception as e:
                     st.error(f"❌ 读取失败：{str(e)}")
+                    logger.error(f"Failed to read permissions file: {str(e)}")
             
             # 上传财务报表
             reports_file = st.file_uploader("上传财务报表", type=['xlsx', 'xls'])
@@ -522,21 +713,50 @@ with st.sidebar:
                     excel_file = pd.ExcelFile(reports_file)
                     reports_dict = {}
                     
-                    for sheet in excel_file.sheet_names:
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    for i, sheet in enumerate(excel_file.sheet_names):
                         try:
+                            status_text.text(f"正在读取: {sheet}")
                             df = pd.read_excel(reports_file, sheet_name=sheet)
                             if not df.empty:
                                 reports_dict[sheet] = df
-                        except:
+                            progress_bar.progress((i + 1) / len(excel_file.sheet_names))
+                        except Exception as e:
+                            st.warning(f"跳过工作表 {sheet}: {str(e)}")
                             continue
                     
-                    if save_reports_to_sheets(reports_dict, gc):
-                        st.success(f"✅ 报表已上传：{len(reports_dict)} 个门店")
-                        st.balloons()
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    if reports_dict:
+                        with st.spinner(f"正在保存 {len(reports_dict)} 个门店的报表..."):
+                            if save_reports_to_sheets(reports_dict, gc):
+                                st.success(f"✅ 报表已上传：{len(reports_dict)} 个门店")
+                                st.balloons()
+                            else:
+                                st.error("❌ 部分或全部保存失败，请检查日志")
                     else:
-                        st.error("❌ 保存失败")
+                        st.error("❌ 没有有效的报表数据")
                 except Exception as e:
                     st.error(f"❌ 读取失败：{str(e)}")
+                    logger.error(f"Failed to read reports file: {str(e)}")
+            
+            # 系统维护功能
+            st.subheader("🔧 系统维护")
+            
+            if st.button("刷新连接"):
+                gc = get_google_sheets_client(force_new=True)
+                if gc and verify_connection(gc):
+                    st.session_state.google_sheets_client = gc
+                    st.success("✅ 连接已刷新")
+                else:
+                    st.error("❌ 刷新失败")
+            
+            if st.button("查看系统日志"):
+                # 这里可以实现查看日志的功能
+                st.info("日志功能开发中...")
     
     else:
         if st.session_state.logged_in:
@@ -552,18 +772,21 @@ with st.sidebar:
 
 # 主界面
 if user_type == "管理员" and st.session_state.is_admin:
-    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端，支持自动备份和恢复</p></div>', unsafe_allow_html=True)
     
-    permissions_data = load_permissions_from_sheets(gc)
-    reports_data = load_reports_from_sheets(gc)
+    with st.spinner("加载数据统计..."):
+        permissions_data = load_permissions_from_sheets(gc)
+        reports_data = load_reports_from_sheets(gc)
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         perms_count = len(permissions_data) if permissions_data is not None else 0
         st.metric("权限表用户数", perms_count)
     with col2:
         reports_count = len(reports_data)
         st.metric("报表门店数", reports_count)
+    with col3:
+        st.metric("系统状态", "正常" if system_status.get("Status") == "Active" else "异常")
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     st.info("👈 请在左侧边栏输入管理员密码")
@@ -572,7 +795,8 @@ else:
     if not st.session_state.logged_in:
         st.subheader("🔐 用户登录")
         
-        permissions_data = load_permissions_from_sheets(gc)
+        with st.spinner("加载权限数据..."):
+            permissions_data = load_permissions_from_sheets(gc)
         
         if permissions_data is None:
             st.warning("⚠️ 系统维护中，请联系管理员")
@@ -599,7 +823,9 @@ else:
         # 已登录 - 显示报表
         st.markdown(f'<div class="store-info"><h3>🏪 {st.session_state.store_name}</h3><p>操作员：{st.session_state.user_id}</p></div>', unsafe_allow_html=True)
         
-        reports_data = load_reports_from_sheets(gc)
+        with st.spinner("加载报表数据..."):
+            reports_data = load_reports_from_sheets(gc)
+        
         matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
         
         if matching_sheets:
@@ -686,6 +912,7 @@ else:
             
             except Exception as e:
                 st.error(f"❌ 分析数据时出错：{str(e)}")
+                logger.error(f"Analysis error: {str(e)}\n{traceback.format_exc()}")
             
             st.divider()
             
@@ -740,6 +967,7 @@ else:
                     
             except Exception as e:
                 st.error(f"❌ 数据处理时出错：{str(e)}")
+                logger.error(f"Data processing error: {str(e)}")
             
             # 下载功能
             st.subheader("📥 数据下载")
@@ -770,6 +998,7 @@ else:
                     )
                 except Exception as e:
                     st.error(f"Excel下载准备失败：{str(e)}")
+                    logger.error(f"Excel download error: {str(e)}")
             
             with col2:
                 try:
@@ -793,6 +1022,8 @@ else:
                     )
                 except Exception as e:
                     st.error(f"CSV下载准备失败：{str(e)}")
+                    logger.error(f"CSV download error: {str(e)}")
         
         else:
             st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
+            st.info("💡 提示：请联系管理员确认报表是否已上传")
