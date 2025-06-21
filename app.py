@@ -10,6 +10,8 @@ import logging
 import traceback
 from typing import Dict, Optional, List, Tuple
 import hashlib
+from collections import deque
+import threading
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +32,12 @@ SYSTEM_INFO_SHEET_NAME = "system_info"
 BACKUP_SHEET_NAME = "backup_metadata"
 MAX_RETRIES = 3
 RETRY_DELAY = 2
+
+# API速率限制配置
+WRITE_REQUESTS_PER_MINUTE = 60
+READ_REQUESTS_PER_MINUTE = 100
+MIN_REQUEST_INTERVAL = 1.0  # 最小请求间隔（秒）
+BATCH_SIZE = 30  # 批量操作大小
 
 # CSS样式（保持原有样式）
 st.markdown("""
@@ -100,15 +108,144 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def retry_on_failure(func, *args, max_retries=MAX_RETRIES, delay=RETRY_DELAY, **kwargs):
-    """重试装饰器"""
+    """重试装饰器，特别处理速率限制错误"""
     for attempt in range(max_retries):
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            # 成功后重置错误计数
+            if 'api_error_count' in st.session_state:
+                st.session_state.api_error_count = 0
+            return result
         except Exception as e:
+            error_str = str(e)
+            
+            # 记录错误
+            if 'api_error_count' in st.session_state:
+                st.session_state.api_error_count += 1
+            
+            # 特殊处理速率限制错误
+            if "429" in error_str or "quota" in error_str.lower():
+                wait_time = 60  # 速率限制错误等待60秒
+                logger.warning(f"Rate limit error on attempt {attempt + 1}. Waiting {wait_time} seconds...")
+                
+                # 在界面上显示等待信息
+                if attempt == 0:
+                    st.warning(f"⚠️ API速率限制，等待{wait_time}秒后自动重试...")
+                
+                time.sleep(wait_time)
+                continue
+            
             if attempt == max_retries - 1:
                 raise e
-            logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying...")
+            
+            logger.warning(f"Attempt {attempt + 1} failed: {error_str}. Retrying...")
             time.sleep(delay * (attempt + 1))  # 递增延迟
+
+class RateLimiter:
+    """API速率限制器"""
+    def __init__(self, max_requests_per_minute=WRITE_REQUESTS_PER_MINUTE):
+        self.max_requests = max_requests_per_minute
+        self.min_interval = 60.0 / max_requests_per_minute
+        self.requests = deque()
+        self.lock = threading.Lock()
+    
+    def wait_if_needed(self):
+        """等待直到可以发送下一个请求"""
+        with self.lock:
+            now = time.time()
+            # 清理一分钟前的请求记录
+            while self.requests and self.requests[0] < now - 60:
+                self.requests.popleft()
+            
+            # 如果达到速率限制，等待
+            if len(self.requests) >= self.max_requests:
+                wait_time = 60 - (now - self.requests[0]) + 0.1
+                if wait_time > 0:
+                    logger.info(f"Rate limit reached, waiting {wait_time:.1f} seconds...")
+                    time.sleep(wait_time)
+                    # 再次清理
+                    while self.requests and self.requests[0] < time.time() - 60:
+                        self.requests.popleft()
+            
+            # 确保最小间隔
+            if self.requests:
+                time_since_last = now - self.requests[-1]
+                if time_since_last < self.min_interval:
+                    time.sleep(self.min_interval - time_since_last)
+            
+            # 记录这次请求
+            self.requests.append(time.time())
+
+# 创建全局速率限制器
+write_limiter = RateLimiter(WRITE_REQUESTS_PER_MINUTE)
+read_limiter = RateLimiter(READ_REQUESTS_PER_MINUTE)
+
+def safe_batch_update(worksheet, data_list, start_row=1, batch_size=BATCH_SIZE, show_progress=True):
+    """安全的批量更新，自动处理大数据分批"""
+    success = True
+    total_rows = len(data_list)
+    
+    # 确定最大列数
+    max_cols = max(len(row) for row in data_list) if data_list else 0
+    
+    # 进度显示
+    if show_progress:
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+    
+    for i in range(0, total_rows, batch_size):
+        batch = data_list[i:i+batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (total_rows + batch_size - 1) // batch_size
+        
+        if show_progress:
+            progress_text.text(f"正在保存数据... 批次 {batch_num}/{total_batches}")
+            progress_bar.progress(batch_num / total_batches)
+        
+        try:
+            # 构建更新范围
+            end_row = start_row + i + len(batch) - 1
+            # 使用最大列数来确定范围，支持超过26列的情况
+            if max_cols <= 26:
+                end_col = chr(64 + max_cols)
+            else:
+                # 支持超过26列的情况 (AA, AB, ...)
+                col_num = max_cols - 1
+                col_letters = ''
+                while col_num >= 0:
+                    col_letters = chr(65 + (col_num % 26)) + col_letters
+                    col_num = col_num // 26 - 1
+                end_col = col_letters
+            
+            range_name = f'A{start_row + i}:{end_col}{end_row}'
+            
+            # 应用速率限制
+            write_limiter.wait_if_needed()
+            
+            # 批量更新
+            worksheet.update(range_name, batch)
+            
+        except Exception as e:
+            logger.error(f"Failed to update batch {i//batch_size + 1}: {str(e)}")
+            success = False
+            
+            # 如果是速率限制错误，等待后重试
+            if "429" in str(e) or "quota" in str(e).lower():
+                if show_progress:
+                    progress_text.text("⚠️ API速率限制，等待60秒后继续...")
+                time.sleep(60)
+                try:
+                    write_limiter.wait_if_needed()
+                    worksheet.update(range_name, batch)
+                    success = True
+                except:
+                    pass
+    
+    if show_progress:
+        progress_text.empty()
+        progress_bar.empty()
+    
+    return success
 
 def get_google_sheets_client(force_new=False):
     """获取Google Sheets客户端，支持强制刷新"""
@@ -130,6 +267,7 @@ def verify_connection(gc):
     """验证连接是否有效"""
     try:
         # 尝试列出文件来验证连接
+        read_limiter.wait_if_needed()
         gc.list_spreadsheet_files()
         return True
     except Exception as e:
@@ -197,18 +335,38 @@ def save_backup_metadata(gc, data_type, data_hash, row_count):
         
         # 获取现有数据
         try:
+            read_limiter.wait_if_needed()
             existing_data = worksheet.get_all_values()
+            
             if not existing_data:
+                # 如果没有数据，添加标题行
+                write_limiter.wait_if_needed()
                 worksheet.update('A1', [['Data Type', 'Hash', 'Row Count', 'Timestamp']])
-                row_num = 2
+                write_limiter.wait_if_needed()
+                worksheet.update('A2', [metadata])
             else:
-                row_num = len(existing_data) + 1
+                # 查找是否已有该数据类型的记录
+                updated = False
+                for i, row in enumerate(existing_data[1:], start=2):  # 跳过标题行
+                    if len(row) > 0 and row[0] == data_type:
+                        # 更新现有记录
+                        write_limiter.wait_if_needed()
+                        worksheet.update(f'A{i}', [metadata])
+                        updated = True
+                        break
+                
+                if not updated:
+                    # 添加新记录
+                    row_num = len(existing_data) + 1
+                    write_limiter.wait_if_needed()
+                    worksheet.update(f'A{row_num}', [metadata])
         except:
-            worksheet.update('A1', [['Data Type', 'Hash', 'Row Count', 'Timestamp']])
-            row_num = 2
+            # 如果出错，重新初始化
+            write_limiter.wait_if_needed()
+            worksheet.clear()
+            write_limiter.wait_if_needed()
+            worksheet.update('A1', [['Data Type', 'Hash', 'Row Count', 'Timestamp'], metadata])
         
-        # 添加新记录
-        worksheet.update(f'A{row_num}', [metadata])
         logger.info(f"Backup metadata saved for {data_type}")
         return True
     except Exception as e:
@@ -216,7 +374,7 @@ def save_backup_metadata(gc, data_type, data_hash, row_count):
         return False
 
 def save_permissions_to_sheets(df, gc):
-    """保存权限数据，增强稳定性"""
+    """保存权限数据，替换旧数据"""
     try:
         # 验证连接
         if not verify_connection(gc):
@@ -237,36 +395,25 @@ def save_permissions_to_sheets(df, gc):
         # 计算数据哈希
         data_hash = calculate_data_hash(df)
         
-        # 先保存备份元数据
+        # 保存备份元数据
+        write_limiter.wait_if_needed()
         save_backup_metadata(gc, 'permissions', data_hash, len(df))
         
-        # 不清空工作表，而是创建新的版本
-        # 获取当前数据行数
+        # 清空现有数据
+        write_limiter.wait_if_needed()
         try:
-            current_data = worksheet.get_all_values()
-            if current_data and len(current_data) > 0:
-                # 在数据后添加分隔行
-                separator_row = len(current_data) + 2
-                worksheet.update(f'A{separator_row}', [['=== 更新于 ' + current_time + ' ===']])
-                start_row = separator_row + 1
-            else:
-                start_row = 1
-        except:
-            start_row = 1
+            worksheet.clear()
+            logger.info("Cleared existing permissions data")
+        except Exception as e:
+            logger.warning(f"Failed to clear worksheet: {str(e)}")
         
-        # 批量更新数据
-        batch_size = 50
-        for i in range(0, len(all_data), batch_size):
-            batch = all_data[i:i+batch_size]
-            retry_on_failure(
-                worksheet.update,
-                f'A{start_row + i}',
-                batch
-            )
-            time.sleep(0.5)  # 避免速率限制
-        
-        logger.info(f"Successfully saved {len(df)} permission records")
-        return True
+        # 写入新数据（从第1行开始）
+        if safe_batch_update(worksheet, all_data, 1, BATCH_SIZE, show_progress=True):
+            logger.info(f"Successfully saved {len(df)} permission records")
+            return True
+        else:
+            logger.error("Failed to save all permission records")
+            return False
         
     except Exception as e:
         logger.error(f"Failed to save permissions: {str(e)}\n{traceback.format_exc()}")
@@ -274,7 +421,7 @@ def save_permissions_to_sheets(df, gc):
         return False
 
 def load_permissions_from_sheets(gc):
-    """加载权限数据，增加容错处理"""
+    """加载权限数据"""
     try:
         # 验证连接
         if not verify_connection(gc):
@@ -283,42 +430,29 @@ def load_permissions_from_sheets(gc):
                 return None
         
         spreadsheet = retry_on_failure(get_or_create_spreadsheet, gc)
+        
+        # 应用读取速率限制
+        read_limiter.wait_if_needed()
         worksheet = retry_on_failure(get_or_create_worksheet, spreadsheet, PERMISSIONS_SHEET_NAME)
         
+        # 应用读取速率限制
+        read_limiter.wait_if_needed()
         data = retry_on_failure(worksheet.get_all_values)
         
         if not data or len(data) <= 1:
             return None
         
-        # 查找最新的数据块（跳过分隔行）
-        latest_data = []
-        headers_found = False
+        # 直接读取所有数据（跳过标题行）
+        df = pd.DataFrame(data[1:], columns=data[0])
         
-        for row in reversed(data):
-            if row and len(row) >= 2:
-                # 跳过分隔行
-                if any('===' in str(cell) for cell in row):
-                    if headers_found:  # 找到了上一个版本的分隔行
-                        break
-                    continue
-                
-                # 检查是否是标题行
-                if row[0] == '门店名称' and row[1] == '人员编号':
-                    headers_found = True
-                    continue
-                
-                # 添加数据行
-                if headers_found and row[0] and row[1]:
-                    latest_data.append(row[:2])
-        
-        if not latest_data:
-            # 如果没找到最新数据，使用所有非空数据
-            for row in data[1:]:
-                if len(row) >= 2 and row[0] and row[1] and '===' not in str(row[0]):
-                    latest_data.append(row[:2])
-        
-        if latest_data:
-            df = pd.DataFrame(latest_data, columns=['门店名称', '人员编号'])
+        # 只保留前两列（门店名称和人员编号）
+        if len(df.columns) >= 2:
+            df = df.iloc[:, :2]
+            df.columns = ['门店名称', '人员编号']
+            
+            # 过滤掉空行
+            df = df[(df['门店名称'].str.strip() != '') & (df['人员编号'].str.strip() != '')]
+            
             logger.info(f"Loaded {len(df)} permission records")
             return df
         
@@ -329,7 +463,7 @@ def load_permissions_from_sheets(gc):
         return None
 
 def save_reports_to_sheets(reports_dict, gc):
-    """保存报表数据，增强稳定性和分片处理"""
+    """保存报表数据，每个门店独立工作表"""
     try:
         # 验证连接
         if not verify_connection(gc):
@@ -341,12 +475,21 @@ def save_reports_to_sheets(reports_dict, gc):
         
         # 保存每个门店的数据到单独的工作表
         success_count = 0
+        total_stores = len(reports_dict)
         
-        for store_name, df in reports_dict.items():
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        
+        for idx, (store_name, df) in enumerate(reports_dict.items()):
             try:
+                progress_text.text(f"正在保存门店 {idx+1}/{total_stores}: {store_name}")
+                progress_bar.progress((idx + 1) / total_stores)
+                
                 # 创建安全的工作表名称
                 safe_sheet_name = store_name.replace('/', '_').replace('\\', '_')[:31]  # 工作表名称限制
                 
+                # 应用速率限制
+                write_limiter.wait_if_needed()
                 worksheet = retry_on_failure(get_or_create_worksheet, spreadsheet, safe_sheet_name)
                 
                 # 清理数据
@@ -361,38 +504,51 @@ def save_reports_to_sheets(reports_dict, gc):
                 data_hash = calculate_data_hash(df)
                 
                 # 保存备份元数据
+                write_limiter.wait_if_needed()
                 save_backup_metadata(gc, f'report_{store_name}', data_hash, len(df))
                 
-                # 分批上传
-                batch_size = 100
-                worksheet.clear()
-                time.sleep(0.5)
+                # 清空工作表（完全替换旧数据）
+                write_limiter.wait_if_needed()
+                try:
+                    worksheet.clear()
+                    logger.info(f"Cleared existing data for {store_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to clear worksheet for {store_name}: {str(e)}")
                 
-                for i in range(0, len(data_list), batch_size):
-                    batch = data_list[i:i+batch_size]
-                    retry_on_failure(
-                        worksheet.update,
-                        f'A{i+1}',
-                        batch
-                    )
-                    time.sleep(0.5)
-                
-                success_count += 1
-                logger.info(f"Successfully saved report for {store_name}")
+                # 使用安全的批量更新
+                if safe_batch_update(worksheet, data_list, 1, BATCH_SIZE, show_progress=False):
+                    success_count += 1
+                    logger.info(f"Successfully saved report for {store_name}")
+                else:
+                    logger.error(f"Failed to save all data for {store_name}")
                 
             except Exception as e:
                 logger.error(f"Failed to save report for {store_name}: {str(e)}")
-                st.warning(f"保存 {store_name} 失败: {str(e)}")
+                # 如果是速率限制错误，等待更长时间
+                if "429" in str(e) or "quota" in str(e).lower():
+                    st.warning(f"API速率限制，等待60秒后继续...")
+                    time.sleep(60)
+                else:
+                    st.warning(f"保存 {store_name} 失败: {str(e)}")
+        
+        progress_text.empty()
+        progress_bar.empty()
         
         # 更新系统信息
         try:
+            write_limiter.wait_if_needed()
             info_worksheet = get_or_create_worksheet(spreadsheet, SYSTEM_INFO_SHEET_NAME)
             info_data = [
                 ['Last Update', datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
                 ['Total Stores', str(len(reports_dict))],
                 ['Success Count', str(success_count)],
-                ['Status', 'Active']
+                ['Status', 'Active' if success_count > 0 else 'Error']
             ]
+            
+            # 清空并更新系统信息
+            write_limiter.wait_if_needed()
+            info_worksheet.clear()
+            write_limiter.wait_if_needed()
             retry_on_failure(info_worksheet.update, 'A1', info_data)
         except Exception as e:
             logger.warning(f"Failed to update system info: {str(e)}")
@@ -416,6 +572,7 @@ def load_reports_from_sheets(gc):
         spreadsheet = retry_on_failure(get_or_create_spreadsheet, gc)
         
         # 获取所有工作表
+        read_limiter.wait_if_needed()
         worksheets = retry_on_failure(spreadsheet.worksheets)
         
         reports_dict = {}
@@ -426,6 +583,8 @@ def load_reports_from_sheets(gc):
                 continue
             
             try:
+                # 应用读取速率限制
+                read_limiter.wait_if_needed()
                 data = retry_on_failure(worksheet.get_all_values)
                 
                 if len(data) > 1:
@@ -449,7 +608,9 @@ def check_system_status(gc):
     try:
         spreadsheet = get_or_create_spreadsheet(gc)
         try:
+            read_limiter.wait_if_needed()
             info_worksheet = spreadsheet.worksheet(SYSTEM_INFO_SHEET_NAME)
+            read_limiter.wait_if_needed()
             info_data = info_worksheet.get_all_values()
             
             if info_data:
@@ -640,6 +801,8 @@ if 'google_sheets_client' not in st.session_state:
     st.session_state.google_sheets_client = None
 if 'last_connection_check' not in st.session_state:
     st.session_state.last_connection_check = None
+if 'api_error_count' not in st.session_state:
+    st.session_state.api_error_count = 0
 
 # 主标题
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
@@ -664,7 +827,19 @@ gc = st.session_state.google_sheets_client
 
 # 显示系统状态
 system_status = check_system_status(gc)
-status_html = f'<div class="status-good">系统状态: {system_status.get("Status", "Unknown")} | 最后更新: {system_status.get("Last Update", "N/A")}</div>'
+status_color = "status-good" if system_status.get("Status") == "Active" else "status-warning"
+
+# 显示API使用状态
+write_usage_pct = (len(write_limiter.requests) / WRITE_REQUESTS_PER_MINUTE) * 100
+read_usage_pct = (len(read_limiter.requests) / READ_REQUESTS_PER_MINUTE) * 100
+
+status_html = f'''
+<div class="{status_color}">
+    <strong>系统状态:</strong> {system_status.get("Status", "Unknown")} | 
+    <strong>最后更新:</strong> {system_status.get("Last Update", "N/A")} | 
+    <strong>API使用率:</strong> 写入 {write_usage_pct:.0f}% / 读取 {read_usage_pct:.0f}%
+</div>
+'''
 st.markdown(status_html, unsafe_allow_html=True)
 
 # 侧边栏
@@ -746,17 +921,114 @@ with st.sidebar:
             # 系统维护功能
             st.subheader("🔧 系统维护")
             
-            if st.button("刷新连接"):
-                gc = get_google_sheets_client(force_new=True)
-                if gc and verify_connection(gc):
-                    st.session_state.google_sheets_client = gc
-                    st.success("✅ 连接已刷新")
-                else:
-                    st.error("❌ 刷新失败")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("刷新连接"):
+                    gc = get_google_sheets_client(force_new=True)
+                    if gc and verify_connection(gc):
+                        st.session_state.google_sheets_client = gc
+                        st.success("✅ 连接已刷新")
+                    else:
+                        st.error("❌ 刷新失败")
             
-            if st.button("查看系统日志"):
-                # 这里可以实现查看日志的功能
-                st.info("日志功能开发中...")
+            with col2:
+                if st.button("重置速率限制"):
+                    write_limiter.requests.clear()
+                    read_limiter.requests.clear()
+                    st.success("✅ 速率限制已重置")
+            
+            # 数据备份功能
+            st.subheader("💾 数据备份")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("导出权限数据"):
+                    if permissions_data is not None and len(permissions_data) > 0:
+                        try:
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                permissions_data.to_excel(writer, index=False, sheet_name='权限数据')
+                            
+                            st.download_button(
+                                "📥 下载权限备份",
+                                buffer.getvalue(),
+                                f"权限备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as e:
+                            st.error(f"导出失败: {str(e)}")
+                    else:
+                        st.warning("没有权限数据可导出")
+            
+            with col2:
+                if st.button("导出所有报表"):
+                    if reports_data:
+                        try:
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                for sheet_name, df in reports_data.items():
+                                    # 确保工作表名称有效
+                                    safe_name = sheet_name[:31]
+                                    df.to_excel(writer, index=False, sheet_name=safe_name)
+                            
+                            st.download_button(
+                                "📥 下载报表备份",
+                                buffer.getvalue(),
+                                f"报表备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as e:
+                            st.error(f"导出失败: {str(e)}")
+                    else:
+                        st.warning("没有报表数据可导出")
+            
+            # 显示当前API使用情况
+            st.caption("📊 API使用情况")
+            write_usage = len(write_limiter.requests)
+            read_usage = len(read_limiter.requests)
+            
+            st.progress(write_usage / WRITE_REQUESTS_PER_MINUTE)
+            st.caption(f"写入请求: {write_usage}/{WRITE_REQUESTS_PER_MINUTE}")
+            
+            st.progress(read_usage / READ_REQUESTS_PER_MINUTE)
+            st.caption(f"读取请求: {read_usage}/{READ_REQUESTS_PER_MINUTE}")
+            
+            # API配额说明
+            with st.expander("ℹ️ API限制说明"):
+                st.markdown("""
+                **Google Sheets API限制：**
+                - 写入请求：60次/分钟
+                - 读取请求：100次/分钟
+                - 单次请求最大单元格数：50,000
+                
+                **优化建议：**
+                1. 批量上传数据，避免频繁操作
+                2. 大文件请分批上传
+                3. 遇到限制错误请等待1分钟
+                4. 使用"重置速率限制"可清空计数器
+                """)
+            
+            # 紧急清理功能
+            if st.button("🚨 紧急清空所有数据"):
+                confirm = st.checkbox("我确认要清空所有数据（此操作不可恢复）")
+                if confirm:
+                    try:
+                        spreadsheet = get_or_create_spreadsheet(gc)
+                        # 清理所有工作表
+                        worksheets = spreadsheet.worksheets()
+                        cleared_count = 0
+                        
+                        for worksheet in worksheets:
+                            try:
+                                write_limiter.wait_if_needed()
+                                worksheet.clear()
+                                cleared_count += 1
+                            except Exception as e:
+                                st.warning(f"清理 {worksheet.title} 失败: {str(e)}")
+                        
+                        st.success(f"✅ 已清空 {cleared_count} 个工作表")
+                    except Exception as e:
+                        st.error(f"❌ 清理失败: {str(e)}")
     
     else:
         if st.session_state.logged_in:
@@ -772,7 +1044,7 @@ with st.sidebar:
 
 # 主界面
 if user_type == "管理员" and st.session_state.is_admin:
-    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端，支持自动备份和恢复</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3></div>', unsafe_allow_html=True)
     
     with st.spinner("加载数据统计..."):
         permissions_data = load_permissions_from_sheets(gc)
