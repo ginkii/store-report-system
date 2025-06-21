@@ -36,6 +36,8 @@ WRITE_REQUESTS_PER_MINUTE = 60
 READ_REQUESTS_PER_MINUTE = 100
 MIN_REQUEST_INTERVAL = 0.3  # 进一步减少最小请求间隔
 BATCH_SIZE = 200  # 进一步增大批量操作大小
+MAX_CONCURRENT_SAVES = 5  # 最大并发保存数
+CHUNK_SIZE = 10  # 每个chunk包含的门店数
 
 # CSS样式（保持原有样式）
 st.markdown("""
@@ -409,86 +411,220 @@ def load_permissions_from_sheets(gc):
         logger.error(f"Failed to load permissions: {str(e)}")
         return None
 
-def save_reports_to_sheets(reports_dict, gc):
-    """保存报表数据 - 高速版"""
+def save_reports_to_sheets_bulk(reports_dict, gc):
+    """批量保存报表数据 - 超大批量优化版"""
     try:
         spreadsheet = get_or_create_spreadsheet(gc)
         
-        success_count = 0
         total_stores = len(reports_dict)
+        success_count = 0
         failed_stores = []
-        saved_stores = []  # 记录成功保存的门店
+        saved_stores = []
         
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
+        # 统计信息
+        start_time = time.time()
         
-        # 批量处理所有门店
-        for idx, (store_name, df) in enumerate(reports_dict.items()):
-            try:
-                progress_text.text(f"正在保存门店 {idx+1}/{total_stores}: {store_name}")
-                progress_bar.progress((idx + 1) / total_stores)
-                
-                # 创建安全的工作表名称
-                safe_sheet_name = store_name.replace('/', '_').replace('\\', '_')[:31]
-                
-                # 获取或创建工作表
-                worksheet = get_or_create_worksheet(spreadsheet, safe_sheet_name)
-                
-                # 清理数据
-                df_cleaned = df.copy()
-                for col in df_cleaned.columns:
-                    df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
-                
-                # 转换为列表格式
-                data_list = [df_cleaned.columns.tolist()] + df_cleaned.values.tolist()
-                
-                # 清空并批量写入
-                worksheet.clear()
-                
-                # 使用batch_update优化
-                if safe_batch_update(worksheet, data_list, 1, BATCH_SIZE, show_progress=False):
+        # 创建主进度条
+        main_progress = st.container()
+        with main_progress:
+            st.info(f"📊 准备上传 {total_stores} 个门店的报表")
+            overall_progress = st.progress(0)
+            status_text = st.empty()
+            stats_container = st.container()
+        
+        # 智能分组策略
+        if total_stores <= 30:
+            chunk_size = 10
+            wait_time = 5
+        elif total_stores <= 100:
+            chunk_size = 15
+            wait_time = 10
+        else:
+            chunk_size = 20
+            wait_time = 15
+        
+        # 将门店分组
+        all_stores = list(reports_dict.items())
+        chunks = [all_stores[i:i + chunk_size] for i in range(0, len(all_stores), chunk_size)]
+        total_chunks = len(chunks)
+        
+        status_text.text(f"已将 {total_stores} 个门店分成 {total_chunks} 组处理")
+        
+        # 处理每个chunk
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk_start_time = time.time()
+            chunk_stores = dict(chunk)
+            chunk_failed = []
+            
+            # 更新进度
+            status_text.text(f"正在处理第 {chunk_idx + 1}/{total_chunks} 组 (包含 {len(chunk_stores)} 个门店)")
+            
+            # 保存当前chunk
+            for store_idx, (store_name, df) in enumerate(chunk_stores.items()):
+                try:
+                    # 创建安全的工作表名称
+                    safe_sheet_name = store_name.replace('/', '_').replace('\\', '_')[:31]
+                    
+                    # 限速检查
+                    write_limiter.wait_if_needed()
+                    
+                    # 获取或创建工作表
+                    worksheet = get_or_create_worksheet(spreadsheet, safe_sheet_name)
+                    
+                    # 清理数据
+                    df_cleaned = df.copy()
+                    for col in df_cleaned.columns:
+                        df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
+                    
+                    # 转换为列表格式
+                    data_list = [df_cleaned.columns.tolist()] + df_cleaned.values.tolist()
+                    
+                    # 清空并写入
+                    worksheet.clear()
+                    
+                    # 根据数据大小选择策略
+                    if len(data_list) > 1000:  # 大数据集
+                        # 分批写入
+                        for i in range(0, len(data_list), 500):
+                            batch = data_list[i:i+500]
+                            write_limiter.wait_if_needed()
+                            if i == 0:
+                                worksheet.update(f'A{i+1}', batch, value_input_option='RAW')
+                            else:
+                                worksheet.append_rows(batch, value_input_option='RAW')
+                    else:
+                        # 一次性写入
+                        write_limiter.wait_if_needed()
+                        worksheet.update('A1', data_list, value_input_option='RAW')
+                    
                     success_count += 1
-                    saved_stores.append(safe_sheet_name)  # 记录成功保存的工作表名
-                else:
-                    failed_stores.append(store_name)
+                    saved_stores.append(safe_sheet_name)
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    logger.error(f"Failed to save {store_name}: {error_str}")
+                    
+                    if "429" in error_str or "quota" in error_str.lower():
+                        # API限制，暂停更长时间
+                        status_text.text(f"遇到API限制，暂停60秒...")
+                        time.sleep(60)
+                        chunk_failed.append((store_name, df))
+                    else:
+                        failed_stores.append(f"{store_name}: {error_str[:30]}...")
+            
+            # 重试失败的门店
+            if chunk_failed:
+                status_text.text(f"正在重试 {len(chunk_failed)} 个失败的门店...")
+                time.sleep(10)
                 
-            except Exception as e:
-                logger.error(f"Failed to save report for {store_name}: {str(e)}")
-                failed_stores.append(store_name)
-                
-                # 速率限制时短暂等待
-                if "429" in str(e):
-                    time.sleep(5)
+                for store_name, df in chunk_failed:
+                    try:
+                        safe_sheet_name = store_name.replace('/', '_').replace('\\', '_')[:31]
+                        worksheet = get_or_create_worksheet(spreadsheet, safe_sheet_name)
+                        
+                        df_cleaned = df.copy()
+                        for col in df_cleaned.columns:
+                            df_cleaned[col] = df_cleaned[col].astype(str).replace('nan', '').replace('None', '')
+                        
+                        data_list = [df_cleaned.columns.tolist()] + df_cleaned.values.tolist()
+                        
+                        write_limiter.wait_if_needed()
+                        worksheet.clear()
+                        worksheet.update('A1', data_list, value_input_option='RAW')
+                        
+                        success_count += 1
+                        saved_stores.append(safe_sheet_name)
+                        
+                    except Exception as e:
+                        failed_stores.append(f"{store_name} (重试失败)")
+            
+            # 更新总进度
+            progress = (chunk_idx + 1) / total_chunks
+            overall_progress.progress(progress)
+            
+            # 显示统计信息
+            chunk_time = time.time() - chunk_start_time
+            total_time = time.time() - start_time
+            avg_time_per_store = total_time / (success_count if success_count > 0 else 1)
+            remaining_stores = total_stores - success_count - len(failed_stores)
+            eta = remaining_stores * avg_time_per_store
+            
+            with stats_container:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("✅ 成功", success_count)
+                with col2:
+                    st.metric("❌ 失败", len(failed_stores))
+                with col3:
+                    st.metric("⏱️ 已用时", f"{int(total_time)}秒")
+                with col4:
+                    st.metric("⏳ 预计剩余", f"{int(eta)}秒")
+            
+            # chunk间等待（除了最后一个）
+            if chunk_idx < total_chunks - 1:
+                wait_message = f"等待 {wait_time} 秒后继续下一组..."
+                for i in range(wait_time, 0, -1):
+                    status_text.text(f"{wait_message} ({i}秒)")
+                    time.sleep(1)
         
-        progress_text.empty()
-        progress_bar.empty()
+        # 完成后清理
+        overall_progress.progress(1.0)
+        status_text.text("上传完成！")
         
         # 更新系统信息
         try:
+            write_limiter.wait_if_needed()
             info_worksheet = get_or_create_worksheet(spreadsheet, SYSTEM_INFO_SHEET_NAME)
             info_data = [
                 ['Last Update', datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                ['Total Stores', str(success_count)],  # 使用实际成功数量
+                ['Total Stores', str(success_count)],
                 ['Success Count', str(success_count)],
                 ['Failed Count', str(len(failed_stores))],
-                ['Status', 'Active' if success_count > 0 else 'Error'],
-                ['Store List', ', '.join(saved_stores[:10]) + ('...' if len(saved_stores) > 10 else '')]  # 保存部分门店列表
+                ['Upload Duration', f"{int(time.time() - start_time)} seconds"],
+                ['Status', 'Active' if success_count > 0 else 'Error']
             ]
             
             info_worksheet.clear()
             info_worksheet.update('A1', info_data, value_input_option='RAW')
         except:
-            pass  # 系统信息更新失败不影响主功能
+            pass
         
-        # 显示结果
-        if failed_stores:
-            st.warning(f"以下门店保存失败: {', '.join(failed_stores)}")
+        # 最终报告
+        st.divider()
+        if success_count == total_stores:
+            st.success(f"🎉 完美！所有 {total_stores} 个门店都已成功上传！")
+            st.balloons()
+        else:
+            st.warning(f"📊 上传完成：成功 {success_count}/{total_stores} 个门店")
+            
+            if failed_stores:
+                with st.expander(f"查看失败的 {len(failed_stores)} 个门店", expanded=True):
+                    for idx, store in enumerate(failed_stores, 1):
+                        st.write(f"{idx}. {store}")
+                
+                # 生成失败报告
+                failed_df = pd.DataFrame(failed_stores, columns=['失败门店及原因'])
+                csv = failed_df.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    "📥 下载失败清单",
+                    csv,
+                    f"上传失败清单_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    "text/csv"
+                )
+        
+        # 性能报告
+        with st.expander("📈 查看性能报告"):
+            st.write(f"- 总耗时：{int(time.time() - start_time)} 秒")
+            st.write(f"- 平均每个门店：{avg_time_per_store:.1f} 秒")
+            st.write(f"- 处理速度：{success_count / (time.time() - start_time) * 60:.1f} 个门店/分钟")
         
         return success_count > 0
         
     except Exception as e:
-        logger.error(f"Failed to save reports: {str(e)}")
-        st.error(f"保存报表失败: {str(e)}")
+        logger.error(f"Bulk save failed: {str(e)}")
+        st.error(f"批量保存失败: {str(e)}")
+        with st.expander("错误详情"):
+            st.code(traceback.format_exc())
         return False
 
 def load_reports_from_sheets(gc):
@@ -871,17 +1007,73 @@ with st.sidebar:
                     status_text.empty()
                     
                     if reports_dict:
-                        with st.spinner(f"正在保存 {len(reports_dict)} 个门店的报表..."):
-                            if save_reports_to_sheets(reports_dict, gc):
-                                st.success(f"✅ 报表已上传：{len(reports_dict)} 个门店")
-                                st.balloons()
+                        st.success(f"✅ 成功读取 {len(reports_dict)} 个门店的报表")
+                        
+                        # 显示预览信息
+                        with st.expander("查看门店列表"):
+                            stores_list = list(reports_dict.keys())
+                            # 分列显示
+                            cols = st.columns(3)
+                            for idx, store in enumerate(stores_list):
+                                cols[idx % 3].write(f"{idx + 1}. {store}")
+                        
+                        # 大批量上传配置
+                        st.subheader("🚀 批量上传配置")
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            upload_strategy = st.selectbox(
+                                "选择上传策略",
+                                ["智能模式（推荐）", "快速模式", "稳定模式", "自定义"],
+                                help="智能模式会根据门店数量自动调整参数"
+                            )
+                        
+                        with col2:
+                            if upload_strategy == "自定义":
+                                custom_chunk = st.number_input(
+                                    "每组门店数",
+                                    min_value=5,
+                                    max_value=50,
+                                    value=20,
+                                    help="每组处理的门店数量"
+                                )
                             else:
-                                st.error("❌ 部分或全部保存失败，请检查日志")
+                                custom_chunk = None
+                        
+                        # 预估时间
+                        if len(reports_dict) <= 30:
+                            estimated_time = len(reports_dict) * 2
+                        elif len(reports_dict) <= 100:
+                            estimated_time = len(reports_dict) * 3
+                        else:
+                            estimated_time = len(reports_dict) * 4
+                        
+                        st.info(f"""
+                        📊 **上传信息**
+                        - 总门店数：{len(reports_dict)} 个
+                        - 预计耗时：{estimated_time // 60} 分 {estimated_time % 60} 秒
+                        - 建议：{"该批量较大，建议使用稳定模式" if len(reports_dict) > 100 else "可以使用快速模式"}
+                        """)
+                        
+                        # 确认上传
+                        col1, col2, col3 = st.columns([1, 2, 1])
+                        with col2:
+                            if st.button("🚀 开始批量上传", type="primary", use_container_width=True):
+                                # 调用新的批量上传函数
+                                save_reports_to_sheets_bulk(reports_dict, gc)
+                                
+                                # 清理会话状态
+                                if 'last_status_check' in st.session_state:
+                                    del st.session_state.last_status_check
+                                if 'cached_status' in st.session_state:
+                                    del st.session_state.cached_status
                     else:
                         st.error("❌ 没有有效的报表数据")
                 except Exception as e:
                     st.error(f"❌ 读取失败：{str(e)}")
                     logger.error(f"Failed to read reports file: {str(e)}")
+                    with st.expander("错误详情"):
+                        st.code(traceback.format_exc())
             
             # 系统维护功能
             st.subheader("🔧 系统维护")
