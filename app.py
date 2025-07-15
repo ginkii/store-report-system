@@ -777,38 +777,6 @@ with st.sidebar:
         st.success("🟢 云数据库已连接")
     else:
         st.error("🔴 云数据库断开")
-
-    st.subheader("🔧 系统诊断")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🚀 快速测试", help="快速检测基本权限"):
-            if gc:
-                quick_permission_test(gc)
-            else:
-                st.error("请先连接数据库")
-    
-    with col2:
-        if st.button("🔍 详细诊断", help="完整的权限和API测试"):
-            if gc:
-                with st.expander("📋 详细诊断结果", expanded=True):
-                    verify_api_status(gc)
-            else:
-                st.error("请先连接数据库")
-    
-    # 服务账号信息
-    if gc:
-        with st.expander("ℹ️ 服务账号信息"):
-            try:
-                creds = gc.auth
-                if hasattr(creds, 'service_account_email'):
-                    st.code(f"服务账号: {creds.service_account_email}")
-                if hasattr(creds, 'project_id'):
-                    st.code(f"项目ID: {creds.project_id}")
-                st.code(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            except Exception as e:
-                st.warning(f"无法获取详细信息: {str(e)}")
-    
     user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
     
     if user_type == "管理员":
