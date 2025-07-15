@@ -777,6 +777,40 @@ with st.sidebar:
         st.success("🟢 云数据库已连接")
     else:
         st.error("🔴 云数据库断开")
+        # 添加诊断功能
+    st.subheader("🔧 系统诊断")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🚀 快速测试", help="快速检测基本权限"):
+            if gc:
+                quick_permission_test(gc)
+            else:
+                st.error("请先连接数据库")
+    
+    with col2:
+        if st.button("🔍 详细诊断", help="完整的权限和API测试"):
+            if gc:
+                with st.expander("📋 详细诊断结果", expanded=True):
+                    verify_api_status(gc)
+            else:
+                st.error("请先连接数据库")
+    
+    # 添加一些有用的信息
+    if gc:
+        with st.expander("ℹ️ 服务账号信息"):
+            try:
+                creds = gc.auth
+                if hasattr(creds, 'service_account_email'):
+                    st.code(f"服务账号: {creds.service_account_email}")
+                if hasattr(creds, 'project_id'):
+                    st.code(f"项目ID: {creds.project_id}")
+                    
+                # 显示当前时间（用于调试时间相关问题）
+                st.code(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+            except Exception as e:
+                st.warning(f"无法获取详细信息: {str(e)}")
     
     user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
     
@@ -1140,3 +1174,92 @@ with col2:
     st.caption(f"💾 缓存项目: {cache_count}")
 with col3:
     st.caption("🔧 版本: v2.0 (稳定版)")
+    def verify_api_status(gc):
+    """验证 API 和权限状态"""
+    tests = {
+        "连接测试": False,
+        "读取权限": False,
+        "写入权限": False,
+        "创建权限": False
+    }
+    
+    try:
+        # 测试1: 基本连接
+        tests["连接测试"] = True
+        st.success("✅ 基本连接成功")
+        
+        # 测试2: 读取权限
+        try:
+            files = gc.openall()
+            tests["读取权限"] = True
+            st.success(f"✅ 读取权限正常 (找到 {len(files)} 个文件)")
+        except Exception as e:
+            st.error(f"❌ 读取权限失败: {str(e)}")
+        
+        # 测试3: 创建权限
+        try:
+            test_name = f"权限测试_{int(time.time())}"
+            test_sheet = gc.create(test_name)
+            tests["创建权限"] = True
+            st.success("✅ 创建权限正常")
+            
+            # 测试4: 写入权限
+            try:
+                test_sheet.sheet1.update('A1', [['测试', '数据']])
+                tests["写入权限"] = True
+                st.success("✅ 写入权限正常")
+            except Exception as e:
+                st.error(f"❌ 写入权限失败: {str(e)}")
+            
+            # 清理测试文件
+            time.sleep(1)  # 等待一秒确保操作完成
+            gc.del_spreadsheet(test_sheet.id)
+            st.info("🗑️ 测试文件已清理")
+            
+        except Exception as e:
+            st.error(f"❌ 创建权限失败: {str(e)}")
+    
+    except Exception as e:
+        st.error(f"❌ 连接失败: {str(e)}")
+    
+    return tests
+
+def quick_permission_test(gc):
+    """快速权限测试"""
+    try:
+        # 快速测试
+        files = gc.openall()
+        st.success(f"✅ 可以读取文件: {len(files)} 个")
+        
+        # 测试创建权限
+        test_name = f"快速测试_{int(time.time())}"
+        test_sheet = gc.create(test_name)
+        st.success("✅ 可以创建文件")
+        
+        # 测试写入权限
+        test_sheet.sheet1.update('A1', [['测试']])
+        st.success("✅ 可以写入数据")
+        
+        # 清理
+        gc.del_spreadsheet(test_sheet.id)
+        st.success("✅ 权限诊断完成，一切正常！")
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ 权限问题详情: {str(e)}")
+        
+        # 分析错误类型
+        error_msg = str(e).lower()
+        if "quota" in error_msg or "rate" in error_msg:
+            st.error("🚫 **API 配额超限**：请等待几分钟后重试，或减少操作频率")
+        elif "domain" in error_msg:
+            st.error("🚫 **域权限限制**：请联系 Google Workspace 管理员")
+        elif "permission" in error_msg or "forbidden" in error_msg:
+            st.error("🚫 **权限不足**：请检查服务账号权限设置")
+        elif "authentication" in error_msg:
+            st.error("🚫 **认证失败**：请重新生成服务账号密钥")
+        else:
+            st.error(f"🚫 **未知错误**：{str(e)}")
+        
+        return False
