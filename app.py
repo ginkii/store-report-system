@@ -777,7 +777,7 @@ with st.sidebar:
         st.success("🟢 云数据库已连接")
     else:
         st.error("🔴 云数据库断开")
-        # 添加诊断功能
+
     st.subheader("🔧 系统诊断")
     
     col1, col2 = st.columns(2)
@@ -796,7 +796,7 @@ with st.sidebar:
             else:
                 st.error("请先连接数据库")
     
-    # 添加一些有用的信息
+    # 服务账号信息
     if gc:
         with st.expander("ℹ️ 服务账号信息"):
             try:
@@ -805,10 +805,7 @@ with st.sidebar:
                     st.code(f"服务账号: {creds.service_account_email}")
                 if hasattr(creds, 'project_id'):
                     st.code(f"项目ID: {creds.project_id}")
-                    
-                # 显示当前时间（用于调试时间相关问题）
                 st.code(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                
             except Exception as e:
                 st.warning(f"无法获取详细信息: {str(e)}")
     
@@ -1174,7 +1171,7 @@ with col2:
     st.caption(f"💾 缓存项目: {cache_count}")
 with col3:
     st.caption("🔧 版本: v2.0 (稳定版)")
-    def verify_api_status(gc):
+def verify_api_status(gc):
     """验证 API 和权限状态"""
     tests = {
         "连接测试": False,
