@@ -12,6 +12,8 @@ import hashlib
 import pickle
 import traceback
 from contextlib import contextmanager
+import os
+import tempfile
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -101,6 +103,13 @@ st.markdown("""
         border: 1px solid #ffeaa7;
         margin: 0.5rem 0;
     }
+    .diagnostic-panel {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -110,6 +119,10 @@ class SheetOperationError(Exception):
 
 class DataProcessingError(Exception):
     """数据处理异常"""
+    pass
+
+class PermissionError(Exception):
+    """权限验证异常"""
     pass
 
 @contextmanager
@@ -165,19 +178,86 @@ def get_cache(key: str) -> Optional[Any]:
         logger.warning(f"获取缓存失败: {str(e)}")
     return None
 
-@st.cache_resource(show_spinner="连接云数据库...")
-def get_google_sheets_client():
-    """获取Google Sheets客户端 - 使用缓存"""
+def diagnose_google_sheets_config() -> Dict[str, Any]:
+    """诊断Google Sheets配置"""
+    diagnosis = {
+        'has_secrets': False,
+        'credentials_valid': False,
+        'required_fields': [],
+        'missing_fields': [],
+        'error_message': None
+    }
+    
+    try:
+        # 检查secrets配置
+        if "google_sheets" in st.secrets:
+            diagnosis['has_secrets'] = True
+            credentials_info = st.secrets["google_sheets"]
+            
+            # 检查必需字段
+            required_fields = [
+                'type', 'project_id', 'private_key_id', 'private_key',
+                'client_email', 'client_id', 'auth_uri', 'token_uri'
+            ]
+            
+            for field in required_fields:
+                if field in credentials_info:
+                    diagnosis['required_fields'].append(field)
+                else:
+                    diagnosis['missing_fields'].append(field)
+            
+            # 检查凭据格式
+            if len(diagnosis['missing_fields']) == 0:
+                diagnosis['credentials_valid'] = True
+            else:
+                diagnosis['error_message'] = f"缺少必需字段: {', '.join(diagnosis['missing_fields'])}"
+        else:
+            diagnosis['error_message'] = "未找到 google_sheets 密钥配置"
+            
+    except Exception as e:
+        diagnosis['error_message'] = f"配置检查失败: {str(e)}"
+    
+    return diagnosis
+
+def create_google_sheets_client_with_diagnosis():
+    """创建Google Sheets客户端并提供诊断信息"""
+    diagnosis = diagnose_google_sheets_config()
+    
+    if not diagnosis['credentials_valid']:
+        raise SheetOperationError(f"Google Sheets配置错误: {diagnosis['error_message']}")
+    
     try:
         credentials_info = st.secrets["google_sheets"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive.file",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
         credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
         client = gspread.authorize(credentials)
-        logger.info("Google Sheets客户端创建成功")
+        
+        # 测试连接
+        try:
+            # 尝试访问一个测试表格或创建一个临时表格来验证权限
+            test_sheet = client.create("权限测试表格_" + str(int(time.time())))
+            test_sheet.share('', perm_type='anyone', role='reader')
+            client.del_spreadsheet(test_sheet.id)  # 删除测试表格
+            logger.info("Google Sheets客户端创建成功，权限验证通过")
+        except Exception as perm_error:
+            logger.warning(f"权限测试失败: {str(perm_error)}")
+            # 即使权限测试失败，也尝试继续使用客户端
+        
         return client
+        
     except Exception as e:
         logger.error(f"Google Sheets客户端创建失败: {str(e)}")
         raise SheetOperationError(f"连接失败: {str(e)}")
+
+@st.cache_resource(show_spinner="连接云数据库...")
+def get_google_sheets_client():
+    """获取Google Sheets客户端 - 使用缓存"""
+    return create_google_sheets_client_with_diagnosis()
 
 def safe_sheet_operation(operation_func, *args, **kwargs):
     """安全的表格操作"""
@@ -187,15 +267,28 @@ def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
     """获取或创建表格 - 增强错误处理"""
     def _operation():
         try:
+            # 首先尝试打开现有表格
             spreadsheet = gc.open(name)
             logger.info(f"表格 '{name}' 已存在")
             return spreadsheet
         except gspread.SpreadsheetNotFound:
             logger.info(f"创建新表格 '{name}'")
-            spreadsheet = gc.create(name)
-            # 设置权限为可编辑
-            spreadsheet.share('', perm_type='anyone', role='writer')
-            return spreadsheet
+            try:
+                spreadsheet = gc.create(name)
+                # 设置权限为可编辑
+                spreadsheet.share('', perm_type='anyone', role='writer')
+                return spreadsheet
+            except Exception as create_error:
+                logger.error(f"创建表格失败: {str(create_error)}")
+                # 如果创建失败，尝试使用备用名称
+                backup_name = f"{name}_{int(time.time())}"
+                logger.info(f"尝试创建备用表格: {backup_name}")
+                spreadsheet = gc.create(backup_name)
+                spreadsheet.share('', perm_type='anyone', role='writer')
+                return spreadsheet
+        except Exception as e:
+            logger.error(f"表格操作失败: {str(e)}")
+            raise SheetOperationError(f"无法访问或创建表格: {str(e)}")
     
     return safe_sheet_operation(_operation)
 
@@ -208,10 +301,67 @@ def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
             return worksheet
         except gspread.WorksheetNotFound:
             logger.info(f"创建新工作表 '{name}'")
-            worksheet = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
-            return worksheet
+            try:
+                worksheet = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
+                return worksheet
+            except Exception as create_error:
+                # 如果创建失败，尝试使用第一个工作表
+                logger.warning(f"创建工作表失败: {str(create_error)}")
+                worksheets = spreadsheet.worksheets()
+                if worksheets:
+                    worksheet = worksheets[0]
+                    logger.info(f"使用现有工作表: {worksheet.title}")
+                    return worksheet
+                else:
+                    raise SheetOperationError("无法创建或找到工作表")
+        except Exception as e:
+            logger.error(f"工作表操作失败: {str(e)}")
+            raise SheetOperationError(f"无法访问或创建工作表: {str(e)}")
     
     return safe_sheet_operation(_operation)
+
+def create_local_backup(data: Any, backup_type: str) -> str:
+    """创建本地备份"""
+    try:
+        backup_dir = tempfile.gettempdir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_file = os.path.join(backup_dir, f"{backup_type}_backup_{timestamp}.json")
+        
+        if isinstance(data, pd.DataFrame):
+            data_dict = data.to_dict('records')
+        else:
+            data_dict = data
+        
+        with open(backup_file, 'w', encoding='utf-8') as f:
+            json.dump(data_dict, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"本地备份创建成功: {backup_file}")
+        return backup_file
+    except Exception as e:
+        logger.error(f"创建本地备份失败: {str(e)}")
+        return ""
+
+def load_local_backup(backup_type: str) -> Optional[Any]:
+    """加载最新的本地备份"""
+    try:
+        backup_dir = tempfile.gettempdir()
+        backup_files = [f for f in os.listdir(backup_dir) if f.startswith(f"{backup_type}_backup_")]
+        
+        if not backup_files:
+            return None
+        
+        # 按时间排序，获取最新的备份
+        backup_files.sort(reverse=True)
+        latest_backup = os.path.join(backup_dir, backup_files[0])
+        
+        with open(latest_backup, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        logger.info(f"本地备份加载成功: {latest_backup}")
+        return data
+    except Exception as e:
+        logger.error(f"加载本地备份失败: {str(e)}")
+        return None
 
 def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
     """清理DataFrame以便JSON序列化"""
@@ -245,40 +395,57 @@ def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
 def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
     """保存权限数据 - 增强版"""
     with error_handler("保存权限数据"):
-        def _save_operation():
-            spreadsheet = get_or_create_spreadsheet(gc)
-            worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
-            
-            # 清空现有数据
-            worksheet.clear()
-            time.sleep(1)  # API限制延迟
-            
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            all_data = [['门店名称', '人员编号', '更新时间']]
-            
-            # 准备数据
-            for _, row in df.iterrows():
-                all_data.append([
-                    str(row.iloc[0]).strip(),
-                    str(row.iloc[1]).strip(),
-                    current_time
-                ])
-            
-            # 批量更新
-            worksheet.update('A1', all_data)
-            logger.info(f"权限数据保存成功: {len(df)} 条记录")
-            
-            # 清除相关缓存
-            cache_key = get_cache_key("permissions", "load")
-            if f"cache_{cache_key}" in st.session_state:
-                del st.session_state[f"cache_{cache_key}"]
-            
-            return True
+        # 先创建本地备份
+        backup_file = create_local_backup(df, "permissions")
         
-        return safe_sheet_operation(_save_operation)
+        def _save_operation():
+            try:
+                spreadsheet = get_or_create_spreadsheet(gc)
+                worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
+                
+                # 清空现有数据
+                worksheet.clear()
+                time.sleep(1)  # API限制延迟
+                
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                all_data = [['门店名称', '人员编号', '更新时间']]
+                
+                # 准备数据
+                for _, row in df.iterrows():
+                    all_data.append([
+                        str(row.iloc[0]).strip(),
+                        str(row.iloc[1]).strip(),
+                        current_time
+                    ])
+                
+                # 批量更新
+                worksheet.update('A1', all_data)
+                logger.info(f"权限数据保存成功: {len(df)} 条记录")
+                
+                # 清除相关缓存
+                cache_key = get_cache_key("permissions", "load")
+                if f"cache_{cache_key}" in st.session_state:
+                    del st.session_state[f"cache_{cache_key}"]
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"保存到云端失败: {str(e)}")
+                # 如果云端保存失败，至少有本地备份
+                if backup_file:
+                    st.warning(f"云端保存失败，但已创建本地备份: {backup_file}")
+                raise
+        
+        try:
+            return safe_sheet_operation(_save_operation)
+        except Exception:
+            # 如果完全失败，尝试使用session state保存
+            st.session_state['permissions_fallback'] = df.to_dict('records')
+            st.warning("数据已临时保存到浏览器缓存中")
+            return False
 
 def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
-    """加载权限数据 - 使用缓存"""
+    """加载权限数据 - 使用缓存和备用方案"""
     cache_key = get_cache_key("permissions", "load")
     cached_data = get_cache(cache_key)
     if cached_data is not None:
@@ -287,9 +454,8 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
     
     with error_handler("加载权限数据"):
         def _load_operation():
-            spreadsheet = get_or_create_spreadsheet(gc)
-            
             try:
+                spreadsheet = get_or_create_spreadsheet(gc)
                 worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
                 data = worksheet.get_all_values()
                 
@@ -319,8 +485,29 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
             except gspread.WorksheetNotFound:
                 logger.info("权限表不存在")
                 return None
+            except Exception as e:
+                logger.error(f"从云端加载失败: {str(e)}")
+                
+                # 尝试从session state加载
+                if 'permissions_fallback' in st.session_state:
+                    logger.info("从浏览器缓存加载权限数据")
+                    fallback_data = st.session_state['permissions_fallback']
+                    df = pd.DataFrame(fallback_data)
+                    return df[['门店名称', '人员编号']] if len(df.columns) >= 2 else None
+                
+                # 尝试从本地备份加载
+                backup_data = load_local_backup("permissions")
+                if backup_data:
+                    logger.info("从本地备份加载权限数据")
+                    df = pd.DataFrame(backup_data)
+                    return df[['门店名称', '人员编号']] if len(df.columns) >= 2 else None
+                
+                raise
         
-        return safe_sheet_operation(_load_operation)
+        try:
+            return safe_sheet_operation(_load_operation)
+        except Exception:
+            return None
 
 def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: int = 15) -> bool:
     """分批保存大数据到表格"""
@@ -426,30 +613,49 @@ def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: 
 def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
     """保存报表数据 - 增强版"""
     with error_handler("保存报表数据"):
-        def _save_operation():
-            spreadsheet = get_or_create_spreadsheet(gc)
-            worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME, rows=2000, cols=10)
-            
-            # 清空现有数据
-            with st.spinner("清理旧数据..."):
-                worksheet.clear()
-                time.sleep(1)
-            
-            # 保存数据
-            with st.spinner("保存新数据..."):
-                success = save_large_data_to_sheets(reports_dict, worksheet)
-            
-            if success:
-                # 清除相关缓存
-                cache_key = get_cache_key("reports", "load")
-                if f"cache_{cache_key}" in st.session_state:
-                    del st.session_state[f"cache_{cache_key}"]
-                
-                logger.info("报表数据保存成功")
-                return True
-            return False
+        # 先创建本地备份
+        backup_file = create_local_backup(reports_dict, "reports")
         
-        return safe_sheet_operation(_save_operation)
+        def _save_operation():
+            try:
+                spreadsheet = get_or_create_spreadsheet(gc)
+                worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME, rows=2000, cols=10)
+                
+                # 清空现有数据
+                with st.spinner("清理旧数据..."):
+                    worksheet.clear()
+                    time.sleep(1)
+                
+                # 保存数据
+                with st.spinner("保存新数据..."):
+                    success = save_large_data_to_sheets(reports_dict, worksheet)
+                
+                if success:
+                    # 清除相关缓存
+                    cache_key = get_cache_key("reports", "load")
+                    if f"cache_{cache_key}" in st.session_state:
+                        del st.session_state[f"cache_{cache_key}"]
+                    
+                    logger.info("报表数据保存成功")
+                    return True
+                return False
+                
+            except Exception as e:
+                logger.error(f"保存到云端失败: {str(e)}")
+                # 如果云端保存失败，至少有本地备份
+                if backup_file:
+                    st.warning(f"云端保存失败，但已创建本地备份: {backup_file}")
+                raise
+        
+        try:
+            return safe_sheet_operation(_save_operation)
+        except Exception:
+            # 如果完全失败，尝试使用session state保存
+            st.session_state['reports_fallback'] = {
+                name: df.to_dict('records') for name, df in reports_dict.items()
+            }
+            st.warning("数据已临时保存到浏览器缓存中")
+            return False
 
 def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str) -> Optional[pd.DataFrame]:
     """重构分片数据"""
@@ -525,7 +731,7 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
         return None
 
 def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
-    """加载报表数据 - 使用缓存和分片重构"""
+    """加载报表数据 - 使用缓存、分片重构和备用方案"""
     cache_key = get_cache_key("reports", "load")
     cached_data = get_cache(cache_key)
     if cached_data is not None:
@@ -534,9 +740,8 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
     
     with error_handler("加载报表数据"):
         def _load_operation():
-            spreadsheet = get_or_create_spreadsheet(gc)
-            
             try:
+                spreadsheet = get_or_create_spreadsheet(gc)
                 worksheet = spreadsheet.worksheet(REPORTS_SHEET_NAME)
                 data = worksheet.get_all_values()
                 
@@ -600,8 +805,33 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
             except gspread.WorksheetNotFound:
                 logger.info("报表数据表不存在")
                 return {}
+            except Exception as e:
+                logger.error(f"从云端加载失败: {str(e)}")
+                
+                # 尝试从session state加载
+                if 'reports_fallback' in st.session_state:
+                    logger.info("从浏览器缓存加载报表数据")
+                    fallback_data = st.session_state['reports_fallback']
+                    reports_dict = {}
+                    for name, records in fallback_data.items():
+                        reports_dict[name] = pd.DataFrame(records)
+                    return reports_dict
+                
+                # 尝试从本地备份加载
+                backup_data = load_local_backup("reports")
+                if backup_data:
+                    logger.info("从本地备份加载报表数据")
+                    reports_dict = {}
+                    for name, records in backup_data.items():
+                        reports_dict[name] = pd.DataFrame(records)
+                    return reports_dict
+                
+                raise
         
-        return safe_sheet_operation(_load_operation)
+        try:
+            return safe_sheet_operation(_load_operation)
+        except Exception:
+            return {}
 
 def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
     """分析应收未收额数据 - 专门查找第69行"""
@@ -733,6 +963,47 @@ def show_status_message(message: str, status_type: str = "info"):
     css_class = f"status-{status_type}"
     st.markdown(f'<div class="{css_class}">{message}</div>', unsafe_allow_html=True)
 
+def show_system_diagnostics():
+    """显示系统诊断信息"""
+    st.subheader("🔍 系统诊断")
+    
+    with st.expander("查看系统状态", expanded=False):
+        # Google Sheets配置诊断
+        diagnosis = diagnose_google_sheets_config()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### 📊 Google Sheets 连接")
+            if diagnosis['has_secrets']:
+                st.success("✅ 密钥配置已找到")
+            else:
+                st.error("❌ 密钥配置缺失")
+            
+            if diagnosis['credentials_valid']:
+                st.success("✅ 凭据格式正确")
+            else:
+                st.error(f"❌ 凭据问题: {diagnosis['error_message']}")
+        
+        with col2:
+            st.markdown("### 🗂️ 缓存状态")
+            cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
+            st.info(f"缓存项目数: {cache_count}")
+            
+            fallback_count = len([key for key in st.session_state.keys() if key.endswith('_fallback')])
+            if fallback_count > 0:
+                st.warning(f"备用数据项: {fallback_count}")
+            else:
+                st.success("无备用数据")
+        
+        # 详细配置信息
+        if diagnosis['required_fields']:
+            st.markdown("### ✅ 已配置字段")
+            st.code(', '.join(diagnosis['required_fields']))
+        
+        if diagnosis['missing_fields']:
+            st.markdown("### ❌ 缺失字段")
+            st.code(', '.join(diagnosis['missing_fields']))
+
 # 初始化会话状态
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -759,6 +1030,8 @@ if not st.session_state.google_sheets_client:
             show_status_message("✅ 云数据库连接成功！", "success")
     except Exception as e:
         show_status_message(f"❌ 连接失败: {str(e)}", "error")
+        # 显示诊断信息
+        show_system_diagnostics()
         st.stop()
 
 gc = st.session_state.google_sheets_client
@@ -777,6 +1050,10 @@ with st.sidebar:
         st.success("🟢 云数据库已连接")
     else:
         st.error("🔴 云数据库断开")
+    
+    # 添加诊断按钮
+    if st.button("🔍 系统诊断"):
+        show_system_diagnostics()
     
     user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
     
@@ -807,7 +1084,7 @@ with st.sidebar:
                                     show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
                                     st.balloons()
                                 else:
-                                    show_status_message("❌ 保存失败", "error")
+                                    show_status_message("⚠️ 云端保存失败，已使用备用存储", "warning")
                         else:
                             show_status_message("❌ 格式错误：需要至少两列（门店名称、人员编号）", "error")
                 except Exception as e:
@@ -837,7 +1114,7 @@ with st.sidebar:
                                     show_status_message(f"✅ 报表已上传：{len(reports_dict)} 个门店", "success")
                                     st.balloons()
                                 else:
-                                    show_status_message("❌ 保存失败", "error")
+                                    show_status_message("⚠️ 云端保存失败，已使用备用存储", "warning")
                         else:
                             show_status_message("❌ 文件中没有有效的工作表", "error")
                             
@@ -848,8 +1125,11 @@ with st.sidebar:
             st.subheader("🗂️ 缓存管理")
             if st.button("清除所有缓存"):
                 cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
-                for key in cache_keys:
+                fallback_keys = [key for key in st.session_state.keys() if key.endswith('_fallback')]
+                
+                for key in cache_keys + fallback_keys:
                     del st.session_state[key]
+                
                 show_status_message("✅ 缓存已清除", "success")
                 st.rerun()
     
@@ -871,7 +1151,7 @@ st.session_state.operation_status = []
 
 # 主界面
 if user_type == "管理员" and st.session_state.is_admin:
-    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端，支持分片存储和缓存机制</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端，支持分片存储和缓存机制，包含本地备份和故障恢复</p></div>', unsafe_allow_html=True)
     
     try:
         with st.spinner("加载数据统计..."):
@@ -905,6 +1185,7 @@ if user_type == "管理员" and st.session_state.is_admin:
                     
     except Exception as e:
         show_status_message(f"❌ 数据加载失败：{str(e)}", "error")
+        show_system_diagnostics()
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     st.info("👈 请在左侧边栏输入管理员密码")
@@ -919,6 +1200,8 @@ else:
             
             if permissions_data is None:
                 st.warning("⚠️ 系统维护中，请联系管理员")
+                if st.button("显示系统诊断"):
+                    show_system_diagnostics()
             else:
                 stores = sorted(permissions_data[permissions_data.columns[0]].unique().tolist())
                 
@@ -940,6 +1223,8 @@ else:
                             
         except Exception as e:
             show_status_message(f"❌ 权限验证失败：{str(e)}", "error")
+            if st.button("显示诊断信息"):
+                show_system_diagnostics()
     
     else:
         # 已登录 - 显示报表
@@ -1129,14 +1414,22 @@ else:
                 
         except Exception as e:
             show_status_message(f"❌ 报表加载失败：{str(e)}", "error")
+            if st.button("显示系统诊断"):
+                show_system_diagnostics()
 
 # 页面底部状态信息
 st.divider()
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.caption(f"🕒 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 with col2:
     cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
     st.caption(f"💾 缓存项目: {cache_count}")
 with col3:
-    st.caption("🔧 版本: v2.0 (稳定版)")
+    fallback_count = len([key for key in st.session_state.keys() if key.endswith('_fallback')])
+    if fallback_count > 0:
+        st.caption(f"⚠️ 备用数据: {fallback_count}")
+    else:
+        st.caption("✅ 云端数据正常")
+with col4:
+    st.caption("🔧 版本: v2.1 (增强版)")
