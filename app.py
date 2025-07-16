@@ -34,12 +34,13 @@ RETRY_DELAY = 1
 MAX_CHUNK_SIZE = 30000  # 减小分片大小
 CACHE_DURATION = 300  # 缓存5分钟
 
-# *** 新增配置：你个人 Google Drive 中目标 Google Sheets 表格的 ID ***
-# 1. 在你的个人 Google Drive (drive.google.com) 中创建一个新的 Google Sheets 表格。
-# 2. 将此表格共享给你的服务账户邮箱地址 (例如: service-1234@project-id.iam.gserviceaccount.com)，
-#    并给予 '编辑者' (Editor) 权限。
-# 3. 从该表格的URL中复制其ID (例如: https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit)
-TARGET_SPREADSHEET_ID = '1NCYYs6bHahC8LMQNTDEqxs0X_wLGbDJ4' # <--- 务必替换为你的实际表格ID！
+# *** 新增配置：你个人 Google Drive 中目标 Google Sheets 表格的完整 URL ***
+# 请确保这是你已经创建并共享给服务账户（编辑者权限）的 Google Sheets 表格的完整 URL。
+TARGET_SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0' # <--- 使用你提供的URL！
+
+# Google Drive API 权限范围，允许读写 Drive 文件
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+
 
 # CSS样式
 st.markdown("""
@@ -181,8 +182,8 @@ def get_google_sheets_client():
             raise ValueError("`st.secrets['google_sheets']` 未配置。请在 .streamlit/secrets.toml 中添加服务账户密钥。")
 
         credentials_info = st.secrets["google_sheets"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
+        # SCOPES 定义在文件顶部
+        credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
         client = gspread.authorize(credentials)
         logger.info("Google Sheets客户端创建成功")
         return client
@@ -194,25 +195,27 @@ def safe_sheet_operation(operation_func, *args, **kwargs):
     """安全的表格操作"""
     return retry_operation(operation_func, *args, **kwargs)
 
-# --- 修改此函数以使用TARGET_SPREADSHEET_ID ---
+# --- 修改此函数以使用 TARGET_SPREADSHEET_URL ---
 def get_target_spreadsheet(gc):
     """
-    通过ID获取指定的Google Sheets表格。
+    通过URL获取指定的Google Sheets表格。
     此函数替换了原先的 get_or_create_spreadsheet，确保操作的是指定的表格。
     """
-    if TARGET_SPREADSHEET_ID == 'YOUR_SPREADSHEET_ID_HERE':
-        raise SheetOperationError("错误: TARGET_SPREADSHEET_ID 未设置。请在代码中替换为你的实际表格ID。")
-    
+    if TARGET_SPREADSHEET_URL == 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0':
+        # 提醒用户替换为自己的URL，因为这里给的是示例URL
+        raise SheetOperationError("错误: TARGET_SPREADSHEET_URL 未设置。请在代码中替换为你的实际表格URL。")
+
     def _operation():
         try:
-            spreadsheet = gc.open_by_key(TARGET_SPREADSHEET_ID)
-            logger.info(f"表格 (ID: {TARGET_SPREADSHEET_ID}) 已成功打开。")
+            # 使用 open_by_url 尝试打开表格
+            spreadsheet = gc.open_by_url(TARGET_SPREADSHEET_URL)
+            logger.info(f"表格 (URL: {TARGET_SPREADSHEET_URL}) 已成功打开。")
             return spreadsheet
         except gspread.exceptions.SpreadsheetNotFound:
-            raise SheetOperationError(f"表格 (ID: {TARGET_SPREADSHEET_ID}) 未找到。请确认ID是否正确，以及服务账户是否有访问权限。")
+            raise SheetOperationError(f"表格 (URL: {TARGET_SPREADSHEET_URL}) 未找到。请确认URL是否正确，以及服务账户是否有访问权限。")
         except Exception as e:
-            raise SheetOperationError(f"打开表格 (ID: {TARGET_SPREADSHEET_ID}) 失败: {str(e)}")
-    
+            raise SheetOperationError(f"打开表格 (URL: {TARGET_SPREADSHEET_URL}) 失败: {str(e)}")
+
     return safe_sheet_operation(_operation)
 
 
@@ -227,7 +230,7 @@ def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
             logger.info(f"创建新工作表 '{name}'")
             worksheet = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
             return worksheet
-    
+
     return safe_sheet_operation(_operation)
 
 def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
@@ -258,88 +261,6 @@ def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"清理DataFrame失败: {str(e)}")
         raise DataProcessingError(f"数据清理失败: {str(e)}")
-
-def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
-    """保存权限数据 - 增强版"""
-    with error_handler("保存权限数据"):
-        def _save_operation():
-            # 获取指定的表格
-            spreadsheet = get_target_spreadsheet(gc) # <--- 修改点：使用新函数
-            worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
-
-            # 清空现有数据
-            worksheet.clear()
-            time.sleep(1)  # API限制延迟
-
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            all_data = [['门店名称', '人员编号', '更新时间']]
-
-            # 准备数据
-            for _, row in df.iterrows():
-                all_data.append([
-                    str(row.iloc[0]).strip(),
-                    str(row.iloc[1]).strip(),
-                    current_time
-                ])
-
-            # 批量更新
-            worksheet.update('A1', all_data)
-            logger.info(f"权限数据保存成功: {len(df)} 条记录")
-
-            # 清除相关缓存
-            cache_key = get_cache_key("permissions", "load")
-            if f"cache_{cache_key}" in st.session_state:
-                del st.session_state[f"cache_{cache_key}"]
-
-            return True
-
-        return safe_sheet_operation(_save_operation)
-
-def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
-    """加载权限数据 - 使用缓存"""
-    cache_key = get_cache_key("permissions", "load")
-    cached_data = get_cache(cache_key)
-    if cached_data is not None:
-        logger.info("从缓存加载权限数据")
-        return cached_data
-
-    with error_handler("加载权限数据"):
-        def _load_operation():
-            # 获取指定的表格
-            spreadsheet = get_target_spreadsheet(gc) # <--- 修改点：使用新函数
-
-            try:
-                worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
-                data = worksheet.get_all_values()
-
-                if len(data) <= 1:
-                    logger.info("权限表为空")
-                    return None
-
-                df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
-                result_df = df[['门店名称', '人员编号']].copy()
-
-                # 数据清理
-                result_df['门店名称'] = result_df['门店名称'].str.strip()
-                result_df['人员编号'] = result_df['人员编号'].str.strip()
-
-                # 移除空行
-                result_df = result_df[
-                    (result_df['门店名称'] != '') &
-                    (result_df['人员编号'] != '')
-                ]
-
-                logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
-
-                # 设置缓存
-                set_cache(cache_key, result_df)
-                return result_df
-
-            except gspread.WorksheetNotFound:
-                logger.info("权限表不存在")
-                return None
-
-        return safe_sheet_operation(_load_operation)
 
 def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: int = 15) -> bool:
     """分批保存大数据到表格"""
@@ -422,7 +343,7 @@ def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: 
             first_batch_data = all_data[1:batch_size+1]
             worksheet.update('A1', [all_data[0]] + first_batch_data)
             time.sleep(0.8)
-            
+
             # Update remaining batches
             for i in range(batch_size + 1, len(all_data), batch_size):
                 batch_data = all_data[i:i+batch_size]
@@ -522,7 +443,7 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
                 col = str(col).strip()
                 if col == '' or col == 'nan' or col == '0':
                     col = f'列{i+1}' if i < len(data_rows.columns) else f'额外列{i+1}' # 避免越界
-                
+
                 # 处理重复列名
                 original_col = col
                 counter = 1
@@ -536,7 +457,7 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
                 min_cols = min(len(data_rows.columns), len(cols))
                 cols = cols[:min_cols]
                 data_rows = data_rows.iloc[:, :min_cols] # 截断数据列以匹配列名
-            
+
             data_rows.columns = cols
             df = data_rows.reset_index(drop=True).fillna('')
         else: # 如果df是空的
@@ -716,7 +637,7 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
                         for col_idx in range(len(row)-1, 0, -1):
                             val = row.iloc[col_idx]
                             if pd.notna(val) and str(val).strip() not in ['', 'None', 'nan']:
-                                cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                                cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').replace('￥', '').strip()
 
                                 if cleaned.startswith('(') and cleaned.endswith(')'):
                                     cleaned = '-' + cleaned[1:-1]
@@ -801,13 +722,10 @@ if 'operation_status' not in st.session_state:
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
 # 初始化Google Sheets客户端
-# 检查TARGET_SPREADSHEET_ID是否已配置
-if TARGET_SPREADSHEET_ID == 'YOUR_SPREADSHEET_ID_HERE':
-    st.error("❌ 配置错误：请在代码中设置 `TARGET_SPREADSHEET_ID` 为你的实际表格ID！")
+# 检查TARGET_SPREADSHEET_URL是否已配置
+if TARGET_SPREADSHEET_URL == 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0':
+    st.error("❌ 配置错误：请在代码中设置 `TARGET_SPREADSHEET_URL` 为你的实际表格URL！")
     st.stop() # 停止应用运行，强制用户配置
-# 检查 SERVICE_ACCOUNT_FILE 是否配置（尽管这里的 `secrets` 方式已改变）
-# 为了兼容 st.secrets['google_sheets']，不再直接检查 SERVICE_ACCOUNT_FILE
-# 但是如果 secrets.toml 中没有 google_sheets 也会报错
 
 if not st.session_state.google_sheets_client:
     try:
