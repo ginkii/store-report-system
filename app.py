@@ -36,7 +36,7 @@ CACHE_DURATION = 300  # 缓存5分钟
 
 # *** 新增配置：你个人 Google Drive 中目标 Google Sheets 表格的完整 URL ***
 # 请确保这是你已经创建并共享给服务账户（编辑者权限）的 Google Sheets 表格的完整 URL。
-TARGET_SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0' # <--- 使用你提供的URL！
+TARGET_SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0' # <--- 现在直接使用你提供的URL，没有多余检查了！
 
 # Google Drive API 权限范围，允许读写 Drive 文件
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -201,10 +201,6 @@ def get_target_spreadsheet(gc):
     通过URL获取指定的Google Sheets表格。
     此函数替换了原先的 get_or_create_spreadsheet，确保操作的是指定的表格。
     """
-    if TARGET_SPREADSHEET_URL == 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0':
-        # 提醒用户替换为自己的URL，因为这里给的是示例URL
-        raise SheetOperationError("错误: TARGET_SPREADSHEET_URL 未设置。请在代码中替换为你的实际表格URL。")
-
     def _operation():
         try:
             # 使用 open_by_url 尝试打开表格
@@ -722,11 +718,6 @@ if 'operation_status' not in st.session_state:
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
 # 初始化Google Sheets客户端
-# 检查TARGET_SPREADSHEET_URL是否已配置
-if TARGET_SPREADSHEET_URL == 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0':
-    st.error("❌ 配置错误：请在代码中设置 `TARGET_SPREADSHEET_URL` 为你的实际表格URL！")
-    st.stop() # 停止应用运行，强制用户配置
-
 if not st.session_state.google_sheets_client:
     try:
         with st.spinner("连接云数据库..."):
@@ -784,7 +775,7 @@ with st.sidebar:
                                     show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
                                     st.balloons()
                                 else:
-                                    st.session_state.operation_status.append({"message": "❌ 权限表保存失败", "type": "error"})
+                                st.session_state.operation_status.append({"message": "❌ 权限表保存失败", "type": "error"})
                         else:
                             st.session_state.operation_status.append({"message": "❌ 格式错误：需要至少两列（门店名称、人员编号）", "type": "error"})
                 except Exception as e:
