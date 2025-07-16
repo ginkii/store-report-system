@@ -15,7 +15,7 @@ import traceback
 
 # 页面配置
 st.set_page_config(
-    page_title="门店报表查询系统 - 腾讯云版", 
+    page_title="门店报表查询系统", 
     page_icon="📊",
     layout="wide"
 )
@@ -677,7 +677,7 @@ if 'storage_system' not in st.session_state:
     st.session_state.storage_system = None
 
 # 主标题
-st.markdown('<h1 class="main-header">📊 门店报表查询系统 (腾讯云版)</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">📊 门店报表查询系统 </h1>', unsafe_allow_html=True)
 
 # 初始化存储系统
 if not st.session_state.storage_system:
@@ -715,7 +715,7 @@ with st.sidebar:
         if st.session_state.logged_in:
             st.subheader("👤 当前登录")
             st.info(f"门店：{st.session_state.store_name}")
-            st.info(f"编号：{st.session_state.user_id}")
+            st.info(f"查询编码：{st.session_state.user_id}")
             
             if st.button("🚪 退出登录"):
                 st.session_state.logged_in = False
@@ -728,8 +728,8 @@ with st.sidebar:
 if user_type == "管理员" and st.session_state.is_admin:
     st.markdown('''
     <div class="admin-panel">
-    <h3>👨‍💼 管理员控制面板 (腾讯云版)</h3>
-    <p>✨ 架构：腾讯云COS(50GB免费) + Supabase(500MB免费) = 高性能 + 中国优化</p>
+    <h3>👨‍💼 管理员控制面板 </h3>
+    <p>✨ </p>
     </div>
     ''', unsafe_allow_html=True)
     
@@ -894,8 +894,8 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 with col2:
-    st.caption("🏢 腾讯云COS存储")
+    st.caption("🏢 存储")
 with col3:
-    st.caption("🗄️ Supabase数据库")
+    st.caption("🗄️ ")
 with col4:
-    st.caption("🔧 v5.0 (腾讯云版)")
+    st.caption("🔧 v5.0 ")
