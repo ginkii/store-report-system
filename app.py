@@ -5,13 +5,17 @@ import json
 from datetime import datetime
 import time
 import gspread
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
 import logging
 from typing import Optional, Dict, Any, List
 import hashlib
-import pickle
 import traceback
 from contextlib import contextmanager
+import zlib
+import base64
+import urllib.parse as urlparse
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -25,14 +29,22 @@ st.set_page_config(
 )
 
 # 系统配置
-ADMIN_PASSWORD = "admin123"
+ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
 PERMISSIONS_SHEET_NAME = "store_permissions"
 REPORTS_SHEET_NAME = "store_reports"
 SYSTEM_INFO_SHEET_NAME = "system_info"
 MAX_RETRIES = 3
 RETRY_DELAY = 1
-MAX_CHUNK_SIZE = 30000  # 减小分片大小
-CACHE_DURATION = 300  # 缓存5分钟
+MAX_CHUNK_SIZE = 25000
+CACHE_DURATION = 300
+COMPRESSION_LEVEL = 9
+
+# OAuth配置
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/drive.file'
+]
 
 # CSS样式
 st.markdown("""
@@ -59,6 +71,14 @@ st.markdown("""
         border: 2px solid #fdcb6e;
         margin: 1rem 0;
     }
+    .oauth-panel {
+        background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        border: 2px solid #48cab2;
+        margin: 1rem 0;
+        text-align: center;
+    }
     .receivable-positive {
         background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
         color: #721c24;
@@ -80,36 +100,40 @@ st.markdown("""
     .status-success {
         background: #d4edda;
         color: #155724;
-        padding: 0.75rem;
-        border-radius: 5px;
+        padding: 1rem;
+        border-radius: 8px;
         border: 1px solid #c3e6cb;
-        margin: 0.5rem 0;
+        margin: 1rem 0;
     }
     .status-error {
         background: #f8d7da;
         color: #721c24;
-        padding: 0.75rem;
-        border-radius: 5px;
+        padding: 1rem;
+        border-radius: 8px;
         border: 1px solid #f5c6cb;
-        margin: 0.5rem 0;
+        margin: 1rem 0;
     }
-    .status-warning {
-        background: #fff3cd;
-        color: #856404;
-        padding: 0.75rem;
-        border-radius: 5px;
-        border: 1px solid #ffeaa7;
-        margin: 0.5rem 0;
+    .auth-button {
+        display: inline-block;
+        padding: 12px 24px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        text-decoration: none;
+        border-radius: 8px;
+        font-weight: bold;
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+    }
+    .auth-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
     </style>
 """, unsafe_allow_html=True)
 
-class SheetOperationError(Exception):
-    """Google Sheets操作异常"""
-    pass
-
-class DataProcessingError(Exception):
-    """数据处理异常"""
+class OAuthError(Exception):
+    """OAuth认证异常"""
     pass
 
 @contextmanager
@@ -123,68 +147,222 @@ def error_handler(operation_name: str):
         st.error(f"❌ {operation_name} 失败: {str(e)}")
         raise
 
+def get_oauth_flow():
+    """创建OAuth flow"""
+    try:
+        client_config = {
+            "web": {
+                "client_id": st.secrets["google_oauth"]["client_id"],
+                "client_secret": st.secrets["google_oauth"]["client_secret"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }
+        }
+        
+        flow = Flow.from_client_config(
+            client_config,
+            scopes=SCOPES,
+            redirect_uri=st.secrets["google_oauth"]["redirect_uri"]
+        )
+        
+        return flow
+    except KeyError as e:
+        st.error(f"❌ OAuth配置缺失: {str(e)}")
+        st.markdown("""
+        请确保 `.streamlit/secrets.toml` 包含以下配置：
+        ```toml
+        [google_oauth]
+        client_id = "你的客户端ID"
+        client_secret = "你的客户端密钥"
+        redirect_uri = "https://你的应用域名.streamlit.app"
+        ```
+        """)
+        return None
+    except Exception as e:
+        st.error(f"❌ OAuth flow创建失败: {str(e)}")
+        return None
+
+def show_oauth_authorization():
+    """显示OAuth授权界面"""
+    st.markdown('<div class="oauth-panel">', unsafe_allow_html=True)
+    st.markdown("### 🔐 Google账号授权")
+    st.markdown("使用你的个人Google账号登录，享受15GB存储空间！")
+    
+    flow = get_oauth_flow()
+    if not flow:
+        st.error("❌ OAuth配置错误，请检查secrets配置")
+        return False
+    
+    # 生成授权URL
+    auth_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent'
+    )
+    
+    # 存储state用于验证
+    st.session_state['oauth_state'] = state
+    
+    # 显示授权按钮
+    st.markdown(f"""
+    <a href="{auth_url}" target="_blank" class="auth-button">
+        🚀 点击授权Google账号
+    </a>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # 处理授权回调
+    query_params = st.experimental_get_query_params()
+    
+    if 'code' in query_params:
+        try:
+            # 验证state
+            if 'state' in query_params:
+                received_state = query_params['state'][0]
+                expected_state = st.session_state.get('oauth_state', '')
+                if received_state != expected_state:
+                    st.error("❌ 授权验证失败：状态不匹配")
+                    return False
+            
+            # 获取授权码
+            auth_code = query_params['code'][0]
+            
+            with st.spinner("正在完成授权..."):
+                # 交换token
+                flow.fetch_token(code=auth_code)
+                credentials = flow.credentials
+                
+                # 存储凭据
+                st.session_state['google_credentials'] = {
+                    'token': credentials.token,
+                    'refresh_token': credentials.refresh_token,
+                    'id_token': credentials.id_token,
+                    'token_uri': credentials.token_uri,
+                    'client_id': credentials.client_id,
+                    'client_secret': credentials.client_secret,
+                    'scopes': credentials.scopes
+                }
+                
+                # 清理URL参数
+                st.experimental_set_query_params()
+                
+                st.success("✅ 授权成功！")
+                st.balloons()
+                time.sleep(1)
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"❌ 授权处理失败: {str(e)}")
+            logger.error(f"OAuth授权失败: {str(e)}")
+            return False
+    
+    else:
+        st.markdown("""
+        **操作步骤：**
+        1. 点击上方按钮
+        2. 选择你的Google账号
+        3. 同意权限请求
+        4. 系统将自动完成授权
+        """)
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    return False
+
+def get_google_sheets_client():
+    """获取Google Sheets客户端（OAuth版本）"""
+    
+    # 检查是否已有凭据
+    if 'google_credentials' not in st.session_state:
+        return None
+    
+    try:
+        # 从session state恢复凭据
+        cred_data = st.session_state['google_credentials']
+        credentials = Credentials(
+            token=cred_data['token'],
+            refresh_token=cred_data.get('refresh_token'),
+            id_token=cred_data.get('id_token'),
+            token_uri=cred_data['token_uri'],
+            client_id=cred_data['client_id'],
+            client_secret=cred_data['client_secret'],
+            scopes=cred_data['scopes']
+        )
+        
+        # 检查并刷新token
+        if credentials.expired and credentials.refresh_token:
+            request = Request()
+            credentials.refresh(request)
+            
+            # 更新存储的凭据
+            st.session_state['google_credentials'].update({
+                'token': credentials.token,
+                'id_token': credentials.id_token
+            })
+        
+        # 创建客户端
+        client = gspread.authorize(credentials)
+        
+        # 测试连接
+        try:
+            client.openall()  # 这会验证权限
+        except Exception as e:
+            if "unauthorized" in str(e).lower() or "invalid" in str(e).lower():
+                # 凭据无效，清除并重新授权
+                del st.session_state['google_credentials']
+                st.error("❌ 授权已过期，请重新授权")
+                st.rerun()
+            raise
+        
+        logger.info("Google Sheets客户端创建成功（OAuth）")
+        return client
+        
+    except Exception as e:
+        logger.error(f"OAuth客户端创建失败: {str(e)}")
+        # 如果凭据有问题，清除并重新授权
+        if 'google_credentials' in st.session_state:
+            del st.session_state['google_credentials']
+        raise OAuthError(f"认证失败: {str(e)}")
+
 def retry_operation(func, *args, max_retries=MAX_RETRIES, delay=RETRY_DELAY, **kwargs):
     """重试操作装饰器"""
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
+            error_msg = str(e)
+            if "unauthorized" in error_msg.lower() or "invalid" in error_msg.lower():
+                # 认证问题不重试
+                raise OAuthError(error_msg)
             if attempt == max_retries - 1:
-                logger.error(f"操作失败，已重试 {max_retries} 次: {str(e)}")
+                logger.error(f"操作失败，已重试 {max_retries} 次: {error_msg}")
                 raise
-            logger.warning(f"操作失败，第 {attempt + 1} 次重试: {str(e)}")
-            time.sleep(delay * (attempt + 1))  # 递增延迟
+            logger.warning(f"操作失败，第 {attempt + 1} 次重试: {error_msg}")
+            time.sleep(delay * (attempt + 1))
 
-def get_cache_key(operation: str, params: str) -> str:
-    """生成缓存键"""
-    return hashlib.md5(f"{operation}_{params}".encode()).hexdigest()
-
-def set_cache(key: str, data: Any, duration: int = CACHE_DURATION):
-    """设置缓存"""
+def compress_data(data: str) -> str:
+    """压缩数据"""
     try:
-        cache_data = {
-            'data': data,
-            'timestamp': time.time(),
-            'duration': duration
-        }
-        st.session_state[f"cache_{key}"] = cache_data
+        compressed = zlib.compress(data.encode('utf-8'), COMPRESSION_LEVEL)
+        encoded = base64.b64encode(compressed).decode('ascii')
+        logger.info(f"数据压缩: {len(data)} -> {len(encoded)} bytes (压缩率: {(1-len(encoded)/len(data))*100:.1f}%)")
+        return encoded
     except Exception as e:
-        logger.warning(f"设置缓存失败: {str(e)}")
+        logger.error(f"数据压缩失败: {str(e)}")
+        return data
 
-def get_cache(key: str) -> Optional[Any]:
-    """获取缓存"""
+def decompress_data(compressed_data: str) -> str:
+    """解压数据"""
     try:
-        cache_key = f"cache_{key}"
-        if cache_key in st.session_state:
-            cache_data = st.session_state[cache_key]
-            if time.time() - cache_data['timestamp'] < cache_data['duration']:
-                return cache_data['data']
-            else:
-                del st.session_state[cache_key]
-    except Exception as e:
-        logger.warning(f"获取缓存失败: {str(e)}")
-    return None
-
-@st.cache_resource(show_spinner="连接云数据库...")
-def get_google_sheets_client():
-    """获取Google Sheets客户端 - 使用缓存"""
-    try:
-        credentials_info = st.secrets["google_sheets"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-        client = gspread.authorize(credentials)
-        logger.info("Google Sheets客户端创建成功")
-        return client
-    except Exception as e:
-        logger.error(f"Google Sheets客户端创建失败: {str(e)}")
-        raise SheetOperationError(f"连接失败: {str(e)}")
-
-def safe_sheet_operation(operation_func, *args, **kwargs):
-    """安全的表格操作"""
-    return retry_operation(operation_func, *args, **kwargs)
+        decoded = base64.b64decode(compressed_data.encode('ascii'))
+        decompressed = zlib.decompress(decoded).decode('utf-8')
+        return decompressed
+    except Exception:
+        # 如果解压失败，说明数据未压缩
+        return compressed_data
 
 def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
-    """获取或创建表格 - 增强错误处理"""
+    """获取或创建表格"""
     def _operation():
         try:
             spreadsheet = gc.open(name)
@@ -193,14 +371,12 @@ def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
         except gspread.SpreadsheetNotFound:
             logger.info(f"创建新表格 '{name}'")
             spreadsheet = gc.create(name)
-            # 设置权限为可编辑
-            spreadsheet.share('', perm_type='anyone', role='writer')
             return spreadsheet
     
-    return safe_sheet_operation(_operation)
+    return retry_operation(_operation)
 
-def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
-    """获取或创建工作表 - 增强错误处理"""
+def get_or_create_worksheet(spreadsheet, name, rows=500, cols=10):
+    """获取或创建工作表"""
     def _operation():
         try:
             worksheet = spreadsheet.worksheet(name)
@@ -211,85 +387,89 @@ def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
             worksheet = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
             return worksheet
     
-    return safe_sheet_operation(_operation)
+    return retry_operation(_operation)
 
-def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
-    """清理DataFrame以便JSON序列化"""
+def clean_and_compress_dataframe(df: pd.DataFrame) -> str:
+    """清理并压缩DataFrame"""
     try:
         df_cleaned = df.copy()
-        
-        # 处理各种数据类型
         for col in df_cleaned.columns:
-            # 转换为字符串并处理特殊值
             df_cleaned[col] = df_cleaned[col].astype(str)
             df_cleaned[col] = df_cleaned[col].replace({
-                'nan': '',
-                'None': '',
-                'NaT': '',
-                'null': '',
-                '<NA>': ''
+                'nan': '', 'None': '', 'NaT': '', 'null': '', '<NA>': ''
             })
-            
-            # 处理过长的字符串
+            # 限制字符串长度
             df_cleaned[col] = df_cleaned[col].apply(
-                lambda x: x[:1000] + '...' if len(str(x)) > 1000 else x
+                lambda x: x[:800] + '...' if len(str(x)) > 800 else x
             )
         
-        logger.info(f"DataFrame清理完成: {len(df_cleaned)} 行 x {len(df_cleaned.columns)} 列")
-        return df_cleaned
+        # 转换为JSON
+        json_data = df_cleaned.to_json(orient='records', force_ascii=False, ensure_ascii=False)
+        
+        # 压缩数据
+        compressed_data = compress_data(json_data)
+        
+        logger.info(f"数据处理完成: {len(df_cleaned)} 行 -> {len(compressed_data)} 字符")
+        return compressed_data
         
     except Exception as e:
-        logger.error(f"清理DataFrame失败: {str(e)}")
-        raise DataProcessingError(f"数据清理失败: {str(e)}")
+        logger.error(f"清理压缩DataFrame失败: {str(e)}")
+        raise
 
 def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
-    """保存权限数据 - 增强版"""
+    """保存权限数据"""
     with error_handler("保存权限数据"):
         def _save_operation():
             spreadsheet = get_or_create_spreadsheet(gc)
-            worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
+            worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME, rows=100, cols=5)
             
             # 清空现有数据
             worksheet.clear()
-            time.sleep(1)  # API限制延迟
+            time.sleep(1)
             
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            all_data = [['门店名称', '人员编号', '更新时间']]
             
-            # 准备数据
+            # 压缩权限数据
+            compressed_data = []
             for _, row in df.iterrows():
-                all_data.append([
-                    str(row.iloc[0]).strip(),
-                    str(row.iloc[1]).strip(),
-                    current_time
-                ])
+                store_name = str(row.iloc[0]).strip()
+                user_id = str(row.iloc[1]).strip()
+                compressed_data.append(f"{store_name}|{user_id}")
             
-            # 批量更新
-            worksheet.update('A1', all_data)
+            # 将所有权限数据压缩到一个单元格
+            all_permissions = ";".join(compressed_data)
+            compressed_permissions = compress_data(all_permissions)
+            
+            # 保存到表格
+            data = [
+                ['数据类型', '压缩数据', '记录数', '更新时间'],
+                ['permissions', compressed_permissions, len(df), current_time]
+            ]
+            
+            worksheet.update('A1', data)
             logger.info(f"权限数据保存成功: {len(df)} 条记录")
             
-            # 清除相关缓存
-            cache_key = get_cache_key("permissions", "load")
-            if f"cache_{cache_key}" in st.session_state:
-                del st.session_state[f"cache_{cache_key}"]
+            # 清除缓存
+            if 'cache_permissions_load' in st.session_state:
+                del st.session_state['cache_permissions_load']
             
             return True
         
-        return safe_sheet_operation(_save_operation)
+        return retry_operation(_save_operation)
 
 def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
-    """加载权限数据 - 使用缓存"""
-    cache_key = get_cache_key("permissions", "load")
-    cached_data = get_cache(cache_key)
-    if cached_data is not None:
-        logger.info("从缓存加载权限数据")
-        return cached_data
+    """加载权限数据"""
+    # 检查缓存
+    if 'cache_permissions_load' in st.session_state:
+        cache_data = st.session_state['cache_permissions_load']
+        if time.time() - cache_data['timestamp'] < CACHE_DURATION:
+            logger.info("从缓存加载权限数据")
+            return cache_data['data']
     
     with error_handler("加载权限数据"):
         def _load_operation():
-            spreadsheet = get_or_create_spreadsheet(gc)
-            
             try:
+                spreadsheet = get_or_create_spreadsheet(gc)
                 worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
                 data = worksheet.get_all_values()
                 
@@ -297,246 +477,142 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
                     logger.info("权限表为空")
                     return None
                 
-                df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
-                result_df = df[['门店名称', '人员编号']].copy()
+                # 解析压缩数据
+                if len(data) >= 2 and len(data[1]) >= 2:
+                    compressed_data = data[1][1]
+                    
+                    # 解压数据
+                    decompressed_data = decompress_data(compressed_data)
+                    
+                    # 解析权限数据
+                    permissions = []
+                    for item in decompressed_data.split(';'):
+                        if '|' in item:
+                            store_name, user_id = item.split('|', 1)
+                            permissions.append({
+                                '门店名称': store_name.strip(),
+                                '人员编号': user_id.strip()
+                            })
+                    
+                    if permissions:
+                        result_df = pd.DataFrame(permissions)
+                        # 移除空行
+                        result_df = result_df[
+                            (result_df['门店名称'] != '') & 
+                            (result_df['人员编号'] != '')
+                        ]
+                        
+                        logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
+                        
+                        # 设置缓存
+                        st.session_state['cache_permissions_load'] = {
+                            'data': result_df,
+                            'timestamp': time.time()
+                        }
+                        return result_df
                 
-                # 数据清理
-                result_df['门店名称'] = result_df['门店名称'].str.strip()
-                result_df['人员编号'] = result_df['人员编号'].str.strip()
-                
-                # 移除空行
-                result_df = result_df[
-                    (result_df['门店名称'] != '') & 
-                    (result_df['人员编号'] != '')
-                ]
-                
-                logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
-                
-                # 设置缓存
-                set_cache(cache_key, result_df)
-                return result_df
+                return None
                 
             except gspread.WorksheetNotFound:
                 logger.info("权限表不存在")
                 return None
         
-        return safe_sheet_operation(_load_operation)
-
-def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: int = 15) -> bool:
-    """分批保存大数据到表格"""
-    try:
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        all_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间', '分片序号', '总分片数', '数据哈希']]
-        
-        for store_name, df in data_dict.items():
-            try:
-                # 清理数据
-                df_cleaned = clean_dataframe_for_json(df)
-                
-                # 转换为JSON
-                json_data = df_cleaned.to_json(orient='records', force_ascii=False, ensure_ascii=False)
-                
-                # 计算数据哈希用于验证
-                data_hash = hashlib.md5(json_data.encode('utf-8')).hexdigest()[:16]
-                
-                # 检查是否需要分片
-                if len(json_data) <= MAX_CHUNK_SIZE:
-                    # 不需要分片
-                    all_data.append([
-                        store_name, 
-                        json_data, 
-                        len(df), 
-                        len(df.columns), 
-                        current_time, 
-                        "1", 
-                        "1",
-                        data_hash
-                    ])
-                else:
-                    # 分片存储
-                    chunks = []
-                    for i in range(0, len(json_data), MAX_CHUNK_SIZE):
-                        chunks.append(json_data[i:i + MAX_CHUNK_SIZE])
-                    
-                    total_chunks = len(chunks)
-                    
-                    for idx, chunk in enumerate(chunks):
-                        chunk_name = f"{store_name}_分片{idx+1}"
-                        all_data.append([
-                            chunk_name, 
-                            chunk, 
-                            len(df), 
-                            len(df.columns), 
-                            current_time, 
-                            str(idx+1), 
-                            str(total_chunks),
-                            data_hash
-                        ])
-                
-                logger.info(f"准备保存 {store_name}: {len(df)} 行数据")
-                
-            except Exception as e:
-                logger.error(f"处理 {store_name} 时出错: {str(e)}")
-                # 保存错误信息
-                error_data = {
-                    "error": str(e),
-                    "rows": len(df) if 'df' in locals() else 0,
-                    "columns": len(df.columns) if 'df' in locals() else 0,
-                    "timestamp": current_time
-                }
-                all_data.append([
-                    f"{store_name}_错误", 
-                    json.dumps(error_data, ensure_ascii=False), 
-                    0, 
-                    0, 
-                    current_time, 
-                    "1", 
-                    "1",
-                    "ERROR"
-                ])
-                continue
-        
-        # 分批上传数据
-        if len(all_data) > 1:
-            for i in range(1, len(all_data), batch_size):
-                batch_data = all_data[i:i+batch_size]
-                
-                if i == 1:
-                    # 第一批包含标题行
-                    worksheet.update('A1', [all_data[0]] + batch_data)
-                else:
-                    # 后续批次
-                    row_num = i + 1
-                    worksheet.update(f'A{row_num}', batch_data)
-                
-                # API限制延迟
-                time.sleep(0.8)
-                
-                # 显示进度
-                progress = min(i + batch_size, len(all_data) - 1)
-                st.progress(progress / (len(all_data) - 1))
-        
-        logger.info(f"数据保存完成: {len(all_data) - 1} 条记录")
-        return True
-        
-    except Exception as e:
-        logger.error(f"保存大数据失败: {str(e)}")
-        raise
+        return retry_operation(_load_operation)
 
 def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
-    """保存报表数据 - 增强版"""
+    """保存报表数据"""
     with error_handler("保存报表数据"):
         def _save_operation():
             spreadsheet = get_or_create_spreadsheet(gc)
-            worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME, rows=2000, cols=10)
+            worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME, rows=300, cols=8)
             
             # 清空现有数据
             with st.spinner("清理旧数据..."):
                 worksheet.clear()
                 time.sleep(1)
             
-            # 保存数据
-            with st.spinner("保存新数据..."):
-                success = save_large_data_to_sheets(reports_dict, worksheet)
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            all_data = [['门店名称', '压缩数据', '行数', '列数', '更新时间', '分片序号', '总分片数', '数据哈希']]
             
-            if success:
-                # 清除相关缓存
-                cache_key = get_cache_key("reports", "load")
-                if f"cache_{cache_key}" in st.session_state:
-                    del st.session_state[f"cache_{cache_key}"]
+            with st.spinner("压缩并保存数据..."):
+                total_stores = len(reports_dict)
+                progress_bar = st.progress(0)
                 
-                logger.info("报表数据保存成功")
-                return True
-            return False
-        
-        return safe_sheet_operation(_save_operation)
-
-def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str) -> Optional[pd.DataFrame]:
-    """重构分片数据"""
-    try:
-        if len(fragments) == 1:
-            # 单片数据
-            json_data = fragments[0]['json_data']
-        else:
-            # 多片数据需要重构
-            fragments.sort(key=lambda x: int(x['chunk_num']))
-            json_data = ''.join([frag['json_data'] for frag in fragments])
-        
-        # 验证数据完整性
-        expected_hash = fragments[0].get('data_hash', '')
-        if expected_hash and expected_hash != 'ERROR':
-            actual_hash = hashlib.md5(json_data.encode('utf-8')).hexdigest()[:16]
-            if actual_hash != expected_hash:
-                logger.warning(f"{store_name} 数据哈希不匹配，可能存在数据损坏")
-        
-        # 解析JSON
-        df = pd.read_json(json_data, orient='records')
-        
-        # 数据后处理
-        if len(df) > 0:
-            # 检查第一行是否是门店名称
-            first_row = df.iloc[0]
-            non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
-            
-            if non_empty_count <= 2 and len(df) > 1:
-                df = df.iloc[1:].reset_index(drop=True)
-        
-        # 处理表头
-        if len(df) > 1:
-            header_row = df.iloc[0].fillna('').astype(str).tolist()
-            data_rows = df.iloc[1:].copy()
-            
-            # 清理列名并处理重复
-            cols = []
-            for i, col in enumerate(header_row):
-                col = str(col).strip()
-                if col == '' or col == 'nan' or col == '0':
-                    col = f'列{i+1}' if i > 0 else '项目名称'
+                for idx, (store_name, df) in enumerate(reports_dict.items()):
+                    try:
+                        # 清理并压缩数据
+                        compressed_data = clean_and_compress_dataframe(df)
+                        
+                        # 计算哈希
+                        data_hash = hashlib.md5(compressed_data.encode('utf-8')).hexdigest()[:16]
+                        
+                        # 检查是否需要分片
+                        if len(compressed_data) <= MAX_CHUNK_SIZE:
+                            all_data.append([
+                                store_name, compressed_data, len(df), len(df.columns), 
+                                current_time, "1", "1", data_hash
+                            ])
+                        else:
+                            # 分片存储
+                            chunks = []
+                            for i in range(0, len(compressed_data), MAX_CHUNK_SIZE):
+                                chunks.append(compressed_data[i:i + MAX_CHUNK_SIZE])
+                            
+                            total_chunks = len(chunks)
+                            for chunk_idx, chunk in enumerate(chunks):
+                                chunk_name = f"{store_name}_分片{chunk_idx+1}"
+                                all_data.append([
+                                    chunk_name, chunk, len(df), len(df.columns),
+                                    current_time, str(chunk_idx+1), str(total_chunks), data_hash
+                                ])
+                        
+                        # 更新进度
+                        progress_bar.progress((idx + 1) / total_stores)
+                        logger.info(f"处理完成: {store_name}")
+                        
+                    except Exception as e:
+                        logger.error(f"处理 {store_name} 时出错: {str(e)}")
+                        continue
                 
-                # 处理重复列名
-                original_col = col
-                counter = 1
-                while col in cols:
-                    col = f"{original_col}_{counter}"
-                    counter += 1
-                cols.append(col)
+                progress_bar.empty()
             
-            # 确保列数匹配
-            min_cols = min(len(data_rows.columns), len(cols))
-            cols = cols[:min_cols]
-            data_rows = data_rows.iloc[:, :min_cols]
+            # 分批保存数据
+            batch_size = 15
+            if len(all_data) > 1:
+                for i in range(1, len(all_data), batch_size):
+                    batch_data = all_data[i:i+batch_size]
+                    
+                    if i == 1:
+                        worksheet.update('A1', [all_data[0]] + batch_data)
+                    else:
+                        row_num = i + 1
+                        worksheet.update(f'A{row_num}', batch_data)
+                    
+                    time.sleep(0.8)
             
-            data_rows.columns = cols
-            df = data_rows.reset_index(drop=True).fillna('')
-        else:
-            # 处理少于3行的数据
-            df = df.fillna('')
-            default_cols = []
-            for i in range(len(df.columns)):
-                col_name = f'列{i+1}' if i > 0 else '项目名称'
-                default_cols.append(col_name)
-            df.columns = default_cols
+            logger.info(f"报表数据保存完成: {len(all_data) - 1} 条记录")
+            
+            # 清除缓存
+            if 'cache_reports_load' in st.session_state:
+                del st.session_state['cache_reports_load']
+            
+            return True
         
-        logger.info(f"{store_name} 数据重构成功: {len(df)} 行")
-        return df
-        
-    except Exception as e:
-        logger.error(f"重构 {store_name} 数据失败: {str(e)}")
-        return None
+        return retry_operation(_save_operation)
 
 def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
-    """加载报表数据 - 使用缓存和分片重构"""
-    cache_key = get_cache_key("reports", "load")
-    cached_data = get_cache(cache_key)
-    if cached_data is not None:
-        logger.info("从缓存加载报表数据")
-        return cached_data
+    """加载报表数据"""
+    # 检查缓存
+    if 'cache_reports_load' in st.session_state:
+        cache_data = st.session_state['cache_reports_load']
+        if time.time() - cache_data['timestamp'] < CACHE_DURATION:
+            logger.info("从缓存加载报表数据")
+            return cache_data['data']
     
     with error_handler("加载报表数据"):
         def _load_operation():
-            spreadsheet = get_or_create_spreadsheet(gc)
-            
             try:
+                spreadsheet = get_or_create_spreadsheet(gc)
                 worksheet = spreadsheet.worksheet(REPORTS_SHEET_NAME)
                 data = worksheet.get_all_values()
                 
@@ -544,25 +620,20 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                     logger.info("报表数据为空")
                     return {}
                 
-                # 解析数据
+                # 重构数据
                 reports_dict = {}
-                fragments_dict = {}  # 存储分片数据
+                fragments_dict = {}
                 
                 for row in data[1:]:
-                    if len(row) >= 7:  # 确保有足够的列
+                    if len(row) >= 7:
                         store_name = row[0]
-                        json_data = row[1]
+                        compressed_data = row[1]
                         rows_count = row[2]
                         cols_count = row[3]
                         update_time = row[4]
                         chunk_num = row[5]
                         total_chunks = row[6]
                         data_hash = row[7] if len(row) > 7 else ''
-                        
-                        # 跳过错误数据
-                        if store_name.endswith('_错误'):
-                            logger.warning(f"跳过错误数据: {store_name}")
-                            continue
                         
                         # 处理分片数据
                         if '_分片' in store_name:
@@ -571,47 +642,97 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                                 fragments_dict[base_name] = []
                             
                             fragments_dict[base_name].append({
-                                'json_data': json_data,
+                                'data': compressed_data,
                                 'chunk_num': chunk_num,
                                 'total_chunks': total_chunks,
                                 'data_hash': data_hash
                             })
                         else:
-                            # 单片数据
                             fragments_dict[store_name] = [{
-                                'json_data': json_data,
+                                'data': compressed_data,
                                 'chunk_num': '1',
                                 'total_chunks': '1',
                                 'data_hash': data_hash
                             }]
                 
-                # 重构所有分片数据
+                # 重构所有数据
                 for store_name, fragments in fragments_dict.items():
-                    df = reconstruct_fragmented_data(fragments, store_name)
-                    if df is not None:
-                        reports_dict[store_name] = df
+                    try:
+                        if len(fragments) == 1:
+                            compressed_data = fragments[0]['data']
+                        else:
+                            # 按顺序重组分片
+                            fragments.sort(key=lambda x: int(x['chunk_num']))
+                            compressed_data = ''.join([frag['data'] for frag in fragments])
+                        
+                        # 解压数据
+                        json_data = decompress_data(compressed_data)
+                        
+                        # 解析为DataFrame
+                        df = pd.read_json(json_data, orient='records')
+                        
+                        if not df.empty:
+                            # 数据后处理
+                            if len(df) > 0:
+                                first_row = df.iloc[0]
+                                non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+                                if non_empty_count <= 2 and len(df) > 1:
+                                    df = df.iloc[1:].reset_index(drop=True)
+                            
+                            # 处理表头
+                            if len(df) > 1:
+                                header_row = df.iloc[0].fillna('').astype(str).tolist()
+                                data_rows = df.iloc[1:].copy()
+                                
+                                cols = []
+                                for i, col in enumerate(header_row):
+                                    col = str(col).strip()
+                                    if col == '' or col == 'nan' or col == '0':
+                                        col = f'列{i+1}' if i > 0 else '项目名称'
+                                    
+                                    original_col = col
+                                    counter = 1
+                                    while col in cols:
+                                        col = f"{original_col}_{counter}"
+                                        counter += 1
+                                    cols.append(col)
+                                
+                                min_cols = min(len(data_rows.columns), len(cols))
+                                cols = cols[:min_cols]
+                                data_rows = data_rows.iloc[:, :min_cols]
+                                data_rows.columns = cols
+                                df = data_rows.reset_index(drop=True).fillna('')
+                            
+                            reports_dict[store_name] = df
+                            logger.info(f"{store_name} 数据加载成功: {len(df)} 行")
+                    
+                    except Exception as e:
+                        logger.error(f"解析 {store_name} 数据失败: {str(e)}")
+                        continue
                 
-                logger.info(f"报表数据加载成功: {len(reports_dict)} 个门店")
+                logger.info(f"报表数据加载完成: {len(reports_dict)} 个门店")
                 
                 # 设置缓存
-                set_cache(cache_key, reports_dict)
+                st.session_state['cache_reports_load'] = {
+                    'data': reports_dict,
+                    'timestamp': time.time()
+                }
                 return reports_dict
                 
             except gspread.WorksheetNotFound:
                 logger.info("报表数据表不存在")
                 return {}
         
-        return safe_sheet_operation(_load_operation)
+        return retry_operation(_load_operation)
 
 def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """分析应收未收额数据 - 专门查找第69行"""
+    """分析应收未收额数据"""
     result = {}
     
     if len(df.columns) == 0 or len(df) == 0:
         return result
     
     # 检查第一行是否是门店名称
-    original_df = df.copy()
     first_row = df.iloc[0] if len(df) > 0 else None
     if first_row is not None:
         non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
@@ -620,18 +741,16 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
             result['skipped_store_name_row'] = True
     
     # 查找第69行
-    target_row_index = 68  # 第69行
+    target_row_index = 68
     
     if len(df) > target_row_index:
         row = df.iloc[target_row_index]
         first_col_value = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
         
-        # 检查关键词
         keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收未收']
         
         for keyword in keywords:
             if keyword in first_col_value:
-                # 查找数值
                 for col_idx in range(len(row)-1, 0, -1):
                     val = row.iloc[col_idx]
                     if pd.notna(val) and str(val).strip() not in ['', 'None', 'nan']:
@@ -662,7 +781,6 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
         for idx, row in df.iterrows():
             try:
                 row_name = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
-                
                 if not row_name.strip():
                     continue
                 
@@ -728,10 +846,22 @@ def find_matching_reports(store_name: str, reports_data: Dict[str, pd.DataFrame]
             matching.append(sheet_name)
     return matching
 
-def show_status_message(message: str, status_type: str = "info"):
-    """显示状态消息"""
-    css_class = f"status-{status_type}"
-    st.markdown(f'<div class="{css_class}">{message}</div>', unsafe_allow_html=True)
+def show_user_info(gc):
+    """显示用户账号信息"""
+    try:
+        if 'google_credentials' in st.session_state:
+            cred_data = st.session_state['google_credentials']
+            
+            # 尝试获取用户信息
+            st.markdown("""
+            <div class="status-success">
+                ✅ <strong>已连接到你的个人Google账号</strong><br>
+                🗄️ 使用个人Google Drive存储空间 (15GB)<br>
+                🔒 数据安全存储在你的个人账号中
+            </div>
+            """, unsafe_allow_html=True)
+    except Exception as e:
+        logger.warning(f"获取用户信息失败: {str(e)}")
 
 # 初始化会话状态
 if 'logged_in' not in st.session_state:
@@ -742,30 +872,28 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = ""
 if 'is_admin' not in st.session_state:
     st.session_state.is_admin = False
-if 'google_sheets_client' not in st.session_state:
-    st.session_state.google_sheets_client = None
-if 'operation_status' not in st.session_state:
-    st.session_state.operation_status = []
 
 # 主标题
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
-# 初始化Google Sheets客户端
-if not st.session_state.google_sheets_client:
-    try:
-        with st.spinner("连接云数据库..."):
-            gc = get_google_sheets_client()
-            st.session_state.google_sheets_client = gc
-            show_status_message("✅ 云数据库连接成功！", "success")
-    except Exception as e:
-        show_status_message(f"❌ 连接失败: {str(e)}", "error")
-        st.stop()
-
-gc = st.session_state.google_sheets_client
-
-# 显示操作状态
-for status in st.session_state.operation_status:
-    show_status_message(status['message'], status['type'])
+# Google账号认证
+try:
+    gc = get_google_sheets_client()
+    if gc:
+        show_user_info(gc)
+    else:
+        if show_oauth_authorization():
+            st.rerun()
+        else:
+            st.stop()
+except OAuthError:
+    st.error("❌ 认证失败，请重新授权")
+    if 'google_credentials' in st.session_state:
+        del st.session_state['google_credentials']
+    st.stop()
+except Exception as e:
+    st.error(f"❌ 系统初始化失败: {str(e)}")
+    st.stop()
 
 # 侧边栏
 with st.sidebar:
@@ -774,9 +902,17 @@ with st.sidebar:
     # 系统状态
     st.subheader("📡 系统状态")
     if gc:
-        st.success("🟢 云数据库已连接")
+        st.success("🟢 个人账号已连接")
+        st.info("💾 使用个人15GB存储")
     else:
-        st.error("🔴 云数据库断开")
+        st.error("🔴 未连接")
+    
+    # 账号管理
+    st.subheader("👤 账号管理")
+    if st.button("🔄 重新授权"):
+        if 'google_credentials' in st.session_state:
+            del st.session_state['google_credentials']
+        st.rerun()
     
     user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
     
@@ -787,13 +923,21 @@ with st.sidebar:
         if st.button("验证管理员身份"):
             if admin_password == ADMIN_PASSWORD:
                 st.session_state.is_admin = True
-                show_status_message("✅ 管理员验证成功！", "success")
+                st.success("✅ 验证成功！")
                 st.rerun()
             else:
-                show_status_message("❌ 密码错误！", "error")
+                st.error("❌ 密码错误！")
         
         if st.session_state.is_admin:
             st.subheader("📁 文件管理")
+            
+            # 缓存管理
+            if st.button("🗑️ 清理系统缓存"):
+                cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
+                for key in cache_keys:
+                    del st.session_state[key]
+                st.success("✅ 缓存已清除")
+                st.rerun()
             
             # 上传权限表
             permissions_file = st.file_uploader("上传门店权限表", type=['xlsx', 'xls'])
@@ -802,16 +946,16 @@ with st.sidebar:
                     with st.spinner("处理权限表文件..."):
                         df = pd.read_excel(permissions_file)
                         if len(df.columns) >= 2:
-                            with st.spinner("保存到云端..."):
+                            with st.spinner("压缩并保存到个人Drive..."):
                                 if save_permissions_to_sheets(df, gc):
-                                    show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
+                                    st.success(f"✅ 权限表已上传：{len(df)} 个用户")
                                     st.balloons()
                                 else:
-                                    show_status_message("❌ 保存失败", "error")
+                                    st.error("❌ 保存失败")
                         else:
-                            show_status_message("❌ 格式错误：需要至少两列（门店名称、人员编号）", "error")
+                            st.error("❌ 格式错误：需要至少两列（门店名称、人员编号）")
                 except Exception as e:
-                    show_status_message(f"❌ 处理失败：{str(e)}", "error")
+                    st.error(f"❌ 处理失败：{str(e)}")
             
             # 上传财务报表
             reports_file = st.file_uploader("上传财务报表", type=['xlsx', 'xls'])
@@ -832,26 +976,17 @@ with st.sidebar:
                                 continue
                         
                         if reports_dict:
-                            with st.spinner("保存到云端..."):
+                            with st.spinner("压缩并保存到个人Drive..."):
                                 if save_reports_to_sheets(reports_dict, gc):
-                                    show_status_message(f"✅ 报表已上传：{len(reports_dict)} 个门店", "success")
+                                    st.success(f"✅ 报表已上传：{len(reports_dict)} 个门店")
                                     st.balloons()
                                 else:
-                                    show_status_message("❌ 保存失败", "error")
+                                    st.error("❌ 保存失败")
                         else:
-                            show_status_message("❌ 文件中没有有效的工作表", "error")
+                            st.error("❌ 文件中没有有效的工作表")
                             
                 except Exception as e:
-                    show_status_message(f"❌ 处理失败：{str(e)}", "error")
-            
-            # 缓存管理
-            st.subheader("🗂️ 缓存管理")
-            if st.button("清除所有缓存"):
-                cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
-                for key in cache_keys:
-                    del st.session_state[key]
-                show_status_message("✅ 缓存已清除", "success")
-                st.rerun()
+                    st.error(f"❌ 处理失败：{str(e)}")
     
     else:
         if st.session_state.logged_in:
@@ -863,15 +998,11 @@ with st.sidebar:
                 st.session_state.logged_in = False
                 st.session_state.store_name = ""
                 st.session_state.user_id = ""
-                show_status_message("👋 已退出登录", "success")
                 st.rerun()
-
-# 清除状态消息
-st.session_state.operation_status = []
 
 # 主界面
 if user_type == "管理员" and st.session_state.is_admin:
-    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端，支持分片存储和缓存机制</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>使用个人Google账号，享受15GB存储空间和高速访问</p></div>', unsafe_allow_html=True)
     
     try:
         with st.spinner("加载数据统计..."):
@@ -896,7 +1027,7 @@ if user_type == "管理员" and st.session_state.is_admin:
         
         if reports_data:
             st.subheader("📊 报表数据预览")
-            report_names = list(reports_data.keys())[:5]  # 显示前5个
+            report_names = list(reports_data.keys())[:3]
             for name in report_names:
                 with st.expander(f"📋 {name}"):
                     df = reports_data[name]
@@ -904,7 +1035,7 @@ if user_type == "管理员" and st.session_state.is_admin:
                     st.dataframe(df.head(3), use_container_width=True)
                     
     except Exception as e:
-        show_status_message(f"❌ 数据加载失败：{str(e)}", "error")
+        st.error(f"❌ 数据加载失败：{str(e)}")
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     st.info("👈 请在左侧边栏输入管理员密码")
@@ -932,14 +1063,14 @@ else:
                             st.session_state.logged_in = True
                             st.session_state.store_name = selected_store
                             st.session_state.user_id = user_id
-                            show_status_message("✅ 登录成功！", "success")
+                            st.success("✅ 登录成功！")
                             st.balloons()
                             st.rerun()
                         else:
-                            show_status_message("❌ 门店或编号错误！", "error")
+                            st.error("❌ 门店或编号错误！")
                             
         except Exception as e:
-            show_status_message(f"❌ 权限验证失败：{str(e)}", "error")
+            st.error(f"❌ 权限验证失败：{str(e)}")
     
     else:
         # 已登录 - 显示报表
@@ -1010,21 +1141,9 @@ else:
                                 st.write(f"- **第69行内容：** {debug_info.get('row_69_content', 'N/A')}")
                             else:
                                 st.write("- **第69行：** 报表行数不足69行")
-                            
-                            st.markdown("""
-                            ### 💡 可能的原因
-                            1. 第69行不包含"应收-未收额"相关关键词
-                            2. 第69行的数值为空或格式不正确
-                            3. 报表格式与预期不符
-                            
-                            ### 🛠️ 建议
-                            - 请检查Excel报表第69行是否包含"应收-未收额"
-                            - 确认该行有对应的金额数据
-                            - 如需调整查找位置，请联系技术支持
-                            """)
                 
                 except Exception as e:
-                    show_status_message(f"❌ 分析数据时出错：{str(e)}", "error")
+                    st.error(f"❌ 分析数据时出错：{str(e)}")
                 
                 st.divider()
                 
@@ -1071,7 +1190,7 @@ else:
                         st.warning("没有找到符合条件的数据")
                         
                 except Exception as e:
-                    show_status_message(f"❌ 数据处理时出错：{str(e)}", "error")
+                    st.error(f"❌ 数据处理时出错：{str(e)}")
                 
                 # 下载功能
                 st.subheader("📥 数据下载")
@@ -1101,7 +1220,7 @@ else:
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     except Exception as e:
-                        show_status_message(f"Excel下载准备失败：{str(e)}", "error")
+                        st.error(f"Excel下载准备失败：{str(e)}")
                 
                 with col2:
                     try:
@@ -1122,13 +1241,13 @@ else:
                             "text/csv"
                         )
                     except Exception as e:
-                        show_status_message(f"CSV下载准备失败：{str(e)}", "error")
+                        st.error(f"CSV下载准备失败：{str(e)}")
             
             else:
                 st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
                 
         except Exception as e:
-            show_status_message(f"❌ 报表加载失败：{str(e)}", "error")
+            st.error(f"❌ 报表加载失败：{str(e)}")
 
 # 页面底部状态信息
 st.divider()
@@ -1139,4 +1258,4 @@ with col2:
     cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
     st.caption(f"💾 缓存项目: {cache_count}")
 with col3:
-    st.caption("🔧 版本: v2.0 (稳定版)")
+    st.caption("🔧 版本: v4.0 (OAuth个人账号版)")
