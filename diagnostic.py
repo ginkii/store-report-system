@@ -518,3 +518,5 @@ def run_error_diagnostic():
 # 在管理员界面中添加这个诊断功能
 if __name__ == "__main__":
     run_error_diagnostic()
+
+st.write("当前服务账户:", st.secrets["google_sheets"]["client_email"])
