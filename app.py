@@ -683,15 +683,14 @@ st.markdown('<h1 class="main-header">📊 门店报表查询系统 </h1>', unsaf
 if not st.session_state.storage_system:
     try:
         st.session_state.storage_system = TencentSupabaseSystem()
-        st.success("✅ 腾讯云+Supabase存储系统初始化成功")
+        st.success("✅初始化成功")
     except Exception as e:
         st.error(f"❌ 存储系统初始化失败: {str(e)}")
         st.stop()
 
 storage_system = st.session_state.storage_system
 
-# 显示架构信息
-storage_system.show_architecture_info()
+
 
 # 侧边栏
 with st.sidebar:
@@ -811,7 +810,7 @@ else:
             else:
                 with st.form("login_form"):
                     selected_store = st.selectbox("选择门店", stores)
-                    user_id = st.text_input("人员编号")
+                    user_id = st.text_input("查询编码")
                     submit = st.form_submit_button("🚀 登录")
                     
                     if submit and selected_store and user_id:
