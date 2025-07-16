@@ -7,16 +7,11 @@ import time
 import gspread
 from google.oauth2.service_account import Credentials
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 import hashlib
 import pickle
 import traceback
 from contextlib import contextmanager
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import queue
-import random
-import math
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -34,25 +29,12 @@ ADMIN_PASSWORD = "admin123"
 PERMISSIONS_SHEET_NAME = "store_permissions"
 REPORTS_SHEET_NAME = "store_reports"
 SYSTEM_INFO_SHEET_NAME = "system_info"
+MAX_RETRIES = 3
+RETRY_DELAY = 1
+MAX_CHUNK_SIZE = 30000  # 减小分片大小
 CACHE_DURATION = 300  # 缓存5分钟
 
-# 优化的分批上传配置
-class BatchConfig:
-    def __init__(self):
-        self.initial_batch_size = 3  # 初始批次大小
-        self.max_batch_size = 15     # 最大批次大小
-        self.min_batch_size = 1      # 最小批次大小
-        self.max_chunk_size = 25000  # 单个数据块最大大小
-        self.base_delay = 0.8        # 基础延迟
-        self.max_delay = 10          # 最大延迟
-        self.max_retries = 5         # 最大重试次数
-        self.quota_backoff_factor = 2  # 配额限制退避因子
-        self.success_rate_threshold = 0.8  # 成功率阈值
-        self.max_concurrent_uploads = 3    # 最大并发上传数
-
-BATCH_CONFIG = BatchConfig()
-
-# CSS样式保持不变
+# CSS样式
 st.markdown("""
     <style>
     .main-header {
@@ -77,43 +59,47 @@ st.markdown("""
         border: 2px solid #fdcb6e;
         margin: 1rem 0;
     }
-    .upload-status {
-        background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%);
-        color: white;
-        padding: 1rem;
-        border-radius: 8px;
+    .receivable-positive {
+        background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
+        color: #721c24;
+        padding: 2rem;
+        border-radius: 15px;
+        border: 3px solid #f093fb;
+        margin: 1rem 0;
+        text-align: center;
+    }
+    .receivable-negative {
+        background: linear-gradient(135deg, #a8edea 0%, #d299c2 100%);
+        color: #0c4128;
+        padding: 2rem;
+        border-radius: 15px;
+        border: 3px solid #48cab2;
+        margin: 1rem 0;
+        text-align: center;
+    }
+    .status-success {
+        background: #d4edda;
+        color: #155724;
+        padding: 0.75rem;
+        border-radius: 5px;
+        border: 1px solid #c3e6cb;
         margin: 0.5rem 0;
     }
-    .batch-info {
-        background: #f8f9fa;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #007bff;
-        margin: 0.5rem 0;
-    }
-    .quota-warning {
-        background: #fff3cd;
-        color: #856404;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #ffc107;
-        margin: 0.5rem 0;
-    }
-    .quota-danger {
+    .status-error {
         background: #f8d7da;
         color: #721c24;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #dc3545;
+        padding: 0.75rem;
+        border-radius: 5px;
+        border: 1px solid #f5c6cb;
         margin: 0.5rem 0;
     }
-    .success-animation {
-        animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-        0% { transform: scale(1); }
-        50% { transform: scale(1.05); }
-        100% { transform: scale(1); }
+    .status-warning {
+        background: #fff3cd;
+        color: #856404;
+        padding: 0.75rem;
+        border-radius: 5px;
+        border: 1px solid #ffeaa7;
+        margin: 0.5rem 0;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -126,482 +112,6 @@ class DataProcessingError(Exception):
     """数据处理异常"""
     pass
 
-class QuotaLimitError(Exception):
-    """配额限制异常"""
-    pass
-
-class AdaptiveBatchUploader:
-    """自适应批次上传器"""
-    
-    def __init__(self, gc, config: BatchConfig = None):
-        self.gc = gc
-        self.config = config or BATCH_CONFIG
-        self.current_batch_size = self.config.initial_batch_size
-        self.api_call_count = 0
-        self.success_count = 0
-        self.error_count = 0
-        self.quota_errors = 0
-        self.last_api_call_time = 0
-        self.upload_queue = queue.Queue()
-        self.results = []
-        self.progress_callback = None
-        self.status_callback = None
-        
-    def set_callbacks(self, progress_callback, status_callback):
-        """设置回调函数"""
-        self.progress_callback = progress_callback
-        self.status_callback = status_callback
-        
-    def log_api_call(self):
-        """记录API调用"""
-        self.api_call_count += 1
-        self.last_api_call_time = time.time()
-        
-    def calculate_delay(self, attempt: int = 0, is_quota_error: bool = False) -> float:
-        """计算智能延迟"""
-        if is_quota_error:
-            # 配额错误使用指数退避
-            base_delay = self.config.base_delay * (self.config.quota_backoff_factor ** attempt)
-            jitter = random.uniform(0, base_delay * 0.3)  # 添加随机抖动
-            return min(base_delay + jitter, self.config.max_delay)
-        else:
-            # 正常延迟
-            return self.config.base_delay + random.uniform(0, 0.2)
-    
-    def adjust_batch_size(self, success_rate: float, recent_errors: int):
-        """动态调整批次大小"""
-        old_size = self.current_batch_size
-        
-        if success_rate >= self.config.success_rate_threshold and recent_errors == 0:
-            # 成功率高，增加批次大小
-            self.current_batch_size = min(
-                self.current_batch_size + 1, 
-                self.config.max_batch_size
-            )
-        elif success_rate < 0.6 or recent_errors > 2:
-            # 成功率低或错误较多，减少批次大小
-            self.current_batch_size = max(
-                self.current_batch_size - 1, 
-                self.config.min_batch_size
-            )
-        
-        if old_size != self.current_batch_size:
-            if self.status_callback:
-                self.status_callback(f"📊 批次大小调整: {old_size} → {self.current_batch_size}")
-    
-    def handle_api_error(self, error: Exception, attempt: int) -> Tuple[bool, float]:
-        """处理API错误"""
-        error_str = str(error).lower()
-        
-        if any(keyword in error_str for keyword in ['quota', 'rate limit', 'limit exceeded']):
-            self.quota_errors += 1
-            delay = self.calculate_delay(attempt, is_quota_error=True)
-            if self.status_callback:
-                self.status_callback(f"⚠️ 配额限制，等待 {delay:.1f}s 后重试...")
-            return True, delay
-        
-        elif any(keyword in error_str for keyword in ['timeout', 'connection', 'network']):
-            delay = self.calculate_delay(attempt) * 2
-            if self.status_callback:
-                self.status_callback(f"🔄 网络错误，等待 {delay:.1f}s 后重试...")
-            return True, delay
-        
-        return False, 0
-    
-    def upload_single_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """上传单个项目"""
-        max_retries = self.config.max_retries
-        
-        for attempt in range(max_retries):
-            try:
-                # API调用前的延迟控制
-                current_time = time.time()
-                if current_time - self.last_api_call_time < self.config.base_delay:
-                    time.sleep(self.config.base_delay - (current_time - self.last_api_call_time))
-                
-                # 执行上传操作
-                result = self._perform_upload(item)
-                self.log_api_call()
-                self.success_count += 1
-                
-                return {
-                    'success': True,
-                    'item': item,
-                    'result': result,
-                    'attempts': attempt + 1
-                }
-                
-            except Exception as e:
-                self.error_count += 1
-                
-                should_retry, delay = self.handle_api_error(e, attempt)
-                
-                if should_retry and attempt < max_retries - 1:
-                    time.sleep(delay)
-                    continue
-                else:
-                    return {
-                        'success': False,
-                        'item': item,
-                        'error': str(e),
-                        'attempts': attempt + 1
-                    }
-        
-        return {
-            'success': False,
-            'item': item,
-            'error': f'超过最大重试次数 ({max_retries})',
-            'attempts': max_retries
-        }
-    
-    def _perform_upload(self, item: Dict[str, Any]) -> Any:
-        """执行实际的上传操作 - 子类需要实现"""
-        raise NotImplementedError("子类必须实现 _perform_upload 方法")
-    
-    def process_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """处理一个批次"""
-        batch_results = []
-        
-        if self.status_callback:
-            self.status_callback(f"🔄 处理批次: {len(items)} 个项目")
-        
-        for item in items:
-            result = self.upload_single_item(item)
-            batch_results.append(result)
-            
-            if self.progress_callback:
-                self.progress_callback(1)
-        
-        return batch_results
-    
-    def upload_all(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """上传所有项目"""
-        total_items = len(items)
-        processed = 0
-        all_results = []
-        
-        # 初始化进度
-        if self.progress_callback:
-            self.progress_callback(0, total_items)
-        
-        # 分批处理
-        for i in range(0, total_items, self.current_batch_size):
-            batch = items[i:i + self.current_batch_size]
-            batch_num = (i // self.current_batch_size) + 1
-            
-            if self.status_callback:
-                self.status_callback(f"📦 第 {batch_num} 批次，共 {len(batch)} 个项目")
-            
-            batch_results = self.process_batch(batch)
-            all_results.extend(batch_results)
-            
-            # 计算成功率
-            batch_success_count = sum(1 for r in batch_results if r['success'])
-            batch_success_rate = batch_success_count / len(batch_results)
-            recent_errors = sum(1 for r in batch_results if not r['success'])
-            
-            # 调整批次大小
-            self.adjust_batch_size(batch_success_rate, recent_errors)
-            
-            processed += len(batch)
-            
-            # 批次间延迟
-            if processed < total_items:
-                delay = self.calculate_delay()
-                time.sleep(delay)
-        
-        # 统计结果
-        successful = sum(1 for r in all_results if r['success'])
-        failed = total_items - successful
-        
-        return {
-            'total': total_items,
-            'successful': successful,
-            'failed': failed,
-            'success_rate': successful / total_items,
-            'results': all_results,
-            'api_calls': self.api_call_count,
-            'quota_errors': self.quota_errors
-        }
-
-class SheetsDataUploader(AdaptiveBatchUploader):
-    """Google Sheets数据上传器"""
-    
-    def __init__(self, gc, spreadsheet_name: str, worksheet_name: str, config: BatchConfig = None):
-        super().__init__(gc, config)
-        self.spreadsheet_name = spreadsheet_name
-        self.worksheet_name = worksheet_name
-        self.worksheet = None
-        self._setup_worksheet()
-    
-    def _setup_worksheet(self):
-        """设置工作表"""
-        spreadsheet = get_or_create_spreadsheet(self.gc, self.spreadsheet_name)
-        self.worksheet = get_or_create_worksheet(
-            spreadsheet, 
-            self.worksheet_name, 
-            rows=5000, 
-            cols=20
-        )
-    
-    def _perform_upload(self, item: Dict[str, Any]) -> Any:
-        """执行数据上传"""
-        data = item['data']
-        start_row = item['start_row']
-        
-        # 更新数据到工作表
-        if data:
-            range_name = f'A{start_row}'
-            self.worksheet.update(range_name, data)
-            return f"已更新 {len(data)} 行数据到 {range_name}"
-        
-        return "空数据，跳过上传"
-
-class PermissionsUploader(SheetsDataUploader):
-    """权限数据上传器"""
-    
-    def __init__(self, gc, config: BatchConfig = None):
-        super().__init__(gc, "门店报表系统数据", PERMISSIONS_SHEET_NAME, config)
-    
-    def upload_permissions(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """上传权限数据"""
-        # 清空现有数据
-        self.worksheet.clear()
-        time.sleep(1)
-        
-        # 准备数据
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # 分批准备数据
-        batch_size = 50  # 每批50行
-        items = []
-        
-        # 添加表头
-        headers = [['门店名称', '人员编号', '更新时间']]
-        items.append({
-            'data': headers,
-            'start_row': 1
-        })
-        
-        # 分批准备数据行
-        for i in range(0, len(df), batch_size):
-            batch_df = df.iloc[i:i + batch_size]
-            batch_data = []
-            
-            for _, row in batch_df.iterrows():
-                batch_data.append([
-                    str(row.iloc[0]).strip(),
-                    str(row.iloc[1]).strip(),
-                    current_time
-                ])
-            
-            items.append({
-                'data': batch_data,
-                'start_row': i + 2  # +2 因为有表头
-            })
-        
-        return self.upload_all(items)
-
-class ReportsUploader(SheetsDataUploader):
-    """报表数据上传器"""
-    
-    def __init__(self, gc, config: BatchConfig = None):
-        super().__init__(gc, "门店报表系统数据", REPORTS_SHEET_NAME, config)
-    
-    def upload_reports(self, reports_dict: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
-        """上传报表数据"""
-        # 清空现有数据
-        self.worksheet.clear()
-        time.sleep(1)
-        
-        # 准备数据
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        items = []
-        
-        # 添加表头
-        headers = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间', '分片序号', '总分片数', '数据哈希']]
-        items.append({
-            'data': headers,
-            'start_row': 1
-        })
-        
-        row_counter = 2
-        
-        for store_name, df in reports_dict.items():
-            try:
-                # 清理数据
-                df_cleaned = clean_dataframe_for_json(df)
-                
-                # 转换为JSON
-                json_data = df_cleaned.to_json(orient='records', force_ascii=False, ensure_ascii=False)
-                
-                # 计算数据哈希
-                data_hash = hashlib.md5(json_data.encode('utf-8')).hexdigest()[:16]
-                
-                # 检查是否需要分片
-                if len(json_data) <= self.config.max_chunk_size:
-                    # 不需要分片
-                    items.append({
-                        'data': [[
-                            store_name,
-                            json_data,
-                            len(df),
-                            len(df.columns),
-                            current_time,
-                            "1",
-                            "1",
-                            data_hash
-                        ]],
-                        'start_row': row_counter
-                    })
-                    row_counter += 1
-                else:
-                    # 分片存储
-                    chunks = []
-                    for i in range(0, len(json_data), self.config.max_chunk_size):
-                        chunks.append(json_data[i:i + self.config.max_chunk_size])
-                    
-                    total_chunks = len(chunks)
-                    
-                    for idx, chunk in enumerate(chunks):
-                        chunk_name = f"{store_name}_分片{idx+1}"
-                        items.append({
-                            'data': [[
-                                chunk_name,
-                                chunk,
-                                len(df),
-                                len(df.columns),
-                                current_time,
-                                str(idx+1),
-                                str(total_chunks),
-                                data_hash
-                            ]],
-                            'start_row': row_counter
-                        })
-                        row_counter += 1
-                
-                logger.info(f"准备上传 {store_name}: {len(df)} 行数据")
-                
-            except Exception as e:
-                logger.error(f"处理 {store_name} 时出错: {str(e)}")
-                # 添加错误记录
-                error_data = {
-                    "error": str(e),
-                    "rows": len(df) if 'df' in locals() else 0,
-                    "columns": len(df.columns) if 'df' in locals() else 0,
-                    "timestamp": current_time
-                }
-                
-                items.append({
-                    'data': [[
-                        f"{store_name}_错误",
-                        json.dumps(error_data, ensure_ascii=False),
-                        0,
-                        0,
-                        current_time,
-                        "1",
-                        "1",
-                        "ERROR"
-                    ]],
-                    'start_row': row_counter
-                })
-                row_counter += 1
-        
-        return self.upload_all(items)
-
-class UploadProgressManager:
-    """上传进度管理器"""
-    
-    def __init__(self):
-        self.progress_bar = None
-        self.status_text = None
-        self.info_container = None
-        self.total_items = 0
-        self.processed_items = 0
-        
-    def setup_ui(self):
-        """设置UI组件"""
-        self.progress_bar = st.progress(0)
-        self.status_text = st.empty()
-        self.info_container = st.container()
-        
-        # 创建实时统计显示区域
-        self.stats_container = st.container()
-        with self.stats_container:
-            self.col1, self.col2, self.col3 = st.columns(3)
-            with self.col1:
-                self.processed_metric = st.empty()
-            with self.col2:
-                self.success_metric = st.empty()
-            with self.col3:
-                self.error_metric = st.empty()
-    
-    def update_progress(self, increment: int, total: int = None):
-        """更新进度"""
-        if total is not None:
-            self.total_items = total
-            self.processed_items = 0
-        
-        self.processed_items += increment
-        
-        if self.total_items > 0:
-            progress = self.processed_items / self.total_items
-            self.progress_bar.progress(progress)
-            
-            # 更新统计信息
-            self.processed_metric.metric("已处理", self.processed_items)
-    
-    def update_status(self, message: str):
-        """更新状态消息"""
-        self.status_text.text(message)
-        
-        # 在info容器中显示详细信息
-        with self.info_container:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            st.markdown(f'<div class="batch-info">🕒 {timestamp} - {message}</div>', unsafe_allow_html=True)
-    
-    def show_quota_warning(self, api_calls: int, quota_errors: int):
-        """显示配额警告"""
-        if quota_errors > 0:
-            warning_msg = f"⚠️ 配额限制警告: {quota_errors} 次限制，已完成 {api_calls} 次API调用"
-            if quota_errors > 5:
-                st.markdown(f'<div class="quota-danger">{warning_msg}</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="quota-warning">{warning_msg}</div>', unsafe_allow_html=True)
-    
-    def show_final_results(self, results: Dict[str, Any]):
-        """显示最终结果"""
-        total = results['total']
-        successful = results['successful']
-        failed = results['failed']
-        success_rate = results['success_rate']
-        
-        # 更新最终统计
-        self.processed_metric.metric("总计", total)
-        self.success_metric.metric("成功", successful, delta=f"{success_rate:.1%}")
-        self.error_metric.metric("失败", failed)
-        
-        # 显示详细结果
-        if success_rate >= 0.95:
-            st.markdown(f'<div class="upload-status success-animation">✅ 上传完成！成功率: {success_rate:.1%}</div>', unsafe_allow_html=True)
-            st.balloons()
-        elif success_rate >= 0.8:
-            st.markdown(f'<div class="upload-status">✅ 上传基本完成，成功率: {success_rate:.1%}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="quota-warning">⚠️ 上传完成但有较多失败，成功率: {success_rate:.1%}</div>', unsafe_allow_html=True)
-        
-        # 显示配额使用情况
-        self.show_quota_warning(results['api_calls'], results['quota_errors'])
-        
-        # 显示失败的项目
-        if failed > 0:
-            with st.expander(f"查看失败项目 ({failed} 个)"):
-                failed_items = [r for r in results['results'] if not r['success']]
-                for item in failed_items[:10]:  # 只显示前10个
-                    st.error(f"❌ {item.get('error', '未知错误')}")
-                if len(failed_items) > 10:
-                    st.info(f"... 还有 {len(failed_items) - 10} 个失败项目")
-
 @contextmanager
 def error_handler(operation_name: str):
     """通用错误处理上下文管理器"""
@@ -612,6 +122,18 @@ def error_handler(operation_name: str):
         logger.error(traceback.format_exc())
         st.error(f"❌ {operation_name} 失败: {str(e)}")
         raise
+
+def retry_operation(func, *args, max_retries=MAX_RETRIES, delay=RETRY_DELAY, **kwargs):
+    """重试操作装饰器"""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"操作失败，已重试 {max_retries} 次: {str(e)}")
+                raise
+            logger.warning(f"操作失败，第 {attempt + 1} 次重试: {str(e)}")
+            time.sleep(delay * (attempt + 1))  # 递增延迟
 
 def get_cache_key(operation: str, params: str) -> str:
     """生成缓存键"""
@@ -659,19 +181,10 @@ def get_google_sheets_client():
 
 def safe_sheet_operation(operation_func, *args, **kwargs):
     """安全的表格操作"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            return operation_func(*args, **kwargs)
-        except Exception as e:
-            if attempt == max_retries - 1:
-                logger.error(f"操作失败，已重试 {max_retries} 次: {str(e)}")
-                raise
-            logger.warning(f"操作失败，第 {attempt + 1} 次重试: {str(e)}")
-            time.sleep(1 * (attempt + 1))
+    return retry_operation(operation_func, *args, **kwargs)
 
 def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
-    """获取或创建表格"""
+    """获取或创建表格 - 增强错误处理"""
     def _operation():
         try:
             spreadsheet = gc.open(name)
@@ -680,13 +193,14 @@ def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
         except gspread.SpreadsheetNotFound:
             logger.info(f"创建新表格 '{name}'")
             spreadsheet = gc.create(name)
+            # 设置权限为可编辑
             spreadsheet.share('', perm_type='anyone', role='writer')
             return spreadsheet
     
     return safe_sheet_operation(_operation)
 
 def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
-    """获取或创建工作表"""
+    """获取或创建工作表 - 增强错误处理"""
     def _operation():
         try:
             worksheet = spreadsheet.worksheet(name)
@@ -704,7 +218,9 @@ def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
     try:
         df_cleaned = df.copy()
         
+        # 处理各种数据类型
         for col in df_cleaned.columns:
+            # 转换为字符串并处理特殊值
             df_cleaned[col] = df_cleaned[col].astype(str)
             df_cleaned[col] = df_cleaned[col].replace({
                 'nan': '',
@@ -714,6 +230,7 @@ def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
                 '<NA>': ''
             })
             
+            # 处理过长的字符串
             df_cleaned[col] = df_cleaned[col].apply(
                 lambda x: x[:1000] + '...' if len(str(x)) > 1000 else x
             )
@@ -726,62 +243,39 @@ def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
         raise DataProcessingError(f"数据清理失败: {str(e)}")
 
 def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
-    """保存权限数据 - 使用优化的上传器"""
+    """保存权限数据 - 增强版"""
     with error_handler("保存权限数据"):
-        progress_manager = UploadProgressManager()
-        progress_manager.setup_ui()
-        
-        uploader = PermissionsUploader(gc)
-        uploader.set_callbacks(
-            progress_manager.update_progress,
-            progress_manager.update_status
-        )
-        
-        progress_manager.update_status("🚀 开始上传权限数据...")
-        
-        results = uploader.upload_permissions(df)
-        
-        progress_manager.show_final_results(results)
-        
-        if results['success_rate'] >= 0.8:
+        def _save_operation():
+            spreadsheet = get_or_create_spreadsheet(gc)
+            worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
+            
+            # 清空现有数据
+            worksheet.clear()
+            time.sleep(1)  # API限制延迟
+            
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            all_data = [['门店名称', '人员编号', '更新时间']]
+            
+            # 准备数据
+            for _, row in df.iterrows():
+                all_data.append([
+                    str(row.iloc[0]).strip(),
+                    str(row.iloc[1]).strip(),
+                    current_time
+                ])
+            
+            # 批量更新
+            worksheet.update('A1', all_data)
+            logger.info(f"权限数据保存成功: {len(df)} 条记录")
+            
             # 清除相关缓存
             cache_key = get_cache_key("permissions", "load")
             if f"cache_{cache_key}" in st.session_state:
                 del st.session_state[f"cache_{cache_key}"]
             
-            logger.info(f"权限数据保存成功: {results['successful']}/{results['total']}")
             return True
         
-        return False
-
-def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
-    """保存报表数据 - 使用优化的上传器"""
-    with error_handler("保存报表数据"):
-        progress_manager = UploadProgressManager()
-        progress_manager.setup_ui()
-        
-        uploader = ReportsUploader(gc)
-        uploader.set_callbacks(
-            progress_manager.update_progress,
-            progress_manager.update_status
-        )
-        
-        progress_manager.update_status("🚀 开始上传报表数据...")
-        
-        results = uploader.upload_reports(reports_dict)
-        
-        progress_manager.show_final_results(results)
-        
-        if results['success_rate'] >= 0.8:
-            # 清除相关缓存
-            cache_key = get_cache_key("reports", "load")
-            if f"cache_{cache_key}" in st.session_state:
-                del st.session_state[f"cache_{cache_key}"]
-            
-            logger.info(f"报表数据保存成功: {results['successful']}/{results['total']}")
-            return True
-        
-        return False
+        return safe_sheet_operation(_save_operation)
 
 def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
     """加载权限数据 - 使用缓存"""
@@ -806,9 +300,11 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
                 df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
                 result_df = df[['门店名称', '人员编号']].copy()
                 
+                # 数据清理
                 result_df['门店名称'] = result_df['门店名称'].str.strip()
                 result_df['人员编号'] = result_df['人员编号'].str.strip()
                 
+                # 移除空行
                 result_df = result_df[
                     (result_df['门店名称'] != '') & 
                     (result_df['人员编号'] != '')
@@ -816,6 +312,7 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
                 
                 logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
                 
+                # 设置缓存
                 set_cache(cache_key, result_df)
                 return result_df
                 
@@ -825,12 +322,143 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
         
         return safe_sheet_operation(_load_operation)
 
+def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: int = 15) -> bool:
+    """分批保存大数据到表格"""
+    try:
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        all_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间', '分片序号', '总分片数', '数据哈希']]
+        
+        for store_name, df in data_dict.items():
+            try:
+                # 清理数据
+                df_cleaned = clean_dataframe_for_json(df)
+                
+                # 转换为JSON
+                json_data = df_cleaned.to_json(orient='records', force_ascii=False, ensure_ascii=False)
+                
+                # 计算数据哈希用于验证
+                data_hash = hashlib.md5(json_data.encode('utf-8')).hexdigest()[:16]
+                
+                # 检查是否需要分片
+                if len(json_data) <= MAX_CHUNK_SIZE:
+                    # 不需要分片
+                    all_data.append([
+                        store_name, 
+                        json_data, 
+                        len(df), 
+                        len(df.columns), 
+                        current_time, 
+                        "1", 
+                        "1",
+                        data_hash
+                    ])
+                else:
+                    # 分片存储
+                    chunks = []
+                    for i in range(0, len(json_data), MAX_CHUNK_SIZE):
+                        chunks.append(json_data[i:i + MAX_CHUNK_SIZE])
+                    
+                    total_chunks = len(chunks)
+                    
+                    for idx, chunk in enumerate(chunks):
+                        chunk_name = f"{store_name}_分片{idx+1}"
+                        all_data.append([
+                            chunk_name, 
+                            chunk, 
+                            len(df), 
+                            len(df.columns), 
+                            current_time, 
+                            str(idx+1), 
+                            str(total_chunks),
+                            data_hash
+                        ])
+                
+                logger.info(f"准备保存 {store_name}: {len(df)} 行数据")
+                
+            except Exception as e:
+                logger.error(f"处理 {store_name} 时出错: {str(e)}")
+                # 保存错误信息
+                error_data = {
+                    "error": str(e),
+                    "rows": len(df) if 'df' in locals() else 0,
+                    "columns": len(df.columns) if 'df' in locals() else 0,
+                    "timestamp": current_time
+                }
+                all_data.append([
+                    f"{store_name}_错误", 
+                    json.dumps(error_data, ensure_ascii=False), 
+                    0, 
+                    0, 
+                    current_time, 
+                    "1", 
+                    "1",
+                    "ERROR"
+                ])
+                continue
+        
+        # 分批上传数据
+        if len(all_data) > 1:
+            for i in range(1, len(all_data), batch_size):
+                batch_data = all_data[i:i+batch_size]
+                
+                if i == 1:
+                    # 第一批包含标题行
+                    worksheet.update('A1', [all_data[0]] + batch_data)
+                else:
+                    # 后续批次
+                    row_num = i + 1
+                    worksheet.update(f'A{row_num}', batch_data)
+                
+                # API限制延迟
+                time.sleep(0.8)
+                
+                # 显示进度
+                progress = min(i + batch_size, len(all_data) - 1)
+                st.progress(progress / (len(all_data) - 1))
+        
+        logger.info(f"数据保存完成: {len(all_data) - 1} 条记录")
+        return True
+        
+    except Exception as e:
+        logger.error(f"保存大数据失败: {str(e)}")
+        raise
+
+def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
+    """保存报表数据 - 增强版"""
+    with error_handler("保存报表数据"):
+        def _save_operation():
+            spreadsheet = get_or_create_spreadsheet(gc)
+            worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME, rows=2000, cols=10)
+            
+            # 清空现有数据
+            with st.spinner("清理旧数据..."):
+                worksheet.clear()
+                time.sleep(1)
+            
+            # 保存数据
+            with st.spinner("保存新数据..."):
+                success = save_large_data_to_sheets(reports_dict, worksheet)
+            
+            if success:
+                # 清除相关缓存
+                cache_key = get_cache_key("reports", "load")
+                if f"cache_{cache_key}" in st.session_state:
+                    del st.session_state[f"cache_{cache_key}"]
+                
+                logger.info("报表数据保存成功")
+                return True
+            return False
+        
+        return safe_sheet_operation(_save_operation)
+
 def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str) -> Optional[pd.DataFrame]:
     """重构分片数据"""
     try:
         if len(fragments) == 1:
+            # 单片数据
             json_data = fragments[0]['json_data']
         else:
+            # 多片数据需要重构
             fragments.sort(key=lambda x: int(x['chunk_num']))
             json_data = ''.join([frag['json_data'] for frag in fragments])
         
@@ -841,25 +469,31 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
             if actual_hash != expected_hash:
                 logger.warning(f"{store_name} 数据哈希不匹配，可能存在数据损坏")
         
+        # 解析JSON
         df = pd.read_json(json_data, orient='records')
         
+        # 数据后处理
         if len(df) > 0:
+            # 检查第一行是否是门店名称
             first_row = df.iloc[0]
             non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
             
             if non_empty_count <= 2 and len(df) > 1:
                 df = df.iloc[1:].reset_index(drop=True)
         
+        # 处理表头
         if len(df) > 1:
             header_row = df.iloc[0].fillna('').astype(str).tolist()
             data_rows = df.iloc[1:].copy()
             
+            # 清理列名并处理重复
             cols = []
             for i, col in enumerate(header_row):
                 col = str(col).strip()
                 if col == '' or col == 'nan' or col == '0':
                     col = f'列{i+1}' if i > 0 else '项目名称'
                 
+                # 处理重复列名
                 original_col = col
                 counter = 1
                 while col in cols:
@@ -867,6 +501,7 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
                     counter += 1
                 cols.append(col)
             
+            # 确保列数匹配
             min_cols = min(len(data_rows.columns), len(cols))
             cols = cols[:min_cols]
             data_rows = data_rows.iloc[:, :min_cols]
@@ -874,6 +509,7 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
             data_rows.columns = cols
             df = data_rows.reset_index(drop=True).fillna('')
         else:
+            # 处理少于3行的数据
             df = df.fillna('')
             default_cols = []
             for i in range(len(df.columns)):
@@ -908,11 +544,12 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                     logger.info("报表数据为空")
                     return {}
                 
+                # 解析数据
                 reports_dict = {}
-                fragments_dict = {}
+                fragments_dict = {}  # 存储分片数据
                 
                 for row in data[1:]:
-                    if len(row) >= 7:
+                    if len(row) >= 7:  # 确保有足够的列
                         store_name = row[0]
                         json_data = row[1]
                         rows_count = row[2]
@@ -922,10 +559,12 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                         total_chunks = row[6]
                         data_hash = row[7] if len(row) > 7 else ''
                         
+                        # 跳过错误数据
                         if store_name.endswith('_错误'):
                             logger.warning(f"跳过错误数据: {store_name}")
                             continue
                         
+                        # 处理分片数据
                         if '_分片' in store_name:
                             base_name = store_name.split('_分片')[0]
                             if base_name not in fragments_dict:
@@ -938,6 +577,7 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                                 'data_hash': data_hash
                             })
                         else:
+                            # 单片数据
                             fragments_dict[store_name] = [{
                                 'json_data': json_data,
                                 'chunk_num': '1',
@@ -945,6 +585,7 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                                 'data_hash': data_hash
                             }]
                 
+                # 重构所有分片数据
                 for store_name, fragments in fragments_dict.items():
                     df = reconstruct_fragmented_data(fragments, store_name)
                     if df is not None:
@@ -952,6 +593,7 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                 
                 logger.info(f"报表数据加载成功: {len(reports_dict)} 个门店")
                 
+                # 设置缓存
                 set_cache(cache_key, reports_dict)
                 return reports_dict
                 
@@ -968,6 +610,7 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
     if len(df.columns) == 0 or len(df) == 0:
         return result
     
+    # 检查第一行是否是门店名称
     original_df = df.copy()
     first_row = df.iloc[0] if len(df) > 0 else None
     if first_row is not None:
@@ -976,16 +619,19 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
             df = df.iloc[1:].reset_index(drop=True)
             result['skipped_store_name_row'] = True
     
+    # 查找第69行
     target_row_index = 68  # 第69行
     
     if len(df) > target_row_index:
         row = df.iloc[target_row_index]
         first_col_value = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
         
+        # 检查关键词
         keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收未收']
         
         for keyword in keywords:
             if keyword in first_col_value:
+                # 查找数值
                 for col_idx in range(len(row)-1, 0, -1):
                     val = row.iloc[col_idx]
                     if pd.notna(val) and str(val).strip() not in ['', 'None', 'nan']:
@@ -1048,6 +694,7 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
             except Exception:
                 continue
     
+    # 调试信息
     result['debug_info'] = {
         'total_rows': len(df),
         'checked_row_69': len(df) > target_row_index,
@@ -1128,19 +775,6 @@ with st.sidebar:
     st.subheader("📡 系统状态")
     if gc:
         st.success("🟢 云数据库已连接")
-        
-        # 添加上传配置
-        st.subheader("🔧 上传配置")
-        batch_size = st.slider("批次大小", 1, 20, BATCH_CONFIG.initial_batch_size)
-        max_chunk_size = st.slider("数据块大小", 10000, 50000, BATCH_CONFIG.max_chunk_size, step=5000)
-        
-        # 更新配置
-        BATCH_CONFIG.initial_batch_size = batch_size
-        BATCH_CONFIG.max_chunk_size = max_chunk_size
-        
-        # 显示当前配置
-        st.info(f"当前配置:\n- 批次大小: {batch_size}\n- 数据块: {max_chunk_size:,}")
-        
     else:
         st.error("🔴 云数据库断开")
     
@@ -1159,7 +793,7 @@ with st.sidebar:
                 show_status_message("❌ 密码错误！", "error")
         
         if st.session_state.is_admin:
-            st.subheader("📁 智能文件管理")
+            st.subheader("📁 文件管理")
             
             # 上传权限表
             permissions_file = st.file_uploader("上传门店权限表", type=['xlsx', 'xls'])
@@ -1168,19 +802,12 @@ with st.sidebar:
                     with st.spinner("处理权限表文件..."):
                         df = pd.read_excel(permissions_file)
                         if len(df.columns) >= 2:
-                            st.success(f"✅ 文件已读取：{len(df)} 个用户")
-                            
-                            # 预览数据
-                            st.subheader("📋 数据预览")
-                            st.dataframe(df.head(), use_container_width=True)
-                            
-                            if st.button("🚀 开始智能上传权限表", key="upload_permissions"):
-                                with st.container():
-                                    st.markdown("### 📊 上传进度")
-                                    if save_permissions_to_sheets(df, gc):
-                                        st.success("🎉 权限表上传成功！")
-                                    else:
-                                        st.error("❌ 上传失败，请检查日志")
+                            with st.spinner("保存到云端..."):
+                                if save_permissions_to_sheets(df, gc):
+                                    show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
+                                    st.balloons()
+                                else:
+                                    show_status_message("❌ 保存失败", "error")
                         else:
                             show_status_message("❌ 格式错误：需要至少两列（门店名称、人员编号）", "error")
                 except Exception as e:
@@ -1205,22 +832,12 @@ with st.sidebar:
                                 continue
                         
                         if reports_dict:
-                            st.success(f"✅ 文件已读取：{len(reports_dict)} 个门店")
-                            
-                            # 预览数据
-                            st.subheader("📋 数据预览")
-                            for name, df in list(reports_dict.items())[:3]:
-                                with st.expander(f"📊 {name}"):
-                                    st.write(f"数据规模: {len(df)} 行 × {len(df.columns)} 列")
-                                    st.dataframe(df.head(3), use_container_width=True)
-                            
-                            if st.button("🚀 开始智能上传报表", key="upload_reports"):
-                                with st.container():
-                                    st.markdown("### 📊 上传进度")
-                                    if save_reports_to_sheets(reports_dict, gc):
-                                        st.success("🎉 报表上传成功！")
-                                    else:
-                                        st.error("❌ 上传失败，请检查日志")
+                            with st.spinner("保存到云端..."):
+                                if save_reports_to_sheets(reports_dict, gc):
+                                    show_status_message(f"✅ 报表已上传：{len(reports_dict)} 个门店", "success")
+                                    st.balloons()
+                                else:
+                                    show_status_message("❌ 保存失败", "error")
                         else:
                             show_status_message("❌ 文件中没有有效的工作表", "error")
                             
@@ -1229,10 +846,7 @@ with st.sidebar:
             
             # 缓存管理
             st.subheader("🗂️ 缓存管理")
-            cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
-            st.metric("缓存项目数", cache_count)
-            
-            if st.button("🧹 清除所有缓存"):
+            if st.button("清除所有缓存"):
                 cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
                 for key in cache_keys:
                     del st.session_state[key]
@@ -1257,14 +871,14 @@ st.session_state.operation_status = []
 
 # 主界面
 if user_type == "管理员" and st.session_state.is_admin:
-    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>智能分批上传，自动适应API配额，支持断点续传和实时监控</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在云端，支持分片存储和缓存机制</p></div>', unsafe_allow_html=True)
     
     try:
         with st.spinner("加载数据统计..."):
             permissions_data = load_permissions_from_sheets(gc)
             reports_data = load_reports_from_sheets(gc)
         
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
             perms_count = len(permissions_data) if permissions_data is not None else 0
             st.metric("权限表用户数", perms_count)
@@ -1274,8 +888,6 @@ if user_type == "管理员" and st.session_state.is_admin:
         with col3:
             cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
             st.metric("缓存项目数", cache_count)
-        with col4:
-            st.metric("批次大小", BATCH_CONFIG.initial_batch_size)
             
         # 数据预览
         if permissions_data is not None and len(permissions_data) > 0:
@@ -1284,7 +896,7 @@ if user_type == "管理员" and st.session_state.is_admin:
         
         if reports_data:
             st.subheader("📊 报表数据预览")
-            report_names = list(reports_data.keys())[:5]
+            report_names = list(reports_data.keys())[:5]  # 显示前5个
             for name in report_names:
                 with st.expander(f"📋 {name}"):
                     df = reports_data[name]
@@ -1520,13 +1132,11 @@ else:
 
 # 页面底部状态信息
 st.divider()
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 with col1:
-    st.caption(f"🕒 时间: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"🕒 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 with col2:
     cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
-    st.caption(f"💾 缓存: {cache_count}")
+    st.caption(f"💾 缓存项目: {cache_count}")
 with col3:
-    st.caption(f"🔧 批次: {BATCH_CONFIG.initial_batch_size}")
-with col4:
-    st.caption("📊 版本: v3.0 (智能分批)")
+    st.caption("🔧 版本: v2.0 (稳定版)")
