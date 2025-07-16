@@ -39,12 +39,8 @@ MAX_CHUNK_SIZE = 25000
 CACHE_DURATION = 300
 COMPRESSION_LEVEL = 9
 
-# OAuth配置
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive',
-    'https://www.googleapis.com/auth/drive.file'
-]
+# 简化的OAuth配置 - 只请求必要权限
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # CSS样式
 st.markdown("""
@@ -113,6 +109,14 @@ st.markdown("""
         border: 1px solid #f5c6cb;
         margin: 1rem 0;
     }
+    .status-warning {
+        background: #fff3cd;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #ffeaa7;
+        margin: 1rem 0;
+    }
     .receivable-positive {
         background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);
         color: #721c24;
@@ -158,10 +162,14 @@ st.markdown("""
         border: none;
         cursor: pointer;
         transition: all 0.3s ease;
+        text-align: center;
+        min-width: 200px;
     }
     .auth-button:hover {
         transform: translateY(-2px);
         box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        text-decoration: none;
+        color: white;
     }
     .diagnostic-panel {
         background: #f8f9fa;
@@ -172,6 +180,13 @@ st.markdown("""
         font-family: monospace;
         font-size: 0.9rem;
     }
+    .config-guide {
+        background: #e3f2fd;
+        border: 1px solid #2196f3;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -180,23 +195,50 @@ class AuthenticationError(Exception):
     pass
 
 class OAuthManager:
-    """OAuth管理器 - 简化版本"""
+    """OAuth管理器 - 稳定版本"""
     
     @staticmethod
-    def create_simple_flow():
-        """创建简化的OAuth流程"""
+    def validate_oauth_config():
+        """验证OAuth配置的完整性"""
+        if "google_oauth" not in st.secrets:
+            return False, "OAuth配置缺失，请检查secrets.toml文件"
+        
+        oauth_config = st.secrets["google_oauth"]
+        required_keys = ["client_id", "client_secret", "redirect_uri"]
+        
+        for key in required_keys:
+            if key not in oauth_config:
+                return False, f"缺少配置项: {key}"
+            if not oauth_config[key].strip():
+                return False, f"配置项 {key} 为空"
+        
+        # 验证client_id格式
+        client_id = oauth_config["client_id"]
+        if not client_id.endswith(".apps.googleusercontent.com"):
+            return False, "client_id格式不正确，应该以.apps.googleusercontent.com结尾"
+        
+        # 验证redirect_uri格式
+        redirect_uri = oauth_config["redirect_uri"]
+        if not redirect_uri.startswith("https://"):
+            return False, "redirect_uri必须使用HTTPS协议"
+        
+        if not redirect_uri.endswith(".streamlit.app/"):
+            return False, "redirect_uri应该是Streamlit应用的完整URL，以.streamlit.app/结尾"
+        
+        return True, "OAuth配置验证通过"
+    
+    @staticmethod
+    def create_oauth_flow():
+        """创建OAuth流程"""
         try:
-            if "google_oauth" not in st.secrets:
-                return None, "OAuth配置缺失"
+            # 验证配置
+            is_valid, error_msg = OAuthManager.validate_oauth_config()
+            if not is_valid:
+                return None, error_msg
             
             oauth_config = st.secrets["google_oauth"]
             
-            # 验证必需配置
-            required_keys = ["client_id", "client_secret", "redirect_uri"]
-            for key in required_keys:
-                if key not in oauth_config:
-                    return None, f"缺少配置: {key}"
-            
+            # 创建客户端配置
             client_config = {
                 "web": {
                     "client_id": oauth_config["client_id"],
@@ -207,6 +249,7 @@ class OAuthManager:
                 }
             }
             
+            # 创建流程
             flow = Flow.from_client_config(
                 client_config,
                 scopes=SCOPES,
@@ -221,9 +264,8 @@ class OAuthManager:
     
     @staticmethod
     def generate_auth_url(flow):
-        """生成授权URL - 简化版本"""
+        """生成授权URL"""
         try:
-            # 不使用state参数，避免复杂性
             auth_url, _ = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
@@ -231,17 +273,23 @@ class OAuthManager:
             )
             return auth_url, None
         except Exception as e:
+            logger.error(f"生成授权URL失败: {str(e)}")
             return None, f"生成授权URL失败: {str(e)}"
     
     @staticmethod
-    def exchange_code_for_token(flow, auth_code):
-        """交换授权码为访问令牌 - 简化版本"""
+    def exchange_code_for_token(auth_code):
+        """交换授权码为访问令牌"""
         try:
-            # 直接交换token，跳过state验证
+            # 重新创建flow以确保一致性
+            flow, error = OAuthManager.create_oauth_flow()
+            if error:
+                return None, error
+            
+            # 交换token
             flow.fetch_token(code=auth_code)
             credentials = flow.credentials
             
-            # 简化凭据存储结构
+            # 创建凭据字典
             cred_dict = {
                 'token': credentials.token,
                 'refresh_token': credentials.refresh_token,
@@ -249,7 +297,7 @@ class OAuthManager:
                 'token_uri': credentials.token_uri,
                 'client_id': credentials.client_id,
                 'client_secret': credentials.client_secret,
-                'scopes': list(credentials.scopes) if credentials.scopes else SCOPES,
+                'scopes': SCOPES,
                 'expiry': credentials.expiry.isoformat() if credentials.expiry else None
             }
             
@@ -267,7 +315,6 @@ class OAuthManager:
             expiry = None
             if cred_dict.get('expiry'):
                 try:
-                    from datetime import datetime
                     expiry = datetime.fromisoformat(cred_dict['expiry'].replace('Z', '+00:00'))
                 except:
                     pass
@@ -294,43 +341,93 @@ class OAuthManager:
         """测试凭据有效性"""
         try:
             client = gspread.authorize(credentials)
-            # 快速测试 - 尝试列出文件
-            client.openall()
+            # 简单测试 - 尝试列出文件（限制数量以避免配额问题）
+            client.list_spreadsheet_files()
             return True, None
         except Exception as e:
             error_msg = str(e).lower()
             if any(keyword in error_msg for keyword in ['unauthorized', 'invalid', 'expired']):
                 return False, "凭据已过期或无效"
+            elif 'quota' in error_msg:
+                return False, "API配额不足"
+            elif 'forbidden' in error_msg:
+                return False, "权限被拒绝，请检查OAuth应用配置"
             return False, f"连接测试失败: {str(e)}"
+
+def show_oauth_config_guide():
+    """显示OAuth配置指南"""
+    with st.expander("📋 OAuth配置指南", expanded=False):
+        st.markdown('''
+        <div class="config-guide">
+        <h4>🔧 Google Cloud Console 配置步骤</h4>
+        <ol>
+            <li><strong>创建项目</strong>：在 <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a> 创建新项目</li>
+            <li><strong>启用API</strong>：启用 "Google Sheets API"</li>
+            <li><strong>创建OAuth 2.0凭据</strong>：
+                <ul>
+                    <li>选择 "凭据" → "创建凭据" → "OAuth 2.0 客户端ID"</li>
+                    <li>应用类型选择 "Web应用"</li>
+                    <li>添加授权重定向URI：<code>https://你的应用名.streamlit.app/</code></li>
+                </ul>
+            </li>
+            <li><strong>添加测试用户</strong>：在 "OAuth同意屏幕" 中添加要使用的Google账号邮箱</li>
+        </ol>
+        
+        <h4>📝 Secrets.toml 配置格式</h4>
+        <pre>
+[google_oauth]
+client_id = "你的客户端ID.apps.googleusercontent.com"
+client_secret = "你的客户端密钥"
+redirect_uri = "https://你的应用名.streamlit.app/"
+
+[system]
+admin_password = "你的管理员密码"
+        </pre>
+        
+        <h4>⚠️ 重要提示</h4>
+        <ul>
+            <li>redirect_uri 必须与 Streamlit 应用的实际URL完全一致</li>
+            <li>确保在Google Cloud Console的测试用户中添加了你的邮箱</li>
+            <li>OAuth应用需要通过Google审核后才能被任意用户使用</li>
+        </ul>
+        </div>
+        ''', unsafe_allow_html=True)
 
 def show_oauth_diagnostics():
     """显示OAuth诊断信息"""
     with st.expander("🔧 OAuth诊断信息", expanded=False):
         st.markdown('<div class="diagnostic-panel">', unsafe_allow_html=True)
         
-        # 检查配置
-        if "google_oauth" in st.secrets:
+        # 配置验证
+        is_valid, validation_msg = OAuthManager.validate_oauth_config()
+        if is_valid:
+            st.markdown("✅ **OAuth配置验证通过**")
             oauth_config = st.secrets["google_oauth"]
-            st.write("✅ OAuth配置存在")
-            st.write(f"📧 Client ID: {oauth_config.get('client_id', 'N/A')[:20]}...")
-            st.write(f"🔗 Redirect URI: {oauth_config.get('redirect_uri', 'N/A')}")
+            st.write(f"📧 Client ID: {oauth_config['client_id'][:30]}...")
+            st.write(f"🔗 Redirect URI: {oauth_config['redirect_uri']}")
         else:
-            st.write("❌ OAuth配置缺失")
+            st.markdown(f"❌ **OAuth配置错误**: {validation_msg}")
         
-        # 检查当前状态
+        # 当前认证状态
         if 'google_credentials' in st.session_state:
-            st.write("✅ 本地凭据存在")
+            st.markdown("✅ **本地凭据存在**")
             cred = st.session_state['google_credentials']
             st.write(f"🎫 Token存在: {'是' if cred.get('token') else '否'}")
             st.write(f"🔄 Refresh Token存在: {'是' if cred.get('refresh_token') else '否'}")
-            st.write(f"⏰ 过期时间: {cred.get('expiry', '未知')}")
+            if cred.get('expiry'):
+                try:
+                    expiry_time = datetime.fromisoformat(cred['expiry'].replace('Z', '+00:00'))
+                    is_expired = expiry_time < datetime.now(expiry_time.tzinfo)
+                    st.write(f"⏰ Token状态: {'已过期' if is_expired else '有效'}")
+                except:
+                    st.write("⏰ Token状态: 无法解析")
         else:
-            st.write("❌ 本地凭据不存在")
+            st.markdown("❌ **本地凭据不存在**")
         
-        # 检查URL参数
+        # URL参数检查
         query_params = st.query_params
         if query_params:
-            st.write("📋 当前URL参数:")
+            st.markdown("📋 **当前URL参数**:")
             for key, value in query_params.items():
                 if key == 'code':
                     st.write(f"  {key}: {value[:20]}... (截断显示)")
@@ -339,21 +436,35 @@ def show_oauth_diagnostics():
         else:
             st.write("📋 无URL参数")
         
+        # 当前应用URL
+        try:
+            current_url = st.query_params.get('_stale', 'unknown')
+            if current_url == 'unknown':
+                current_url = "请在浏览器地址栏查看完整URL"
+            st.write(f"🌐 当前应用URL: {current_url}")
+        except:
+            st.write("🌐 当前应用URL: 无法获取")
+        
         st.markdown('</div>', unsafe_allow_html=True)
 
-def show_enhanced_oauth_authorization():
-    """增强版OAuth授权界面"""
-    st.markdown('<div class="oauth-panel">', unsafe_allow_html=True)
+def handle_oauth_authorization():
+    """处理OAuth授权流程"""
     st.markdown("### 🔐 OAuth个人账号授权")
     
-    # 显示诊断信息
+    # 显示配置指南和诊断信息
+    show_oauth_config_guide()
     show_oauth_diagnostics()
     
-    # 创建OAuth流程
-    flow, error = OAuthManager.create_simple_flow()
-    if error:
-        st.markdown(f'<div class="oauth-error">❌ {error}</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+    # 验证配置
+    is_valid, validation_msg = OAuthManager.validate_oauth_config()
+    if not is_valid:
+        st.markdown(f'''
+        <div class="oauth-error">
+            <h4>❌ 配置错误</h4>
+            <p>{validation_msg}</p>
+            <p>请参考上方的配置指南进行设置</p>
+        </div>
+        ''', unsafe_allow_html=True)
         return False
     
     # 检查授权回调
@@ -362,45 +473,51 @@ def show_enhanced_oauth_authorization():
     if 'code' in query_params:
         st.markdown("### 🔄 正在处理授权...")
         
-        try:
-            auth_code = query_params['code']
-            
-            # 重新创建flow以避免状态问题
-            fresh_flow, error = OAuthManager.create_simple_flow()
-            if error:
-                st.error(f"❌ 重新创建OAuth流程失败: {error}")
-                st.query_params.clear()
-                st.rerun()
-                return False
-            
-            # 交换token
-            with st.spinner("正在获取访问令牌..."):
-                cred_dict, error = OAuthManager.exchange_code_for_token(fresh_flow, auth_code)
+        with st.status("处理OAuth授权中...", expanded=True) as status:
+            try:
+                auth_code = query_params['code']
+                st.write("✅ 收到授权码")
+                
+                # 交换token
+                st.write("🔄 正在获取访问令牌...")
+                cred_dict, error = OAuthManager.exchange_code_for_token(auth_code)
                 
                 if error:
-                    st.markdown(f'<div class="oauth-error">❌ {error}</div>', unsafe_allow_html=True)
+                    st.write(f"❌ Token交换失败: {error}")
+                    status.update(label="授权失败", state="error")
+                    
                     # 提供重试选项
-                    if st.button("🔄 重新尝试授权"):
+                    if st.button("🔄 重新尝试授权", key="retry_auth"):
                         st.query_params.clear()
                         st.rerun()
-                    st.markdown('</div>', unsafe_allow_html=True)
                     return False
                 
-                # 测试凭据
+                st.write("✅ 获取访问令牌成功")
+                
+                # 创建并测试凭据
+                st.write("🔍 正在测试凭据...")
                 credentials, cred_error = OAuthManager.create_credentials_from_dict(cred_dict)
                 if cred_error:
-                    st.error(f"❌ 凭据创建失败: {cred_error}")
-                    st.query_params.clear()
-                    st.rerun()
+                    st.write(f"❌ 凭据创建失败: {cred_error}")
+                    status.update(label="凭据创建失败", state="error")
                     return False
                 
                 # 测试连接
                 test_result, test_error = OAuthManager.test_credentials(credentials)
                 if not test_result:
-                    st.error(f"❌ 凭据测试失败: {test_error}")
-                    st.query_params.clear()
-                    st.rerun()
+                    st.write(f"❌ 凭据测试失败: {test_error}")
+                    status.update(label="凭据测试失败", state="error")
+                    
+                    # 提供详细错误信息
+                    if "权限被拒绝" in test_error:
+                        st.error("🚫 权限被拒绝。可能的原因：")
+                        st.error("• OAuth应用还在测试模式，需要添加你的邮箱为测试用户")
+                        st.error("• redirect_uri配置不正确")
+                        st.error("• 权限范围配置问题")
+                    
                     return False
+                
+                st.write("✅ 凭据测试通过")
                 
                 # 保存凭据
                 st.session_state['google_credentials'] = cred_dict
@@ -410,17 +527,20 @@ def show_enhanced_oauth_authorization():
                 # 清理URL
                 st.query_params.clear()
                 
+                status.update(label="OAuth授权成功！", state="complete")
+                st.write("🎉 授权完成，正在跳转...")
+                
                 # 显示成功信息
                 st.markdown("""
                 <div class="oauth-success">
                     <h3>🎉 OAuth授权成功！</h3>
                     <p>✅ 已获得Google账号访问权限</p>
                     <p>📊 可以使用15GB个人存储空间</p>
+                    <p>🔄 正在自动刷新页面...</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.balloons()
-                time.sleep(2)
+                time.sleep(3)
                 st.rerun()
                 
         except Exception as e:
@@ -428,14 +548,14 @@ def show_enhanced_oauth_authorization():
             st.markdown(f"""
             <div class="oauth-error">
                 <h4>❌ 授权处理失败</h4>
-                <p>错误: {str(e)}</p>
-                <p>请尝试重新授权或联系管理员</p>
+                <p>错误详情: {str(e)}</p>
+                <p>请尝试重新授权或检查配置</p>
             </div>
             """, unsafe_allow_html=True)
             
             # 清理状态
             st.query_params.clear()
-            if st.button("🔄 重新开始授权"):
+            if st.button("🔄 重新开始授权", key="restart_auth"):
                 st.rerun()
     
     else:
@@ -445,45 +565,51 @@ def show_enhanced_oauth_authorization():
         <div class="oauth-steps">
             <ol>
                 <li>🖱️ 点击下方授权按钮</li>
-                <li>🔑 选择你的Google账号</li>
-                <li>✅ 同意访问权限</li>
-                <li>⏳ 等待自动返回</li>
+                <li>🔑 在新窗口中选择你的Google账号</li>
+                <li>✅ 同意应用访问权限</li>
+                <li>⏳ 等待自动返回并完成授权</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
         
-        # 生成授权URL
+        # 创建OAuth流程并生成授权URL
+        flow, flow_error = OAuthManager.create_oauth_flow()
+        if flow_error:
+            st.error(f"❌ OAuth流程创建失败: {flow_error}")
+            return False
+        
         auth_url, url_error = OAuthManager.generate_auth_url(flow)
         if url_error:
             st.error(f"❌ 生成授权URL失败: {url_error}")
-        else:
-            # 授权按钮
-            st.markdown(f"""
-            <div style="text-align: center; margin: 2rem 0;">
-                <a href="{auth_url}" target="_self" class="auth-button">
-                    🚀 点击授权Google账号
-                </a>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # 额外说明
-            st.markdown("""
-            <div style="background: rgba(255,255,255,0.1); padding: 1rem; border-radius: 8px; margin-top: 1rem;">
-                <h5>💡 重要提示</h5>
-                <ul>
-                    <li>🔒 需要在Google Cloud Console中添加你的邮箱为测试用户</li>
-                    <li>📱 建议使用桌面浏览器完成授权</li>
-                    <li>🔄 如果遇到问题，可以选择下方的服务账号模式</li>
-                    <li>⚡ 授权完成后享受15GB个人存储空间</li>
-                </ul>
-            </div>
-            """, unsafe_allow_html=True)
+            return False
+        
+        # 授权按钮
+        st.markdown(f"""
+        <div style="text-align: center; margin: 2rem 0;">
+            <a href="{auth_url}" target="_self" class="auth-button">
+                🚀 点击授权Google账号
+            </a>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 提示信息
+        st.markdown("""
+        <div class="status-warning">
+            <h5>💡 重要提示</h5>
+            <ul>
+                <li>🔒 确保在Google Cloud Console中添加了你的邮箱为测试用户</li>
+                <li>📱 建议使用桌面浏览器完成授权</li>
+                <li>🔗 redirect_uri必须与应用URL完全一致</li>
+                <li>⚡ 授权成功后享受15GB个人存储空间</li>
+                <li>🔄 如遇到问题，可尝试使用下方的服务账号模式</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
     
-    st.markdown('</div>', unsafe_allow_html=True)
     return False
 
-def get_enhanced_oauth_client():
-    """获取增强版OAuth客户端"""
+def get_oauth_client():
+    """获取OAuth客户端"""
     if 'google_credentials' not in st.session_state:
         return None, "未找到OAuth凭据"
     
@@ -507,22 +633,29 @@ def get_enhanced_oauth_client():
                     'expiry': credentials.expiry.isoformat() if credentials.expiry else None
                 })
                 
-                logger.info("Token已刷新")
+                logger.info("Token已自动刷新")
                 
             except Exception as refresh_error:
                 logger.error(f"Token刷新失败: {str(refresh_error)}")
-                return None, f"Token刷新失败: {str(refresh_error)}"
+                # 清除无效凭据
+                if 'google_credentials' in st.session_state:
+                    del st.session_state['google_credentials']
+                return None, f"Token刷新失败，请重新授权: {str(refresh_error)}"
         
         # 创建客户端
         client = gspread.authorize(credentials)
         
-        # 测试连接
-        test_result, test_error = OAuthManager.test_credentials(credentials)
-        if not test_result:
-            # 清除无效凭据
-            if 'google_credentials' in st.session_state:
-                del st.session_state['google_credentials']
-            return None, f"凭据测试失败: {test_error}"
+        # 简单测试连接
+        try:
+            client.list_spreadsheet_files()
+        except Exception as test_error:
+            error_msg = str(test_error).lower()
+            if any(keyword in error_msg for keyword in ['unauthorized', 'invalid', 'expired']):
+                # 清除无效凭据
+                if 'google_credentials' in st.session_state:
+                    del st.session_state['google_credentials']
+                return None, "凭据已失效，请重新授权"
+            return None, f"连接测试失败: {str(test_error)}"
         
         return client, None
         
@@ -531,7 +664,7 @@ def get_enhanced_oauth_client():
         # 清除可能损坏的凭据
         if 'google_credentials' in st.session_state:
             del st.session_state['google_credentials']
-        return None, f"客户端创建失败: {str(e)}"
+        return None, f"客户端创建失败，请重新授权: {str(e)}"
 
 def get_service_account_client():
     """获取服务账号客户端"""
@@ -540,13 +673,13 @@ def get_service_account_client():
             return None, "服务账号配置缺失"
         
         credentials_info = st.secrets["google_sheets"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         credentials = ServiceCredentials.from_service_account_info(credentials_info, scopes=scopes)
         client = gspread.authorize(credentials)
         
         # 测试连接
         try:
-            client.openall()
+            client.list_spreadsheet_files()
         except Exception as test_error:
             return None, f"服务账号连接测试失败: {str(test_error)}"
         
@@ -556,8 +689,8 @@ def get_service_account_client():
         logger.error(f"服务账号客户端创建失败: {str(e)}")
         return None, f"服务账号客户端创建失败: {str(e)}"
 
-def show_enhanced_authentication_selector():
-    """显示增强版认证方式选择器"""
+def show_authentication_selector():
+    """显示认证方式选择器"""
     st.markdown('<div class="auth-selector">', unsafe_allow_html=True)
     st.markdown("## 🔐 选择认证方式")
     
@@ -570,30 +703,31 @@ def show_enhanced_authentication_selector():
         st.markdown('</div>', unsafe_allow_html=True)
         return None
     
-    # 显示可用选项
-    auth_options = []
-    if oauth_available:
-        auth_options.append("OAuth个人账号")
-    if service_available:
-        auth_options.append("服务账号")
-    
     # 显示当前状态
     current_auth = st.session_state.get('auth_method', None)
     if current_auth:
-        st.info(f"🔗 当前认证方式: {current_auth}")
+        auth_time = st.session_state.get('auth_timestamp', 0)
+        time_ago = int(time.time() - auth_time) if auth_time > 0 else 0
+        st.success(f"🔗 当前认证方式: {current_auth} (连接时长: {time_ago//60}分钟)")
+    
+    # 认证选项
+    auth_options = []
+    if oauth_available:
+        auth_options.append("OAuth个人账号 (推荐)")
+    if service_available:
+        auth_options.append("服务账号")
     
     selected_auth = st.radio(
         "选择认证方式：",
         auth_options,
-        help="OAuth使用个人Google账号（15GB），服务账号使用项目配额",
+        help="OAuth使用个人Google账号（15GB空间），服务账号使用项目配额",
         index=0 if oauth_available else None
     )
     
-    # 重置按钮
-    col1, col2 = st.columns(2)
+    # 管理按钮
+    col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🔄 重置认证状态"):
-            # 清除所有认证相关的session state
+        if st.button("🔄 重置认证"):
             auth_keys = ['google_credentials', 'auth_method', 'auth_timestamp']
             for key in auth_keys:
                 if key in st.session_state:
@@ -608,16 +742,33 @@ def show_enhanced_authentication_selector():
                 del st.session_state[key]
             st.success("缓存已清理")
     
+    with col3:
+        if st.button("🔍 测试连接"):
+            if current_auth == 'oauth':
+                client, error = get_oauth_client()
+                if client:
+                    st.success("✅ OAuth连接正常")
+                else:
+                    st.error(f"❌ OAuth连接失败: {error}")
+            elif current_auth == 'service':
+                client, error = get_service_account_client()
+                if client:
+                    st.success("✅ 服务账号连接正常")
+                else:
+                    st.error(f"❌ 服务账号连接失败: {error}")
+            else:
+                st.warning("⚠️ 请先选择认证方式")
+    
     st.markdown('</div>', unsafe_allow_html=True)
     
     # 根据选择显示对应面板
-    if selected_auth == "OAuth个人账号":
-        return show_enhanced_oauth_auth_panel()
+    if selected_auth == "OAuth个人账号 (推荐)":
+        return show_oauth_auth_panel()
     else:
-        return show_enhanced_service_auth_panel()
+        return show_service_auth_panel()
 
-def show_enhanced_oauth_auth_panel():
-    """显示增强版OAuth认证面板"""
+def show_oauth_auth_panel():
+    """显示OAuth认证面板"""
     st.markdown('<div class="oauth-panel">', unsafe_allow_html=True)
     st.markdown("### 👤 OAuth个人账号模式")
     st.markdown("✅ 使用你的个人Google账号和15GB存储空间")
@@ -626,7 +777,7 @@ def show_enhanced_oauth_auth_panel():
     if ('google_credentials' in st.session_state and 
         st.session_state.get('auth_method') == 'oauth'):
         
-        client, error = get_enhanced_oauth_client()
+        client, error = get_oauth_client()
         if client:
             # 显示成功状态
             auth_time = st.session_state.get('auth_timestamp', 0)
@@ -638,6 +789,7 @@ def show_enhanced_oauth_auth_panel():
                 <p>✅ 使用个人Google账号</p>
                 <p>⏰ 认证时间: {time_ago//60}分钟前</p>
                 <p>📊 享受15GB个人存储空间</p>
+                <p>🔗 权限范围: Google Sheets</p>
             </div>
             """, unsafe_allow_html=True)
             
@@ -655,17 +807,19 @@ def show_enhanced_oauth_auth_panel():
             # 清除无效凭据
             if 'google_credentials' in st.session_state:
                 del st.session_state['google_credentials']
+            if 'auth_method' in st.session_state:
+                del st.session_state['auth_method']
             
             time.sleep(2)
             st.rerun()
     
     # 显示授权界面
-    show_enhanced_oauth_authorization()
+    handle_oauth_authorization()
     st.markdown('</div>', unsafe_allow_html=True)
     return None
 
-def show_enhanced_service_auth_panel():
-    """显示增强版服务账号认证面板"""
+def show_service_auth_panel():
+    """显示服务账号认证面板"""
     st.markdown('<div class="service-panel">', unsafe_allow_html=True)
     st.markdown("### 🏢 服务账号模式")
     st.markdown("✅ 使用Google Cloud项目配额（稳定，无需用户授权）")
@@ -680,6 +834,7 @@ def show_enhanced_service_auth_panel():
             <h4>✅ 服务账号认证成功！</h4>
             <p>🏢 使用Google Cloud项目配额</p>
             <p>🔒 无需用户授权，自动连接</p>
+            <p>🔗 权限范围: Google Sheets</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -706,13 +861,14 @@ def show_enhanced_service_auth_panel():
         [google_sheets]
         type = "service_account"
         project_id = "你的项目ID"
-        private_key = "-----BEGIN PRIVATE KEY-----\\n..."
+        private_key_id = "密钥ID"
+        private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
         client_email = "service-account@project.iam.gserviceaccount.com"
-        client_id = "..."
+        client_id = "客户端ID"
         auth_uri = "https://accounts.google.com/o/oauth2/auth"
         token_uri = "https://oauth2.googleapis.com/token"
-        auth_provider_x509_cert_url = "..."
-        client_x509_cert_url = "..."
+        auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+        client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/..."
         ```
         """)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1199,7 +1355,7 @@ if 'is_admin' not in st.session_state:
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
 
 # 认证选择和连接
-gc = show_enhanced_authentication_selector()
+gc = show_authentication_selector()
 
 if not gc:
     st.info("👆 请先完成Google账号认证")
@@ -1215,7 +1371,8 @@ if auth_method == 'oauth':
     <div class="status-success">
         ✅ <strong>使用OAuth个人账号</strong><br>
         🗄️ 享受15GB个人存储空间<br>
-        ⏰ 认证时间: {time_ago//60}分钟前
+        ⏰ 认证时间: {time_ago//60}分钟前<br>
+        🔗 权限范围: Google Sheets
     </div>
     """, unsafe_allow_html=True)
 elif auth_method == 'service':
@@ -1223,7 +1380,8 @@ elif auth_method == 'service':
     <div class="status-success">
         ✅ <strong>使用服务账号</strong><br>
         🏢 使用Google Cloud项目配额<br>
-        ⏰ 连接时间: {time_ago//60}分钟前
+        ⏰ 连接时间: {time_ago//60}分钟前<br>
+        🔗 权限范围: Google Sheets
     </div>
     """, unsafe_allow_html=True)
 
@@ -1596,4 +1754,4 @@ with col2:
 with col3:
     st.caption(f"⏰ 连接时长: {time_ago//60}分钟" if time_ago > 0 else "⏰ 未连接")
 with col4:
-    st.caption(f"🔧 版本: v7.0 (增强OAuth) | 认证: {auth_method}")
+    st.caption(f"🔧 版本: v8.0 (稳定OAuth) | 认证: {auth_method}")
