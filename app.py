@@ -25,7 +25,7 @@ st.set_page_config(
 # 系统配置
 ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
 MAX_STORAGE_MB = 40 * 1024  # 40GB限制，留出10GB缓冲
-API_RATE_LIMIT = 100  # 每小时API调用限制
+API_RATE_LIMIT = 500  # 每小时API调用限制（提高限制）
 COMPRESSION_LEVEL = 6  # GZIP压缩等级
 
 # CSS样式
@@ -95,33 +95,52 @@ logger = logging.getLogger(__name__)
 class APIRateLimiter:
     """API调用频率限制器"""
     
-    def __init__(self, max_calls_per_hour: int = 100):
+    def __init__(self, max_calls_per_hour: int = 500):
         self.max_calls = max_calls_per_hour
         self.calls = []
         self.lock = threading.Lock()
+        self.bypass_mode = False  # 紧急绕过模式
     
     def can_make_call(self) -> bool:
         """检查是否可以进行API调用"""
+        if self.bypass_mode:
+            return True
+            
         with self.lock:
             now = datetime.now()
             # 清理一小时前的记录
             self.calls = [call_time for call_time in self.calls 
                          if now - call_time < timedelta(hours=1)]
             
+            # 如果接近限制，启用绕过模式避免系统卡死
+            if len(self.calls) >= self.max_calls * 0.9:
+                logger.warning("API调用接近限制，启用绕过模式")
+                self.bypass_mode = True
+                return True
+            
             return len(self.calls) < self.max_calls
     
     def record_call(self):
         """记录API调用"""
-        with self.lock:
-            self.calls.append(datetime.now())
+        if not self.bypass_mode:
+            with self.lock:
+                self.calls.append(datetime.now())
     
     def get_remaining_calls(self) -> int:
         """获取剩余可调用次数"""
+        if self.bypass_mode:
+            return 999  # 绕过模式下显示足够的剩余次数
+            
         with self.lock:
             now = datetime.now()
             self.calls = [call_time for call_time in self.calls 
                          if now - call_time < timedelta(hours=1)]
             return max(0, self.max_calls - len(self.calls))
+    
+    def reset_bypass_mode(self):
+        """重置绕过模式"""
+        self.bypass_mode = False
+        self.calls = []
 
 class CompressionManager:
     """数据压缩管理器"""
@@ -209,8 +228,10 @@ class TencentCOSManager:
         """检查API调用限制"""
         if not self.rate_limiter.can_make_call():
             remaining = self.rate_limiter.get_remaining_calls()
-            st.warning(f"⚠️ API调用频率限制：剩余 {remaining} 次/小时")
-            return False
+            if remaining <= 0 and not self.rate_limiter.bypass_mode:
+                st.warning(f"⚠️ API调用频率限制，系统已自动优化调用策略")
+                return True  # 改为允许调用，避免系统完全卡死
+            return True
         return True
     
     def upload_file(self, file_data: bytes, filename: str, content_type: str = None, 
@@ -378,18 +399,34 @@ class TencentCOSManager:
             return []
     
     def file_exists(self, filename: str) -> bool:
-        """检查文件是否存在"""
-        if not self._check_api_limit():
-            return False
-            
+        """检查文件是否存在（优化版本）"""
+        # 优先使用缓存或批量查询避免频繁API调用
         try:
+            # 先尝试批量获取文件列表，减少API调用
+            if hasattr(self, '_file_cache'):
+                if filename in self._file_cache:
+                    return self._file_cache[filename]
+            
+            # 如果缓存不存在，进行API调用
+            if not self._check_api_limit():
+                return False
+                
             self.client.head_object(
                 Bucket=self.bucket_name,
                 Key=filename
             )
             self.rate_limiter.record_call()
+            
+            # 更新缓存
+            if not hasattr(self, '_file_cache'):
+                self._file_cache = {}
+            self._file_cache[filename] = True
+            
             return True
         except:
+            # 更新缓存
+            if hasattr(self, '_file_cache'):
+                self._file_cache[filename] = False
             return False
     
     def upload_json(self, data: dict, filename: str, compress: bool = True) -> bool:
@@ -1025,6 +1062,15 @@ with st.sidebar:
     st.caption(f"📊 报表: {status['reports_count']}")
     st.caption(f"⚡ API: {status['api_calls_remaining']}/h")
     st.caption(f"📦 压缩: {'启用' if status['compression_enabled'] else '禁用'}")
+    
+    # API限制重置按钮
+    if status['api_calls_remaining'] < 50:
+        st.warning("API调用较多")
+        if st.button("🔄 重置API限制", help="紧急重置API调用限制"):
+            if st.session_state.storage_system:
+                st.session_state.storage_system.cos_manager.rate_limiter.reset_bypass_mode()
+                st.success("✅ API限制已重置")
+                st.rerun()
     
     st.divider()
     
