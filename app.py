@@ -521,8 +521,16 @@ class TencentCOSManager:
         except Exception as e:
             logger.error(f"获取存储使用情况失败: {str(e)}")
             return {
-                'file_count': 0, 'total_size_mb': 0, 'total_size_gb': 0,
-                'usage_percentage': 0, 'remaining_calls': 0, 'files': []
+                'file_count': 0, 
+                'total_size_mb': 0, 
+                'total_size_gb': 0,
+                'report_files': 0,
+                'report_size_mb': 0,
+                'system_files': 0,
+                'system_size_kb': 0,
+                'usage_percentage': 0, 
+                'remaining_calls': 0, 
+                'files': []
             }
 
 class TencentCOSSystem:
@@ -789,40 +797,54 @@ class TencentCOSSystem:
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("📦 总文件数", usage['file_count'])
-                st.metric("💾 总使用量", f"{usage['total_size_gb']:.2f} GB")
+                st.metric("📦 总文件数", usage.get('file_count', 0))
+                st.metric("💾 总使用量", f"{usage.get('total_size_gb', 0):.2f} GB")
                 
                 # 使用率进度条
-                progress_value = min(usage['usage_percentage'] / 100, 1.0)
+                usage_percent = usage.get('usage_percentage', 0)
+                progress_value = min(usage_percent / 100, 1.0)
                 st.progress(progress_value)
                 
                 # 颜色编码的使用率
-                if usage['usage_percentage'] > 80:
-                    st.error(f"🔴 使用率: {usage['usage_percentage']:.1f}%")
-                elif usage['usage_percentage'] > 60:
-                    st.warning(f"🟡 使用率: {usage['usage_percentage']:.1f}%")
+                if usage_percent > 80:
+                    st.error(f"🔴 使用率: {usage_percent:.1f}%")
+                elif usage_percent > 60:
+                    st.warning(f"🟡 使用率: {usage_percent:.1f}%")
                 else:
-                    st.success(f"🟢 使用率: {usage['usage_percentage']:.1f}%")
+                    st.success(f"🟢 使用率: {usage_percent:.1f}%")
             
             with col2:
-                st.metric("📊 报表文件", usage['report_files'])
+                st.metric("📊 报表文件", usage.get('report_files', 0))
                 st.metric("📋 报表记录", len(metadata.get('reports', [])))
-                st.metric("📄 报表大小", f"{usage['report_size_mb']:.1f} MB")
+                st.metric("📄 报表大小", f"{usage.get('report_size_mb', 0):.1f} MB")
                 
                 # 压缩效果估算
-                if usage['report_size_mb'] > 0:
-                    estimated_uncompressed = usage['report_size_mb'] * 3  # 假设压缩比为70%
-                    savings = estimated_uncompressed - usage['report_size_mb']
+                report_size_mb = usage.get('report_size_mb', 0)
+                if report_size_mb > 0:
+                    estimated_uncompressed = report_size_mb * 3  # 假设压缩比为70%
+                    savings = estimated_uncompressed - report_size_mb
                     st.success(f"💰 压缩节省: ~{savings:.1f} MB")
             
             with col3:
                 st.metric("🔐 权限记录", len(permissions))
-                st.metric("⚙️ 系统文件", usage['system_files'])
-                st.metric("🗃️ 系统大小", f"{usage['system_size_kb']:.1f} KB")
-                st.metric("⚡ API剩余", f"{usage['remaining_calls']}/小时")
+                st.metric("⚙️ 系统文件", usage.get('system_files', 0))
+                st.metric("🗃️ 系统大小", f"{usage.get('system_size_kb', 0):.1f} KB")
+                st.metric("⚡ API剩余", f"{usage.get('remaining_calls', 0)}/小时")
                 
         except Exception as e:
-            st.warning(f"获取存储统计失败: {str(e)}")
+            st.error(f"获取存储统计失败: {str(e)}")
+            logger.error(f"显示存储统计失败: {str(e)}")
+            
+            # 显示基本信息作为备用
+            st.info("📊 正在初始化存储统计...")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📦 总文件数", "加载中...")
+            with col2:
+                st.metric("📊 报表文件", "加载中...")
+            with col3:
+                st.metric("🔐 权限记录", "加载中...")
     
     def analyze_receivable_data(self, df: pd.DataFrame) -> Dict[str, Any]:
         """分析应收未收额数据"""
@@ -991,8 +1013,8 @@ class TencentCOSSystem:
                 'permissions_count': len(permissions),
                 'reports_count': len(metadata.get('reports', [])),
                 'system_healthy': permissions_exists and metadata_exists,
-                'storage_usage_percent': usage['usage_percentage'],
-                'api_calls_remaining': usage['remaining_calls'],
+                'storage_usage_percent': usage.get('usage_percentage', 0),
+                'api_calls_remaining': usage.get('remaining_calls', 0),
                 'compression_enabled': True
             }
             
@@ -1147,11 +1169,16 @@ if user_type == "管理员" and st.session_state.is_admin:
         ''', unsafe_allow_html=True)
         
         # 检查存储状态
-        usage = storage_system.cos_manager.get_storage_usage()
-        if usage['usage_percentage'] > 90:
-            st.error("⚠️ 存储空间即将满，建议先清理旧文件")
-        elif usage['usage_percentage'] > 75:
-            st.warning("⚠️ 存储空间使用较多，建议定期清理")
+        try:
+            usage = storage_system.cos_manager.get_storage_usage()
+            usage_percentage = usage.get('usage_percentage', 0)
+            
+            if usage_percentage > 90:
+                st.error("⚠️ 存储空间即将满，建议先清理旧文件")
+            elif usage_percentage > 75:
+                st.warning("⚠️ 存储空间使用较多，建议定期清理")
+        except Exception as e:
+            st.info("📊 存储状态检查中...")
         
         reports_file = st.file_uploader("选择报表Excel文件", type=['xlsx', 'xls'], key="reports")
         
@@ -1205,34 +1232,44 @@ if user_type == "管理员" and st.session_state.is_admin:
         
         with col1:
             st.markdown("##### 📊 存储优化")
-            usage = storage_system.cos_manager.get_storage_usage()
-            
-            st.metric("当前使用", f"{usage['total_size_gb']:.2f} GB")
-            st.metric("文件数量", usage['file_count'])
-            st.metric("压缩节省", f"~{usage['total_size_gb'] * 2:.1f} GB")
-            
-            # 优化建议
-            if usage['usage_percentage'] > 80:
-                st.error("🔴 建议立即清理旧文件")
-            elif usage['usage_percentage'] > 60:
-                st.warning("🟡 建议定期清理维护")
-            else:
-                st.success("🟢 存储状态良好")
+            try:
+                usage = storage_system.cos_manager.get_storage_usage()
+                
+                st.metric("当前使用", f"{usage.get('total_size_gb', 0):.2f} GB")
+                st.metric("文件数量", usage.get('file_count', 0))
+                st.metric("压缩节省", f"~{usage.get('total_size_gb', 0) * 2:.1f} GB")
+                
+                # 优化建议
+                usage_percentage = usage.get('usage_percentage', 0)
+                if usage_percentage > 80:
+                    st.error("🔴 建议立即清理旧文件")
+                elif usage_percentage > 60:
+                    st.warning("🟡 建议定期清理维护")
+                else:
+                    st.success("🟢 存储状态良好")
+            except Exception as e:
+                st.info("📊 存储信息加载中...")
         
         with col2:
             st.markdown("##### ⚡ API优化")
             
-            st.metric("剩余调用", f"{usage['remaining_calls']}/小时")
-            
-            if usage['remaining_calls'] < 20:
-                st.error("🔴 API调用接近限制")
-                st.info("系统已自动优化调用频率")
-            elif usage['remaining_calls'] < 50:
-                st.warning("🟡 API使用较多")
-            else:
-                st.success("🟢 API状态正常")
-            
-            st.info("💡 系统已启用智能限流，自动避免API超限")
+            try:
+                usage = storage_system.cos_manager.get_storage_usage()
+                remaining_calls = usage.get('remaining_calls', 0)
+                
+                st.metric("剩余调用", f"{remaining_calls}/小时")
+                
+                if remaining_calls < 20:
+                    st.error("🔴 API调用接近限制")
+                    st.info("系统已自动优化调用频率")
+                elif remaining_calls < 50:
+                    st.warning("🟡 API使用较多")
+                else:
+                    st.success("🟢 API状态正常")
+                
+                st.info("💡 系统已启用智能限流，自动避免API超限")
+            except Exception as e:
+                st.info("⚡ API状态检查中...")
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     st.info("👈 请在左侧边栏输入管理员密码")
