@@ -1278,4 +1278,283 @@ def show_admin_interface(system: FixedStoreSystem, system_status: Dict):
                 
                 # 文件系统诊断
                 files = system.cos.list_all_files()
-                st.info(f"
+                st.info(f"💾 文件系统: {len(files)} 个文件")
+                
+                # 显示文件详情
+                if st.session_state.debug_mode and files:
+                    st.write("**文件列表**:")
+                    for file in files[:10]:
+                        st.write(f"• {file['filename']} ({file['size']/1024:.1f}KB)")
+
+def show_user_interface(system: FixedStoreSystem):
+    """显示用户界面"""
+    if not st.session_state.logged_in:
+        st.subheader("🔐 用户登录")
+        
+        try:
+            stores = system.get_available_stores()
+            debug_log(f"获取到门店列表: {stores}")
+            
+            if not stores:
+                st.markdown('''
+                <div class="warning-box">
+                <h4>⚠️ 系统维护中</h4>
+                <p>暂无可用门店，请联系管理员上传权限表</p>
+                <p>如果管理员刚刚上传了权限表，请刷新页面</p>
+                </div>
+                ''', unsafe_allow_html=True)
+                
+                if st.button("🔄 刷新页面"):
+                    st.rerun()
+            else:
+                st.markdown(f'''
+                <div class="success-box">
+                <h4>🏪 系统就绪</h4>
+                <p>当前支持 <strong>{len(stores)}</strong> 个门店的查询服务</p>
+                <p>请选择您的门店并输入查询编码</p>
+                </div>
+                ''', unsafe_allow_html=True)
+                
+                with st.form("login_form"):
+                    selected_store = st.selectbox("选择门店", stores)
+                    user_id = st.text_input("查询编码")
+                    submit = st.form_submit_button("🚀 登录查询", type="primary")
+                    
+                    if submit and selected_store and user_id:
+                        debug_log(f"尝试登录: 门店={selected_store}, 用户ID={user_id}")
+                        
+                        with st.spinner("正在验证权限..."):
+                            if system.verify_user_permission(selected_store, user_id):
+                                st.session_state.logged_in = True
+                                st.session_state.store_name = selected_store
+                                st.session_state.user_id = user_id
+                                
+                                debug_log("登录成功")
+                                st.success("✅ 登录成功！")
+                                st.balloons()
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                debug_log("权限验证失败")
+                                st.error("❌ 门店或编号错误，请检查后重试")
+                        
+        except Exception as e:
+            st.error(f"❌ 系统连接失败：{str(e)}")
+            debug_log(f"用户登录界面异常: {str(e)}")
+    
+    else:
+        # 已登录用户界面
+        st.markdown(f'''
+        <div class="store-info">
+        <h3>🏪 {st.session_state.store_name}</h3>
+        <p>查询员工：{st.session_state.user_id}</p>
+        <p>查询时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+        </div>
+        ''', unsafe_allow_html=True)
+        
+        # 数据刷新按钮
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if st.button("🔄 刷新数据"):
+                debug_log("用户触发数据刷新")
+                st.rerun()
+        
+        try:
+            # 加载门店数据
+            debug_log(f"开始加载门店数据: {st.session_state.store_name}")
+            df = system.load_store_data(st.session_state.store_name)
+            
+            if df is not None:
+                debug_log(f"门店数据加载成功: {len(df)} 行")
+                
+                # 应收-未收额分析
+                st.subheader("💰 财务数据分析")
+                
+                analysis_results = system.analyze_receivable_amount(df)
+                
+                if '应收-未收额' in analysis_results:
+                    data = analysis_results['应收-未收额']
+                    amount = data['amount']
+                    
+                    debug_log(f"找到应收-未收额: {amount}")
+                    
+                    # 显示金额状态
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if amount > 0:
+                            st.markdown(f'''
+                            <div class="error-box">
+                            <h4>💳 应付款项</h4>
+                            <div style="font-size: 2.5rem; font-weight: bold; text-align: center;">
+                                ¥{amount:,.2f}
+                            </div>
+                            </div>
+                            ''', unsafe_allow_html=True)
+                        elif amount < 0:
+                            st.markdown(f'''
+                            <div class="success-box">
+                            <h4>💚 应退款项</h4>
+                            <div style="font-size: 2.5rem; font-weight: bold; text-align: center;">
+                                ¥{abs(amount):,.2f}
+                            </div>
+                            </div>
+                            ''', unsafe_allow_html=True)
+                        else:
+                            st.markdown(f'''
+                            <div class="diagnostic-info">
+                            <h4>⚖️ 收支平衡</h4>
+                            <div style="font-size: 2.5rem; font-weight: bold; text-align: center;">
+                                ¥0.00
+                            </div>
+                            </div>
+                            ''', unsafe_allow_html=True)
+                    
+                    with col2:
+                        st.metric("数据列", data['column_name'])
+                        st.metric("列索引", data['column_index'])
+                    
+                    with col3:
+                        st.metric("数据位置", "第69行")
+                        st.metric("关键词", data['found_keyword'])
+                    
+                    # 详细信息
+                    with st.expander("📊 数据详情"):
+                        st.write(f"**行标题**: {data['row_name']}")
+                        st.write(f"**所在列**: {data['column_name']} (索引: {data['column_index']})")
+                        st.write(f"**原始值**: {data['original_value']}")
+                        st.write(f"**清理后值**: {data['cleaned_value']}")
+                        st.write(f"**最终金额**: ¥{amount:,.2f}")
+                        st.write(f"**匹配关键词**: {data['found_keyword']}")
+                
+                else:
+                    st.markdown('''
+                    <div class="warning-box">
+                    <h4>⚠️ 未找到应收-未收额数据</h4>
+                    <p>可能原因：</p>
+                    <ul>
+                    <li>报表格式与标准格式不符</li>
+                    <li>第69行不包含应收-未收额信息</li>
+                    <li>数据列位置发生变化</li>
+                    </ul>
+                    </div>
+                    ''', unsafe_allow_html=True)
+                
+                st.divider()
+                
+                # 报表数据展示
+                st.subheader("📋 完整报表数据")
+                
+                # 数据统计
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("数据行数", len(df))
+                with col2:
+                    st.metric("数据列数", len(df.columns))
+                with col3:
+                    st.metric("非空数据", df.count().sum())
+                with col4:
+                    completion_rate = (df.count().sum() / (len(df) * len(df.columns)) * 100)
+                    st.metric("完整度", f"{completion_rate:.1f}%")
+                
+                # 数据表格
+                st.dataframe(df, use_container_width=True, height=500)
+                
+                # 下载功能
+                st.subheader("📥 数据导出")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("📄 下载Excel格式", type="primary"):
+                        try:
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False, sheet_name=st.session_state.store_name)
+                            
+                            st.download_button(
+                                "📥 点击下载Excel文件",
+                                buffer.getvalue(),
+                                f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="download_excel"
+                            )
+                        except Exception as e:
+                            st.error(f"生成Excel文件失败：{str(e)}")
+                
+                with col2:
+                    if st.button("📊 下载CSV格式", type="secondary"):
+                        try:
+                            csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+                            st.download_button(
+                                "📥 点击下载CSV文件",
+                                csv_data,
+                                f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                "text/csv",
+                                key="download_csv"
+                            )
+                        except Exception as e:
+                            st.error(f"生成CSV文件失败：{str(e)}")
+            
+            else:
+                debug_log("门店数据加载失败")
+                st.markdown(f'''
+                <div class="error-box">
+                <h4>❌ 无法加载报表数据</h4>
+                <p>门店 "<strong>{st.session_state.store_name}</strong>" 的报表数据暂不可用</p>
+                <h5>可能的原因：</h5>
+                <ul>
+                <li>📋 管理员尚未上传该门店的报表文件</li>
+                <li>⏳ 数据正在处理中，请稍后重试</li>
+                <li>🔄 系统正在同步数据，请刷新页面</li>
+                <li>🔗 网络连接不稳定，请检查网络</li>
+                </ul>
+                <h5>建议操作：</h5>
+                <ul>
+                <li>🔄 点击"刷新数据"按钮重新加载</li>
+                <li>📞 联系管理员确认数据状态</li>
+                <li>⏰ 等待5-10分钟后重试</li>
+                </ul>
+                </div>
+                ''', unsafe_allow_html=True)
+                
+        except Exception as e:
+            debug_log(f"用户界面异常: {str(e)}")
+            st.markdown(f'''
+            <div class="error-box">
+            <h4>❌ 系统错误</h4>
+            <p>数据加载过程中发生错误：{str(e)}</p>
+            <p>请尝试刷新页面或联系技术支持</p>
+            </div>
+            ''', unsafe_allow_html=True)
+
+# ===================== 页面底部 =====================
+def show_footer():
+    """显示页面底部信息"""
+    st.divider()
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    with col2:
+        st.caption("☁️ 腾讯云COS")
+    with col3:
+        st.caption("🔧 终极修复版")
+    with col4:
+        st.caption("🛡️ 问题解决")
+    with col5:
+        st.caption("🚀 v9.0 Ultimate")
+
+# ===================== 程序入口 =====================
+if __name__ == "__main__":
+    try:
+        main()
+        show_footer()
+    except Exception as e:
+        st.error(f"❌ 系统启动失败: {str(e)}")
+        debug_log(f"系统启动异常: {str(e)}")
+        debug_log(f"错误追踪: {traceback.format_exc()}")
+        
+        if st.button("🔄 重新启动系统"):
+            st.rerun()
