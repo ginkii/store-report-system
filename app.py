@@ -1004,22 +1004,22 @@ with st.sidebar:
             # 显示当前数据状态
             try:
                 data_manager = OptimizedDataManager(gc)
-                info = data_manager.get_current_data_info()
+                current_info = data_manager.get_current_data_info()
                 
-                if info["has_data"]:
+                if current_info["has_data"]:
                     st.markdown(f"""
                         <div class="data-status">
                             <strong>📊 当前数据状态</strong><br>
-                            门店数量: {info["store_count"]}<br>
-                            数据月份: {info.get("data_month", "未知")}<br>
-                            总行数: {info.get("total_rows", 0):,}<br>
-                            更新时间: {info.get("last_update", "未知")}
+                            门店数量: {current_info["store_count"]}<br>
+                            数据月份: {current_info.get("data_month", "未知")}<br>
+                            总行数: {current_info.get("total_rows", 0):,}<br>
+                            更新时间: {current_info.get("last_update", "未知")}
                         </div>
                     """, unsafe_allow_html=True)
                 else:
                     st.info("📭 系统中暂无数据")
-            except:
-                st.warning("⚠️ 无法获取数据状态")
+            except Exception as e:
+                st.warning(f"⚠️ 无法获取数据状态: {str(e)}")
             
             # 上传权限表
             st.markdown("**👥 权限管理**")
@@ -1044,14 +1044,20 @@ with st.sidebar:
             st.markdown("**📊 报表管理**")
             
             # 清理数据确认
-            if info.get("has_data", False):
-                st.markdown(f'''
-                    <div class="clear-warning">
-                        <h4>⚠️ 重要提示</h4>
-                        <p>上传新报表将<strong>完全清空</strong>现有的 {info["store_count"]} 个门店数据！</p>
-                        <p>系统将自动创建备份，但请确认您要替换当前数据。</p>
-                    </div>
-                ''', unsafe_allow_html=True)
+            try:
+                data_manager = OptimizedDataManager(gc)
+                current_info = data_manager.get_current_data_info()
+                
+                if current_info.get("has_data", False):
+                    st.markdown(f'''
+                        <div class="clear-warning">
+                            <h4>⚠️ 重要提示</h4>
+                            <p>上传新报表将<strong>完全清空</strong>现有的 {current_info["store_count"]} 个门店数据！</p>
+                            <p>系统将自动创建备份，但请确认您要替换当前数据。</p>
+                        </div>
+                    ''', unsafe_allow_html=True)
+            except Exception as e:
+                logger.warning(f"获取数据状态失败: {str(e)}")
             
             reports_file = st.file_uploader(
                 "上传财务报表", 
