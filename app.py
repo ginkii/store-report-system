@@ -12,7 +12,6 @@ from google_auth_oauthlib.flow import Flow
 import logging
 from typing import Optional, Dict, Any, List
 import hashlib
-import traceback
 import zlib
 import base64
 import urllib.parse as urlparse
@@ -542,20 +541,20 @@ def handle_oauth_authorization():
                 time.sleep(3)
                 st.rerun()
                 
-        except Exception as e:
-            logger.error(f"OAuth处理异常: {str(e)}")
-            st.markdown(f"""
-            <div class="oauth-error">
-                <h4>❌ 授权处理失败</h4>
-                <p>错误详情: {str(e)}</p>
-                <p>请尝试重新授权或检查配置</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # 清理状态
-            st.query_params.clear()
-            if st.button("🔄 重新开始授权", key="restart_auth"):
-                st.rerun()
+            except Exception as e:
+                logger.error(f"OAuth处理异常: {str(e)}")
+                st.markdown(f"""
+                <div class="oauth-error">
+                    <h4>❌ 授权处理失败</h4>
+                    <p>错误详情: {str(e)}</p>
+                    <p>请尝试重新授权或检查配置</p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 清理状态
+                st.query_params.clear()
+                if st.button("🔄 重新开始授权", key="restart_auth"):
+                    st.rerun()
     
     else:
         # 显示授权界面
@@ -1757,4 +1756,4 @@ with col2:
 with col3:
     st.caption(f"⏰ 连接时长: {time_ago//60}分钟" if time_ago > 0 else "⏰ 未连接")
 with col4:
-    st.caption(f"🔧 版本: v8.0 (稳定OAuth) | 认证: {auth_method}")
+    st.caption(f"🔧 版本: v9.0 (语法修复) | 认证: {auth_method}")
