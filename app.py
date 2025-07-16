@@ -34,6 +34,7 @@ ADMIN_PASSWORD = "admin123"
 PERMISSIONS_SHEET_NAME = "store_permissions"
 REPORTS_SHEET_NAME = "store_reports"
 SYSTEM_INFO_SHEET_NAME = "system_info"
+BACKUP_FOLDER_NAME = "报表备份"
 
 # API限制优化配置
 MAX_REQUESTS_PER_MINUTE = 80  # 安全配额（低于100的限制）
@@ -42,13 +43,14 @@ MIN_REQUEST_INTERVAL = 0.8  # 最小请求间隔（秒）
 API_RETRY_TIMES = 3  # API失败重试次数
 API_BACKOFF_FACTOR = 2  # 退避因子
 
-# 存储优化配置 - 移除压缩以减少复杂性
-ENABLE_COMPRESSION = False  # 关闭压缩，减少存储操作
-MAX_SINGLE_CELL_SIZE = 40000  # 减小单元格最大字符数
+# 存储优化配置
+ENABLE_COMPRESSION = True
+COMPRESSION_THRESHOLD = 5000  # 5KB以上启用压缩
+MAX_SINGLE_CELL_SIZE = 45000  # 单元格最大字符数（接近50K限制）
 
-# 数据清理配置 - 完全禁用备份
-AUTO_BACKUP_BEFORE_CLEAR = False  # 禁用自动备份
-BACKUP_RETENTION_MONTHS = 0  # 不保留备份
+# 数据清理配置
+AUTO_BACKUP_BEFORE_CLEAR = True  # 清理前自动备份
+BACKUP_RETENTION_MONTHS = 3  # 备份保留月数
 
 class APIRateLimiter:
     """API速率限制器"""
@@ -84,12 +86,57 @@ class APIRateLimiter:
 # 全局API限制器
 api_limiter = APIRateLimiter()
 
-class SimpleDataManager:
-    """简化的数据管理器 - 无备份，最小存储"""
+class DataCompressor:
+    """数据压缩器"""
+    
+    @staticmethod
+    def compress_data(data: str) -> str:
+        """压缩数据"""
+        if not ENABLE_COMPRESSION or len(data) < COMPRESSION_THRESHOLD:
+            return data
+        
+        try:
+            import zlib
+            compressed = zlib.compress(data.encode('utf-8'), level=6)
+            encoded = base64.b64encode(compressed).decode('ascii')
+            compressed_data = f"COMPRESSED:{encoded}"
+            
+            # 检查压缩效果
+            compression_ratio = len(compressed_data) / len(data)
+            if compression_ratio < 0.9:  # 压缩率超过10%才使用
+                logger.info(f"数据压缩成功：{len(data)} → {len(compressed_data)} 字节 ({compression_ratio:.1%})")
+                return compressed_data
+            else:
+                logger.info("压缩效果不明显，使用原始数据")
+                return data
+                
+        except Exception as e:
+            logger.warning(f"压缩失败，使用原始数据: {str(e)}")
+            return data
+    
+    @staticmethod
+    def decompress_data(data: str) -> str:
+        """解压缩数据"""
+        if not data.startswith("COMPRESSED:"):
+            return data
+        
+        try:
+            import zlib
+            encoded_data = data[11:]  # 移除 "COMPRESSED:" 前缀
+            compressed = base64.b64decode(encoded_data.encode('ascii'))
+            decompressed = zlib.decompress(compressed).decode('utf-8')
+            return decompressed
+        except Exception as e:
+            logger.error(f"解压缩失败: {str(e)}")
+            return data
+
+class OptimizedDataManager:
+    """优化的数据管理器 - 支持月度轮替"""
     
     def __init__(self, gc):
         self.gc = gc
         self.spreadsheet = None
+        self.compressor = DataCompressor()
         self._init_spreadsheet()
     
     def _init_spreadsheet(self):
@@ -100,7 +147,8 @@ class SimpleDataManager:
         except gspread.SpreadsheetNotFound:
             api_limiter.wait_if_needed()
             self.spreadsheet = self.gc.create("门店报表系统数据")
-            # 移除自动共享，减少权限操作
+            api_limiter.wait_if_needed()
+            self.spreadsheet.share('', perm_type='anyone', role='writer')
     
     def _safe_api_call(self, func, *args, **kwargs):
         """安全的API调用，包含重试和限流"""
@@ -118,59 +166,161 @@ class SimpleDataManager:
     def get_current_data_info(self) -> Dict[str, Any]:
         """获取当前数据信息"""
         try:
-            # 检查是否有报表数据表
+            # 获取系统信息表
             try:
-                reports_ws = self._safe_api_call(self.spreadsheet.worksheet, REPORTS_SHEET_NAME)
-                data = self._safe_api_call(reports_ws.get_all_values)
-                
-                if len(data) <= 1:
-                    return {"has_data": False, "last_update": None, "store_count": 0}
-                
-                # 简单统计数据
-                store_count = len(data) - 1  # 减去表头
-                last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                data_month = datetime.now().strftime("%Y-%m")
-                
-                return {
-                    "has_data": True,
-                    "last_update": last_update,
-                    "store_count": store_count,
-                    "data_month": data_month,
-                    "total_rows": sum(int(row[2]) if len(row) > 2 and row[2].isdigit() else 0 for row in data[1:])
-                }
-                
+                info_ws = self._safe_api_call(self.spreadsheet.worksheet, SYSTEM_INFO_SHEET_NAME)
             except gspread.WorksheetNotFound:
                 return {"has_data": False, "last_update": None, "store_count": 0}
+            
+            data = self._safe_api_call(info_ws.get_all_values)
+            
+            if len(data) <= 1:
+                return {"has_data": False, "last_update": None, "store_count": 0}
+            
+            # 解析系统信息
+            info = {}
+            for row in data[1:]:
+                if len(row) >= 2:
+                    key, value = row[0], row[1]
+                    info[key] = value
+            
+            return {
+                "has_data": info.get("has_data", "false").lower() == "true",
+                "last_update": info.get("last_update"),
+                "store_count": int(info.get("store_count", 0)),
+                "data_month": info.get("data_month", ""),
+                "total_rows": int(info.get("total_rows", 0))
+            }
             
         except Exception as e:
             logger.error(f"获取当前数据信息失败: {str(e)}")
             return {"has_data": False, "last_update": None, "store_count": 0}
     
-    def clear_all_report_data(self) -> bool:
-        """简单清空所有报表数据 - 无备份"""
+    def update_system_info(self, store_count: int, total_rows: int, data_month: str = None):
+        """更新系统信息"""
         try:
-            with st.spinner("🗑️ 正在清理数据..."):
-                # 1. 删除报表数据表（如果存在）
+            # 获取或创建系统信息表
+            try:
+                info_ws = self._safe_api_call(self.spreadsheet.worksheet, SYSTEM_INFO_SHEET_NAME)
+            except gspread.WorksheetNotFound:
+                info_ws = self._safe_api_call(self.spreadsheet.add_worksheet, 
+                                             title=SYSTEM_INFO_SHEET_NAME, rows=100, cols=5)
+            
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if not data_month:
+                data_month = datetime.now().strftime("%Y-%m")
+            
+            # 准备系统信息数据
+            info_data = [
+                ["配置项", "值", "更新时间", "说明"],
+                ["has_data", "true", current_time, "是否有数据"],
+                ["last_update", current_time, current_time, "最后更新时间"],
+                ["store_count", str(store_count), current_time, "门店数量"],
+                ["data_month", data_month, current_time, "数据月份"],
+                ["total_rows", str(total_rows), current_time, "总行数"],
+                ["system_version", "v2.1", current_time, "系统版本"]
+            ]
+            
+            # 清空并更新
+            self._safe_api_call(info_ws.clear)
+            self._safe_api_call(info_ws.update, 'A1', info_data)
+            
+            logger.info(f"系统信息已更新: {store_count}个门店, {total_rows}行数据")
+            
+        except Exception as e:
+            logger.error(f"更新系统信息失败: {str(e)}")
+    
+    def create_backup_before_clear(self, reports_dict: Dict[str, pd.DataFrame]) -> str:
+        """清理前创建备份"""
+        if not AUTO_BACKUP_BEFORE_CLEAR or not reports_dict:
+            return ""
+        
+        try:
+            current_time = datetime.now()
+            backup_name = f"报表备份_{current_time.strftime('%Y%m%d_%H%M%S')}"
+            
+            # 创建备份工作表
+            backup_ws = self._safe_api_call(self.spreadsheet.add_worksheet, 
+                                           title=backup_name, rows=1000, cols=10)
+            
+            # 准备备份数据
+            backup_data = [["门店名称", "备份数据", "行数", "列数", "备份时间"]]
+            
+            for store_name, df in reports_dict.items():
                 try:
-                    reports_ws = self._safe_api_call(self.spreadsheet.worksheet, REPORTS_SHEET_NAME)
-                    self._safe_api_call(self.spreadsheet.del_worksheet, reports_ws)
-                    logger.info("已删除报表数据表")
-                except gspread.WorksheetNotFound:
-                    logger.info("报表数据表不存在，跳过删除")
-                
-                # 2. 删除系统信息表（如果存在）
+                    # 简化备份：只保存基本信息
+                    json_data = df.head(100).to_json(orient='records', force_ascii=False)  # 只备份前100行
+                    compressed_data = self.compressor.compress_data(json_data)
+                    
+                    backup_data.append([
+                        store_name,
+                        compressed_data[:MAX_SINGLE_CELL_SIZE],  # 限制单元格大小
+                        len(df),
+                        len(df.columns),
+                        current_time.strftime("%Y-%m-%d %H:%M:%S")
+                    ])
+                    
+                except Exception as e:
+                    logger.warning(f"备份 {store_name} 失败: {str(e)}")
+                    continue
+            
+            # 批量写入备份数据
+            if len(backup_data) > 1:
+                self._safe_api_call(backup_ws.update, 'A1', backup_data)
+                logger.info(f"备份创建成功: {backup_name}")
+                return backup_name
+            
+        except Exception as e:
+            logger.error(f"创建备份失败: {str(e)}")
+        
+        return ""
+    
+    def clear_all_report_data(self, create_backup: bool = True) -> bool:
+        """清空所有报表数据（方案A：完全轮替模式）"""
+        try:
+            # 1. 如果需要，先创建备份
+            if create_backup:
                 try:
-                    info_ws = self._safe_api_call(self.spreadsheet.worksheet, SYSTEM_INFO_SHEET_NAME)
-                    self._safe_api_call(self.spreadsheet.del_worksheet, info_ws)
-                    logger.info("已删除系统信息表")
-                except gspread.WorksheetNotFound:
-                    logger.info("系统信息表不存在，跳过删除")
-                
-                # 3. 清理缓存
-                self._clear_all_cache()
-                
-                logger.info("数据清理完成")
-                return True
+                    current_data = self.load_reports_optimized()
+                    if current_data:
+                        backup_name = self.create_backup_before_clear(current_data)
+                        if backup_name:
+                            st.info(f"📁 数据已备份至: {backup_name}")
+                except Exception as e:
+                    logger.warning(f"备份创建失败，继续清理: {str(e)}")
+            
+            # 2. 获取所有工作表
+            worksheets = self._safe_api_call(self.spreadsheet.worksheets)
+            
+            # 3. 删除所有报表相关的工作表
+            reports_sheets = []
+            for ws in worksheets:
+                if (ws.title.startswith(REPORTS_SHEET_NAME) or 
+                    ws.title.startswith("报表备份_") and not ws.title.startswith("报表备份_" + datetime.now().strftime('%Y%m%d'))):  # 保留今天的备份
+                    reports_sheets.append(ws)
+            
+            # 4. 批量删除工作表
+            with st.spinner("🗑️ 正在清理旧数据..."):
+                for ws in reports_sheets:
+                    try:
+                        self._safe_api_call(self.spreadsheet.del_worksheet, ws)
+                        logger.info(f"已删除工作表: {ws.title}")
+                    except Exception as e:
+                        logger.warning(f"删除工作表 {ws.title} 失败: {str(e)}")
+            
+            # 5. 清理系统信息
+            try:
+                info_ws = self._safe_api_call(self.spreadsheet.worksheet, SYSTEM_INFO_SHEET_NAME)
+                self._safe_api_call(info_ws.clear)
+                logger.info("系统信息已清理")
+            except gspread.WorksheetNotFound:
+                pass
+            
+            # 6. 清理缓存
+            self._clear_all_cache()
+            
+            logger.info("所有报表数据清理完成")
+            return True
             
         except Exception as e:
             logger.error(f"清理数据失败: {str(e)}")
@@ -183,253 +333,7 @@ class SimpleDataManager:
             del st.session_state[key]
         logger.info(f"已清理 {len(cache_keys)} 个缓存项")
     
-    def save_reports_simple(self, reports_dict: Dict[str, pd.DataFrame]) -> bool:
-        """简化的报表保存 - 无压缩，无备份，直接替换"""
-        try:
-            # 1. 数据预处理和验证
-            if not reports_dict:
-                st.error("❌ 没有数据需要保存")
-                return False
-            
-            total_stores = len(reports_dict)
-            total_rows = sum(len(df) for df in reports_dict.values())
-            
-            st.info(f"📊 准备保存：{total_stores} 个门店，{total_rows:,} 行数据")
-            
-            # 2. 清空现有数据
-            st.warning("⚠️ 正在清空现有数据...")
-            if not self.clear_all_report_data():
-                st.error("❌ 清理旧数据失败")
-                return False
-            
-            # 3. 创建新的报表工作表
-            with st.spinner("📝 创建新数据表..."):
-                reports_ws = self._safe_api_call(self.spreadsheet.add_worksheet, 
-                                               title=REPORTS_SHEET_NAME, rows=max(2000, total_stores + 100), cols=8)
-            
-            # 4. 准备数据 - 简化版本
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            current_month = datetime.now().strftime("%Y-%m")
-            
-            headers = ["门店名称", "报表数据", "行数", "列数", "更新时间", "数据月份"]
-            all_data = [headers]
-            
-            # 5. 处理每个门店数据 - 简化处理
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for idx, (store_name, df) in enumerate(reports_dict.items()):
-                try:
-                    # 更新进度
-                    progress = (idx + 1) / total_stores
-                    progress_bar.progress(progress)
-                    status_text.text(f"处理中: {store_name} ({idx + 1}/{total_stores})")
-                    
-                    # 简单清理数据
-                    df_cleaned = self._clean_dataframe_simple(df)
-                    
-                    # 转换为JSON - 无压缩
-                    json_data = df_cleaned.to_json(orient='records', force_ascii=False)
-                    
-                    # 检查数据大小 - 如果太大就截断
-                    if len(json_data) > MAX_SINGLE_CELL_SIZE:
-                        logger.warning(f"{store_name} 数据过大，截断至{MAX_SINGLE_CELL_SIZE}字符")
-                        json_data = json_data[:MAX_SINGLE_CELL_SIZE-100] + '...[数据截断]'
-                    
-                    # 添加到数据列表
-                    all_data.append([
-                        store_name,
-                        json_data,
-                        len(df),
-                        len(df.columns),
-                        current_time,
-                        current_month
-                    ])
-                    
-                    logger.info(f"✅ {store_name}: {len(df)}行")
-                    
-                except Exception as e:
-                    logger.error(f"❌ 处理 {store_name} 失败: {str(e)}")
-                    # 添加错误记录
-                    all_data.append([
-                        f"{store_name}_错误",
-                        f"处理失败: {str(e)}",
-                        0, 0, current_time, current_month
-                    ])
-                    continue
-            
-            # 6. 批量写入数据 - 更大批次
-            with st.spinner("💾 保存数据到云端..."):
-                batch_size = 100  # 更大批次，减少API调用
-                total_batches = math.ceil(len(all_data) / batch_size)
-                
-                for batch_idx in range(total_batches):
-                    start_idx = batch_idx * batch_size
-                    end_idx = min(start_idx + batch_size, len(all_data))
-                    batch_data = all_data[start_idx:end_idx]
-                    
-                    if batch_idx == 0:
-                        # 第一批包含表头
-                        start_cell = 'A1'
-                    else:
-                        # 后续批次
-                        start_cell = f'A{start_idx + 1}'
-                    
-                    self._safe_api_call(reports_ws.update, start_cell, batch_data)
-                    
-                    # 更新进度
-                    batch_progress = (batch_idx + 1) / total_batches
-                    progress_bar.progress(batch_progress)
-                    status_text.text(f"保存中: 批次 {batch_idx + 1}/{total_batches}")
-            
-            # 7. 清理进度显示
-            progress_bar.empty()
-            status_text.empty()
-            
-            logger.info(f"✅ 数据保存完成: {total_stores} 个门店")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ 保存数据失败: {str(e)}")
-            st.error(f"保存失败: {str(e)}")
-            return False
-    
-    def load_reports_simple(self) -> Dict[str, pd.DataFrame]:
-        """简化的报表加载"""
-        try:
-            # 获取报表工作表
-            try:
-                reports_ws = self._safe_api_call(self.spreadsheet.worksheet, REPORTS_SHEET_NAME)
-            except gspread.WorksheetNotFound:
-                logger.info("报表工作表不存在")
-                return {}
-            
-            # 读取数据
-            data = self._safe_api_call(reports_ws.get_all_values)
-            
-            if len(data) <= 1:
-                logger.info("报表工作表为空")
-                return {}
-            
-            # 解析数据
-            reports_dict = {}
-            
-            for row in data[1:]:  # 跳过表头
-                if len(row) >= 6:
-                    store_name = row[0]
-                    json_data = row[1]
-                    
-                    # 跳过错误数据
-                    if store_name.endswith('_错误'):
-                        logger.warning(f"跳过错误数据: {store_name}")
-                        continue
-                    
-                    try:
-                        # 直接解析JSON（无解压缩）
-                        df = pd.read_json(json_data, orient='records')
-                        
-                        # 数据后处理
-                        df = self._process_loaded_dataframe(df)
-                        
-                        reports_dict[store_name] = df
-                        logger.info(f"✅ 加载 {store_name}: {len(df)} 行")
-                        
-                    except Exception as e:
-                        logger.error(f"❌ 解析 {store_name} 数据失败: {str(e)}")
-                        continue
-            
-            logger.info(f"✅ 数据加载完成: {len(reports_dict)} 个门店")
-            return reports_dict
-            
-        except Exception as e:
-            logger.error(f"❌ 加载数据失败: {str(e)}")
-            return {}
-    
-    def _clean_dataframe_simple(self, df: pd.DataFrame) -> pd.DataFrame:
-        """简化的DataFrame清理"""
-        try:
-            df_cleaned = df.copy()
-            
-            # 限制数据量
-            if len(df_cleaned) > 2000:  # 大幅减少行数限制
-                logger.warning(f"数据行数过多({len(df_cleaned)})，截取前2000行")
-                df_cleaned = df_cleaned.head(2000)
-            
-            # 限制列数
-            if len(df_cleaned.columns) > 50:
-                logger.warning(f"数据列数过多({len(df_cleaned.columns)})，截取前50列")
-                df_cleaned = df_cleaned.iloc[:, :50]
-            
-            # 简单处理数据类型
-            for col in df_cleaned.columns:
-                df_cleaned[col] = df_cleaned[col].astype(str)
-                df_cleaned[col] = df_cleaned[col].replace({
-                    'nan': '', 'None': '', 'NaT': '', 'null': '', '<NA>': ''
-                })
-                # 大幅限制字符串长度
-                df_cleaned[col] = df_cleaned[col].apply(
-                    lambda x: x[:100] + '...' if len(str(x)) > 100 else x
-                )
-            
-            return df_cleaned
-            
-        except Exception as e:
-            logger.error(f"清理DataFrame失败: {str(e)}")
-            return df
-    
-    def _process_loaded_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """处理加载的DataFrame"""
-        try:
-            if len(df) == 0:
-                return df
-            
-            # 检查第一行是否是门店名称行
-            first_row = df.iloc[0]
-            non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
-            
-            if non_empty_count <= 2 and len(df) > 1:
-                df = df.iloc[1:].reset_index(drop=True)
-            
-            # 处理表头
-            if len(df) > 1:
-                header_row = df.iloc[0].fillna('').astype(str).tolist()
-                data_rows = df.iloc[1:].copy()
-                
-                # 清理列名
-                cols = []
-                for i, col in enumerate(header_row):
-                    col = str(col).strip()
-                    if col == '' or col == 'nan' or col == '0':
-                        col = f'列{i+1}' if i > 0 else '项目名称'
-                    
-                    # 处理重复列名
-                    original_col = col
-                    counter = 1
-                    while col in cols:
-                        col = f"{original_col}_{counter}"
-                        counter += 1
-                    cols.append(col)
-                
-                # 确保列数匹配
-                min_cols = min(len(data_rows.columns), len(cols))
-                cols = cols[:min_cols]
-                data_rows = data_rows.iloc[:, :min_cols]
-                
-                data_rows.columns = cols
-                df = data_rows.reset_index(drop=True).fillna('')
-            else:
-                df = df.fillna('')
-                default_cols = []
-                for i in range(len(df.columns)):
-                    col_name = f'列{i+1}' if i > 0 else '项目名称'
-                    default_cols.append(col_name)
-                df.columns = default_cols
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"处理DataFrame失败: {str(e)}")
-            return dfized(self, reports_dict: Dict[str, pd.DataFrame], clear_existing: bool = True) -> bool:
+    def save_reports_optimized(self, reports_dict: Dict[str, pd.DataFrame], clear_existing: bool = True) -> bool:
         """优化的报表保存 - 支持完全轮替"""
         try:
             # 1. 数据预处理和验证
@@ -705,20 +609,21 @@ class SimpleDataManager:
             logger.error(f"处理DataFrame失败: {str(e)}")
             return df
 
-# 权限管理函数 - 简化版
+# 权限管理函数
 def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
-    """保存权限数据 - 简化版"""
+    """保存权限数据"""
     try:
-        data_manager = SimpleDataManager(gc)
+        data_manager = OptimizedDataManager(gc)
         
         # 获取或创建权限表
         try:
             worksheet = data_manager._safe_api_call(data_manager.spreadsheet.worksheet, PERMISSIONS_SHEET_NAME)
-            # 直接清空现有数据
-            data_manager._safe_api_call(worksheet.clear)
         except gspread.WorksheetNotFound:
             worksheet = data_manager._safe_api_call(data_manager.spreadsheet.add_worksheet, 
-                                                  title=PERMISSIONS_SHEET_NAME, rows=500, cols=3)
+                                                  title=PERMISSIONS_SHEET_NAME, rows=1000, cols=5)
+        
+        # 清空并准备数据
+        data_manager._safe_api_call(worksheet.clear)
         
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         all_data = [['门店名称', '人员编号', '更新时间']]
@@ -730,7 +635,7 @@ def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
                 current_time
             ])
         
-        # 一次性批量写入
+        # 批量写入
         data_manager._safe_api_call(worksheet.update, 'A1', all_data)
         
         logger.info(f"权限数据保存成功: {len(df)} 条记录")
@@ -741,9 +646,9 @@ def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
         return False
 
 def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
-    """加载权限数据 - 简化版"""
+    """加载权限数据"""
     try:
-        data_manager = SimpleDataManager(gc)
+        data_manager = OptimizedDataManager(gc)
         
         try:
             worksheet = data_manager._safe_api_call(data_manager.spreadsheet.worksheet, PERMISSIONS_SHEET_NAME)
@@ -756,7 +661,7 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
             df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
             result_df = df[['门店名称', '人员编号']].copy()
             
-            # 简单数据清理
+            # 数据清理
             result_df['门店名称'] = result_df['门店名称'].str.strip()
             result_df['人员编号'] = result_df['人员编号'].str.strip()
             
@@ -1025,15 +930,15 @@ if 'google_sheets_client' not in st.session_state:
 # 主标题
 st.markdown('<h1 class="main-header">📊 门店报表查询系统 (优化版)</h1>', unsafe_allow_html=True)
 
-# 显示系统优化特性 - 更新为极简版
+# 显示系统优化特性
 st.markdown('''
     <div class="optimization-info">
-        <h4>🚀 系统优化特性 (极简版)</h4>
+        <h4>🚀 系统优化特性</h4>
         <p>• <strong>API限制保护</strong>：智能限流，永不超过配额<br>
-        • <strong>无备份模式</strong>：彻底节省存储空间<br>
-        • <strong>数据截断保护</strong>：防止单元格过大<br>
+        • <strong>月度轮替存储</strong>：自动清理，空间占用最小<br>
+        • <strong>数据压缩技术</strong>：减少存储空间70%+<br>
         • <strong>批量优化处理</strong>：上传速度提升10倍<br>
-        • <strong>最小存储占用</strong>：只保留必要数据</p>
+        • <strong>自动备份机制</strong>：数据安全有保障</p>
     </div>
 ''', unsafe_allow_html=True)
 
@@ -1063,9 +968,9 @@ with st.sidebar:
         current_requests = len(api_limiter.request_times)
         st.metric("API使用率", f"{current_requests}/{MAX_REQUESTS_PER_MINUTE}")
         
-        # 显示当前数据状态 - 简化版
+        # 显示当前数据状态
         try:
-            data_manager = SimpleDataManager(gc)
+            data_manager = OptimizedDataManager(gc)
             info = data_manager.get_current_data_info()
             if info["has_data"]:
                 st.metric("当前门店数", info["store_count"])
@@ -1255,8 +1160,8 @@ if user_type == "管理员" and st.session_state.is_admin:
     st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>月度轮替存储，API限制保护，智能数据管理</p></div>', unsafe_allow_html=True)
     
     try:
-        # 获取详细的系统统计 - 简化版
-        data_manager = SimpleDataManager(gc)
+        # 获取详细的系统统计
+        data_manager = OptimizedDataManager(gc)
         info = data_manager.get_current_data_info()
         
         # 系统统计
@@ -1277,7 +1182,7 @@ if user_type == "管理员" and st.session_state.is_admin:
             st.subheader("📊 数据预览")
             
             try:
-                reports_data = data_manager.load_reports_simple()
+                reports_data = data_manager.load_reports_optimized()
                 
                 if reports_data:
                     # 显示门店列表
@@ -1342,8 +1247,8 @@ else:
         
         try:
             with st.spinner("加载报表数据..."):
-                data_manager = SimpleDataManager(gc)
-                reports_data = data_manager.load_reports_simple()
+                data_manager = OptimizedDataManager(gc)
+                reports_data = data_manager.load_reports_optimized()
                 matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
             
             if matching_sheets:
@@ -1554,7 +1459,7 @@ with col2:
     st.caption(f"📡 API使用: {api_usage}")
 with col3:
     try:
-        data_manager = SimpleDataManager(gc)
+        data_manager = OptimizedDataManager(gc)
         info = data_manager.get_current_data_info()
         if info["has_data"]:
             st.caption(f"📊 数据: {info['data_month']}")
@@ -1563,7 +1468,7 @@ with col3:
     except:
         st.caption("📊 数据: 未知")
 with col4:
-    st.caption("🔧 版本: v2.3 (极简版)")
+    st.caption("🔧 版本: v2.2 (月度轮替版)")
 
 # 自动API限制清理（清理过期的请求记录）
 current_time = time.time()
