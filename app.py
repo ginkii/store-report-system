@@ -2,40 +2,26 @@ import streamlit as st
 import pandas as pd
 import io
 import json
-import gzip
-import base64
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 import time
-import gspread
-from google.oauth2.service_account import Credentials
+from qcloud_cos import CosConfig
+from qcloud_cos import CosS3Client
+from qcloud_cos.cos_exception import CosServiceError, CosClientError
+from supabase import create_client, Client
 import logging
 from typing import Optional, Dict, Any, List
-import hashlib
 import traceback
-from contextlib import contextmanager
-
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # 页面配置
 st.set_page_config(
-    page_title="门店报表查询系统", 
+    page_title="门店报表查询系统 - 腾讯云版", 
     page_icon="📊",
     layout="wide"
 )
 
 # 系统配置
-ADMIN_PASSWORD = "admin123"
-PERMISSIONS_SHEET_NAME = "store_permissions"
-REPORTS_SHEET_NAME = "store_reports"
-SYSTEM_INFO_SHEET_NAME = "system_info"
-SPREADSHEET_NAME = "门店报表系统数据"
-MAX_RETRIES = 3
-RETRY_DELAY = 2
-API_DELAY = 1.5  # API调用间隔延迟
-MAX_CHUNK_SIZE = 25000  # 减小分片大小
-COMPRESSION_ENABLED = True  # 启用数据压缩
+ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
 
 # CSS样式
 st.markdown("""
@@ -46,679 +32,637 @@ st.markdown("""
         text-align: center;
         padding: 1rem 0;
         margin-bottom: 2rem;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
     }
     .store-info {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
         padding: 1.5rem;
-        border-radius: 10px;
+        border-radius: 15px;
         margin: 1rem 0;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
     }
     .admin-panel {
         background: linear-gradient(135deg, #ffeaa7 0%, #fab1a0 100%);
         padding: 1.5rem;
-        border-radius: 10px;
+        border-radius: 15px;
         border: 2px solid #fdcb6e;
         margin: 1rem 0;
     }
-    .cleanup-info {
+    .architecture-info {
         background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
-        padding: 1rem;
-        border-radius: 10px;
+        padding: 1.5rem;
+        border-radius: 15px;
         margin: 1rem 0;
         border: 2px solid #48cab2;
     }
-    .storage-warning {
-        background: #fff3cd;
-        color: #856404;
+    .success-box {
+        background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
         padding: 1rem;
-        border-radius: 5px;
-        border: 1px solid #ffeaa7;
+        border-radius: 10px;
         margin: 1rem 0;
+        color: #2d3436;
+    }
+    .warning-box {
+        background: linear-gradient(135deg, #fdcb6e 0%, #e17055 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+        color: white;
     }
     </style>
 """, unsafe_allow_html=True)
 
-class OptimizedGoogleSheetsManager:
-    """优化版Google Sheets管理器 - 自动清理、压缩存储"""
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class TencentCOSManager:
+    """腾讯云COS存储管理器"""
     
     def __init__(self):
         self.client = None
-        self.spreadsheet = None
-        self.storage_stats = {}
+        self.bucket_name = None
+        self.region = None
+        self.initialize_from_secrets()
     
-    def show_status(self, message: str, status_type: str = "info"):
-        """显示状态消息"""
-        if status_type == "success":
-            st.success(f"✅ {message}")
-        elif status_type == "error":
-            st.error(f"❌ {message}")
-        elif status_type == "warning":
-            st.warning(f"⚠️ {message}")
-        else:
-            st.info(f"ℹ️ {message}")
-    
-    @staticmethod
-    def compress_data(data):
-        """压缩数据 - 可减少70-90%存储空间"""
+    def initialize_from_secrets(self):
+        """从Streamlit Secrets初始化"""
         try:
-            if not COMPRESSION_ENABLED:
-                return json.dumps(data, ensure_ascii=False)
+            if "tencent_cos" not in st.secrets:
+                raise Exception("未找到腾讯云COS配置")
             
-            # 转换为紧凑JSON
-            json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+            config = st.secrets["tencent_cos"]
+            secret_id = config.get("secret_id")
+            secret_key = config.get("secret_key")
+            self.region = config.get("region", "ap-beijing")
+            self.bucket_name = config.get("bucket_name")
             
-            # GZIP压缩
-            compressed = gzip.compress(json_str.encode('utf-8'))
+            if not all([secret_id, secret_key, self.bucket_name]):
+                raise Exception("腾讯云COS配置不完整")
             
-            # Base64编码
-            encoded = base64.b64encode(compressed).decode('utf-8')
+            # 配置COS客户端
+            cos_config = CosConfig(
+                Region=self.region,
+                SecretId=secret_id,
+                SecretKey=secret_key
+            )
             
-            logger.info(f"数据压缩: {len(json_str)} → {len(encoded)} 字节 (压缩率: {(1-len(encoded)/len(json_str))*100:.1f}%)")
-            return encoded
+            self.client = CosS3Client(cos_config)
+            logger.info("腾讯云COS客户端初始化成功")
+            
         except Exception as e:
-            logger.error(f"数据压缩失败: {str(e)}")
-            return json.dumps(data, ensure_ascii=False)
+            logger.error(f"腾讯云COS初始化失败: {str(e)}")
+            raise
     
-    @staticmethod
-    def decompress_data(encoded_data):
-        """解压数据"""
+    def upload_file(self, file_data: bytes, filename: str) -> Optional[str]:
+        """上传文件到腾讯云COS"""
         try:
-            if not COMPRESSION_ENABLED:
-                return json.loads(encoded_data)
+            # 上传文件
+            response = self.client.put_object(
+                Bucket=self.bucket_name,
+                Body=file_data,
+                Key=filename,
+                ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
             
-            # 检查是否是压缩数据
-            if not encoded_data or len(encoded_data) < 100:
-                return json.loads(encoded_data) if encoded_data else {}
+            # 生成文件URL
+            file_url = f"https://{self.bucket_name}.cos.{self.region}.myqcloud.com/{filename}"
             
-            try:
-                # 尝试Base64解码
-                compressed = base64.b64decode(encoded_data.encode('utf-8'))
-                # GZIP解压
-                json_str = gzip.decompress(compressed).decode('utf-8')
-                # JSON解析
-                return json.loads(json_str)
-            except:
-                # 如果解压失败，尝试直接解析（可能是未压缩的数据）
-                return json.loads(encoded_data)
-                
+            logger.info(f"文件上传成功: {filename}")
+            return file_url
+            
+        except CosServiceError as e:
+            logger.error(f"COS服务错误: {e.get_error_msg()}")
+            raise Exception(f"文件上传失败: {e.get_error_msg()}")
+        except CosClientError as e:
+            logger.error(f"COS客户端错误: {str(e)}")
+            raise Exception(f"文件上传失败: {str(e)}")
         except Exception as e:
-            logger.error(f"数据解压失败: {str(e)}")
-            return {}
+            logger.error(f"上传文件时出错: {str(e)}")
+            raise Exception(f"文件上传失败: {str(e)}")
     
-    def api_call_with_delay(self, func, *args, **kwargs):
-        """带延迟的API调用，避免配额限制"""
+    def download_file(self, filename: str) -> Optional[bytes]:
+        """从腾讯云COS下载文件"""
         try:
-            result = func(*args, **kwargs)
-            time.sleep(API_DELAY)  # API调用后延迟
-            return result
+            response = self.client.get_object(
+                Bucket=self.bucket_name,
+                Key=filename
+            )
+            
+            # 读取文件内容
+            file_data = response['Body'].read()
+            logger.info(f"文件下载成功: {filename}")
+            return file_data
+            
+        except CosServiceError as e:
+            logger.error(f"COS服务错误: {e.get_error_msg()}")
+            return None
+        except CosClientError as e:
+            logger.error(f"COS客户端错误: {str(e)}")
+            return None
         except Exception as e:
-            if "quota" in str(e).lower() or "limit" in str(e).lower():
-                logger.warning(f"API配额限制，延长等待时间: {str(e)}")
-                time.sleep(API_DELAY * 3)  # 遇到配额限制时延长等待
-                raise
-            else:
-                raise
+            logger.error(f"下载文件时出错: {str(e)}")
+            return None
     
-    def create_client(self):
-        """创建Google Sheets客户端"""
+    def delete_file(self, filename: str) -> bool:
+        """删除腾讯云COS文件"""
         try:
-            if "google_sheets" not in st.secrets:
-                self.show_status("未找到 google_sheets 配置", "error")
-                return False
+            self.client.delete_object(
+                Bucket=self.bucket_name,
+                Key=filename
+            )
             
-            config = st.secrets["google_sheets"]
-            
-            # 配置作用域
-            scopes = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/drive.file"
-            ]
-            
-            # 创建认证
-            credentials = Credentials.from_service_account_info(config, scopes=scopes)
-            self.client = gspread.authorize(credentials)
-            
-            self.show_status("Google Sheets 客户端创建成功", "success")
+            logger.info(f"文件删除成功: {filename}")
             return True
             
+        except CosServiceError as e:
+            logger.error(f"COS服务错误: {e.get_error_msg()}")
+            return False
+        except CosClientError as e:
+            logger.error(f"COS客户端错误: {str(e)}")
+            return False
         except Exception as e:
-            error_msg = f"客户端创建失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
+            logger.error(f"删除文件时出错: {str(e)}")
             return False
     
-    def cleanup_old_files(self):
-        """清理旧文件 - 释放存储空间"""
-        if not self.client:
-            return False
-        
+    def list_files(self) -> List[Dict]:
+        """列出存储桶中的所有文件"""
         try:
-            self.show_status("🧹 开始清理旧文件...", "info")
+            response = self.client.list_objects(
+                Bucket=self.bucket_name,
+                MaxKeys=1000
+            )
             
-            cleanup_count = 0
-            error_count = 0
+            files = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    files.append({
+                        'filename': obj['Key'],
+                        'size': obj['Size'],
+                        'last_modified': obj['LastModified']
+                    })
             
-            # 清理模式：删除所有现有的数据文件
-            files_to_cleanup = []
-            
-            # 尝试删除已知的文件名模式
-            cleanup_patterns = [
-                SPREADSHEET_NAME,
-                "门店报表系统数据",
-                "store_permissions",
-                "store_reports", 
-                "测试文件",
-                "权限测试",
-                "ErrorTracker"
-            ]
-            
-            for pattern in cleanup_patterns:
-                try:
-                    # 尝试多种可能的文件名
-                    possible_names = [
-                        pattern,
-                        f"{pattern}_旧数据",
-                        f"{pattern}_{datetime.now().strftime('%Y%m%d')}",
-                        f"{pattern}_备份"
-                    ]
-                    
-                    for name in possible_names:
-                        try:
-                            spreadsheet = self.api_call_with_delay(self.client.open, name)
-                            self.api_call_with_delay(self.client.del_spreadsheet, spreadsheet.id)
-                            cleanup_count += 1
-                            self.show_status(f"删除旧文件: {name}", "success")
-                        except gspread.SpreadsheetNotFound:
-                            continue
-                        except Exception as e:
-                            if "404" not in str(e) and "not found" not in str(e).lower():
-                                error_count += 1
-                                logger.warning(f"删除文件 {name} 失败: {str(e)}")
-                
-                except Exception as e:
-                    logger.warning(f"清理模式 {pattern} 失败: {str(e)}")
-                    continue
-            
-            if cleanup_count > 0:
-                self.show_status(f"清理完成：删除了 {cleanup_count} 个旧文件", "success")
-            else:
-                self.show_status("未找到需要清理的旧文件", "info")
-            
-            # 显示清理统计
-            if cleanup_count > 0 or error_count > 0:
-                st.markdown(f'''
-                <div class="cleanup-info">
-                <h4>🧹 清理统计</h4>
-                <p>✅ 成功删除: {cleanup_count} 个文件</p>
-                <p>❌ 删除失败: {error_count} 个文件</p>
-                <p>💾 估计释放空间: {cleanup_count * 2:.1f} MB</p>
-                </div>
-                ''', unsafe_allow_html=True)
-            
-            return True
+            return files
             
         except Exception as e:
-            error_msg = f"清理旧文件失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return False
+            logger.error(f"列出文件时出错: {str(e)}")
+            return []
     
-    def get_or_create_spreadsheet(self):
-        """获取或创建主表格"""
-        if not self.client:
-            return None
-        
+    def get_storage_usage(self) -> Dict:
+        """获取存储使用情况"""
         try:
-            # 尝试打开现有表格
-            self.spreadsheet = self.api_call_with_delay(self.client.open, SPREADSHEET_NAME)
-            logger.info(f"表格 '{SPREADSHEET_NAME}' 已存在")
-            return self.spreadsheet
+            files = self.list_files()
+            total_size = sum(f['size'] for f in files)
             
-        except gspread.SpreadsheetNotFound:
-            try:
-                # 创建新表格
-                self.spreadsheet = self.api_call_with_delay(self.client.create, SPREADSHEET_NAME)
-                logger.info(f"成功创建表格 '{SPREADSHEET_NAME}'")
-                return self.spreadsheet
-                
-            except Exception as e:
-                error_msg = f"创建表格失败: {str(e)}"
-                self.show_status(error_msg, "error")
-                logger.error(error_msg)
-                return None
-                
-        except Exception as e:
-            error_msg = f"表格操作失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return None
-    
-    def get_or_create_worksheet(self, name: str, rows: int = 1000, cols: int = 20):
-        """获取或创建工作表"""
-        if not self.spreadsheet:
-            return None
-        
-        try:
-            worksheet = self.spreadsheet.worksheet(name)
-            logger.info(f"工作表 '{name}' 已存在")
-            return worksheet
-            
-        except gspread.WorksheetNotFound:
-            try:
-                worksheet = self.api_call_with_delay(
-                    self.spreadsheet.add_worksheet, 
-                    title=name, rows=rows, cols=cols
-                )
-                logger.info(f"成功创建工作表 '{name}'")
-                return worksheet
-                
-            except Exception as e:
-                error_msg = f"创建工作表失败: {str(e)}"
-                self.show_status(error_msg, "error")
-                logger.error(error_msg)
-                return None
-                
-        except Exception as e:
-            error_msg = f"工作表操作失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return None
-    
-    def optimize_dataframe(self, df: pd.DataFrame):
-        """优化DataFrame以减少存储空间"""
-        try:
-            optimized_df = df.copy()
-            
-            # 1. 数据类型优化
-            for col in optimized_df.columns:
-                # 转换为字符串并清理
-                optimized_df[col] = optimized_df[col].astype(str).fillna('')
-                
-                # 移除过长的数据
-                optimized_df[col] = optimized_df[col].apply(
-                    lambda x: x[:500] if len(str(x)) > 500 else x
-                )
-                
-                # 清理特殊字符
-                optimized_df[col] = optimized_df[col].str.replace('\n', ' ').str.replace('\r', '')
-            
-            # 2. 移除完全空的行和列
-            optimized_df = optimized_df.dropna(how='all').dropna(axis=1, how='all')
-            
-            # 3. 限制数据行数（如果太大）
-            if len(optimized_df) > 10000:
-                self.show_status(f"数据行数过多({len(optimized_df)})，截取前10000行", "warning")
-                optimized_df = optimized_df.head(10000)
-            
-            reduction_ratio = (1 - len(optimized_df) / len(df)) * 100 if len(df) > 0 else 0
-            logger.info(f"数据优化完成: {len(df)} → {len(optimized_df)} 行 (减少 {reduction_ratio:.1f}%)")
-            
-            return optimized_df
+            return {
+                'file_count': len(files),
+                'total_size_bytes': total_size,
+                'total_size_mb': total_size / (1024 * 1024),
+                'files': files
+            }
             
         except Exception as e:
-            logger.error(f"数据优化失败: {str(e)}")
-            return df
-    
-    def save_permissions_optimized(self, df: pd.DataFrame) -> bool:
-        """优化版权限数据保存"""
-        try:
-            worksheet = self.get_or_create_worksheet(PERMISSIONS_SHEET_NAME)
-            if not worksheet:
-                return False
-            
-            # 清空现有数据
-            self.api_call_with_delay(worksheet.clear)
-            
-            # 优化数据
-            optimized_df = self.optimize_dataframe(df)
-            
-            # 准备数据
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            data = [['门店名称', '人员编号', '更新时间']]
-            
-            for _, row in optimized_df.iterrows():
-                data.append([
-                    str(row.iloc[0]).strip()[:50],  # 限制长度
-                    str(row.iloc[1]).strip()[:20],  # 限制长度
-                    current_time
-                ])
-            
-            # 批量更新
-            self.api_call_with_delay(worksheet.update, 'A1', data)
-            
-            self.show_status(f"✅ 权限数据保存成功：{len(optimized_df)} 条记录", "success")
-            logger.info(f"权限数据保存成功: {len(optimized_df)} 条记录")
-            return True
-            
-        except Exception as e:
-            error_msg = f"保存权限数据失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return False
-    
-    def save_reports_optimized(self, reports_dict: Dict[str, pd.DataFrame]) -> bool:
-        """优化版报表数据保存 - 压缩存储"""
-        try:
-            worksheet = self.get_or_create_worksheet(REPORTS_SHEET_NAME, rows=2000, cols=10)
-            if not worksheet:
-                return False
-            
-            # 清空现有数据
-            self.api_call_with_delay(worksheet.clear)
-            
-            # 准备数据
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            data = [['门店名称', '压缩数据', '原始行数', '原始列数', '压缩大小', '更新时间']]
-            
-            total_original_size = 0
-            total_compressed_size = 0
-            
-            for store_name, df in reports_dict.items():
-                try:
-                    # 优化DataFrame
-                    optimized_df = self.optimize_dataframe(df)
-                    
-                    # 转换为字典格式
-                    data_dict = {
-                        'columns': optimized_df.columns.tolist(),
-                        'data': optimized_df.values.tolist(),
-                        'metadata': {
-                            'store_name': store_name,
-                            'timestamp': current_time,
-                            'original_rows': len(df),
-                            'original_cols': len(df.columns)
-                        }
-                    }
-                    
-                    # 压缩数据
-                    compressed_data = self.compress_data(data_dict)
-                    
-                    # 统计压缩效果
-                    original_size = len(json.dumps(data_dict, ensure_ascii=False))
-                    compressed_size = len(compressed_data)
-                    total_original_size += original_size
-                    total_compressed_size += compressed_size
-                    
-                    # 检查数据大小，如果太大则分片
-                    if len(compressed_data) > MAX_CHUNK_SIZE:
-                        # 分片存储
-                        chunks = [compressed_data[i:i+MAX_CHUNK_SIZE] 
-                                for i in range(0, len(compressed_data), MAX_CHUNK_SIZE)]
-                        
-                        for chunk_idx, chunk in enumerate(chunks):
-                            chunk_name = f"{store_name}_片段{chunk_idx+1}"
-                            data.append([
-                                chunk_name,
-                                chunk,
-                                len(df),
-                                len(df.columns),
-                                f"{len(chunk)} bytes (片段{chunk_idx+1}/{len(chunks)})",
-                                current_time
-                            ])
-                    else:
-                        # 单个数据块
-                        data.append([
-                            store_name,
-                            compressed_data,
-                            len(df),
-                            len(df.columns),
-                            f"{compressed_size} bytes (压缩率: {(1-compressed_size/original_size)*100:.1f}%)",
-                            current_time
-                        ])
-                    
-                    self.show_status(f"✅ {store_name}: {len(df)}行 → 压缩至 {compressed_size} bytes", "success")
-                    
-                except Exception as e:
-                    logger.error(f"处理 {store_name} 时出错: {str(e)}")
-                    # 添加错误记录
-                    data.append([
-                        f"{store_name}_错误",
-                        json.dumps({"error": str(e), "timestamp": current_time}),
-                        0, 0, "ERROR", current_time
-                    ])
-                    continue
-            
-            # 批量更新数据
-            try:
-                # 分批上传，避免单次请求过大
-                batch_size = 20
-                for i in range(0, len(data), batch_size):
-                    batch = data[i:i+batch_size]
-                    if i == 0:
-                        # 第一批包含标题
-                        self.api_call_with_delay(worksheet.update, 'A1', batch)
-                    else:
-                        # 后续批次
-                        start_row = i + 1
-                        self.api_call_with_delay(worksheet.update, f'A{start_row}', batch)
-                    
-                    # 显示进度
-                    progress = min(i + batch_size, len(data))
-                    if len(data) > 1:
-                        st.progress(progress / len(data))
-            
-            except Exception as e:
-                error_msg = f"批量上传失败: {str(e)}"
-                self.show_status(error_msg, "error")
-                return False
-            
-            # 显示存储统计
-            compression_ratio = (1 - total_compressed_size / total_original_size) * 100 if total_original_size > 0 else 0
-            
-            st.markdown(f'''
-            <div class="cleanup-info">
-            <h4>📊 存储优化统计</h4>
-            <p>🏪 门店数量: {len(reports_dict)} 个</p>
-            <p>📦 原始大小: {total_original_size / 1024:.1f} KB</p>
-            <p>🗜️ 压缩后: {total_compressed_size / 1024:.1f} KB</p>
-            <p>📉 压缩率: {compression_ratio:.1f}%</p>
-            <p>💾 节省空间: {(total_original_size - total_compressed_size) / 1024:.1f} KB</p>
-            </div>
-            ''', unsafe_allow_html=True)
-            
-            self.show_status(f"报表数据保存成功：{len(reports_dict)} 个门店，压缩率 {compression_ratio:.1f}%", "success")
-            logger.info(f"报表数据保存成功: {len(reports_dict)} 个门店")
-            return True
-            
-        except Exception as e:
-            error_msg = f"保存报表数据失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return False
-    
-    def load_permissions_optimized(self) -> Optional[pd.DataFrame]:
-        """优化版权限数据加载"""
-        try:
-            worksheet = self.get_or_create_worksheet(PERMISSIONS_SHEET_NAME)
-            if not worksheet:
-                return None
-            
-            data = self.api_call_with_delay(worksheet.get_all_values)
-            
-            if len(data) <= 1:
-                logger.info("权限表为空")
-                return None
-            
-            df = pd.DataFrame(data[1:], columns=['门店名称', '人员编号', '更新时间'])
-            result_df = df[['门店名称', '人员编号']].copy()
-            
-            # 数据清理
-            result_df['门店名称'] = result_df['门店名称'].str.strip()
-            result_df['人员编号'] = result_df['人员编号'].str.strip()
-            
-            # 移除空行
-            result_df = result_df[
-                (result_df['门店名称'] != '') & 
-                (result_df['人员编号'] != '')
-            ]
-            
-            logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
-            return result_df
-            
-        except gspread.WorksheetNotFound:
-            logger.info("权限表不存在")
-            return None
-        except Exception as e:
-            error_msg = f"加载权限数据失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return None
-    
-    def load_reports_optimized(self) -> Dict[str, pd.DataFrame]:
-        """优化版报表数据加载 - 解压数据"""
-        try:
-            worksheet = self.get_or_create_worksheet(REPORTS_SHEET_NAME)
-            if not worksheet:
-                return {}
-            
-            data = self.api_call_with_delay(worksheet.get_all_values)
-            
-            if len(data) <= 1:
-                logger.info("报表数据为空")
-                return {}
-            
-            reports_dict = {}
-            fragments_dict = {}  # 存储分片数据
-            
-            for row in data[1:]:
-                if len(row) >= 6:
-                    store_name = row[0]
-                    compressed_data = row[1]
-                    original_rows = row[2]
-                    original_cols = row[3]
-                    compressed_size_info = row[4]
-                    update_time = row[5]
-                    
-                    # 跳过错误数据
-                    if store_name.endswith('_错误'):
-                        logger.warning(f"跳过错误数据: {store_name}")
-                        continue
-                    
-                    # 处理分片数据
-                    if '_片段' in store_name:
-                        base_name = store_name.split('_片段')[0]
-                        if base_name not in fragments_dict:
-                            fragments_dict[base_name] = []
-                        fragments_dict[base_name].append(compressed_data)
-                    else:
-                        # 单片数据
-                        fragments_dict[store_name] = [compressed_data]
-            
-            # 重构所有数据
-            for store_name, fragments in fragments_dict.items():
-                try:
-                    # 合并分片
-                    if len(fragments) == 1:
-                        full_data = fragments[0]
-                    else:
-                        full_data = ''.join(fragments)
-                        logger.info(f"{store_name} 合并了 {len(fragments)} 个分片")
-                    
-                    # 解压数据
-                    decompressed_data = self.decompress_data(full_data)
-                    
-                    if decompressed_data and 'data' in decompressed_data:
-                        # 重构DataFrame
-                        columns = decompressed_data.get('columns', [])
-                        data_values = decompressed_data.get('data', [])
-                        
-                        if columns and data_values:
-                            df = pd.DataFrame(data_values, columns=columns)
-                            reports_dict[store_name] = df
-                            logger.info(f"{store_name} 数据加载成功: {len(df)} 行")
-                        else:
-                            logger.warning(f"{store_name} 数据格式错误")
-                    else:
-                        logger.warning(f"{store_name} 解压数据失败")
-                        
-                except Exception as e:
-                    logger.error(f"加载 {store_name} 数据失败: {str(e)}")
-                    continue
-            
-            logger.info(f"报表数据加载成功: {len(reports_dict)} 个门店")
-            return reports_dict
-            
-        except gspread.WorksheetNotFound:
-            logger.info("报表数据表不存在")
-            return {}
-        except Exception as e:
-            error_msg = f"加载报表数据失败: {str(e)}"
-            self.show_status(error_msg, "error")
-            logger.error(error_msg)
-            return {}
+            logger.error(f"获取存储使用情况失败: {str(e)}")
+            return {'file_count': 0, 'total_size_mb': 0, 'files': []}
 
-def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """分析应收未收额数据"""
-    result = {}
+class SupabaseManager:
+    """Supabase数据库管理器"""
     
-    if len(df.columns) == 0 or len(df) == 0:
+    def __init__(self):
+        self.supabase: Optional[Client] = None
+        self.initialize_from_secrets()
+    
+    def initialize_from_secrets(self):
+        """从Streamlit Secrets初始化"""
+        try:
+            if "supabase" not in st.secrets:
+                raise Exception("未找到Supabase配置")
+            
+            config = st.secrets["supabase"]
+            url = config.get("url")
+            key = config.get("anon_key")
+            
+            if not url or not key:
+                raise Exception("Supabase配置不完整")
+            
+            self.supabase = create_client(url, key)
+            logger.info("Supabase客户端初始化成功")
+            
+        except Exception as e:
+            logger.error(f"Supabase初始化失败: {str(e)}")
+            raise
+    
+    def save_permissions(self, permissions_data: List[Dict]) -> bool:
+        """保存权限数据"""
+        try:
+            # 清空现有数据
+            self.supabase.table("permissions").delete().neq("id", 0).execute()
+            
+            # 插入新数据
+            if permissions_data:
+                result = self.supabase.table("permissions").insert(permissions_data).execute()
+                return len(result.data) > 0
+            return True
+            
+        except Exception as e:
+            logger.error(f"保存权限数据失败: {str(e)}")
+            return False
+    
+    def load_permissions(self) -> List[Dict]:
+        """加载权限数据"""
+        try:
+            result = self.supabase.table("permissions").select("*").execute()
+            return result.data
+            
+        except Exception as e:
+            logger.error(f"加载权限数据失败: {str(e)}")
+            return []
+    
+    def save_report_metadata(self, report_data: Dict) -> bool:
+        """保存报表元数据"""
+        try:
+            # 检查是否已存在
+            existing = self.supabase.table("reports").select("*").eq("store_name", report_data["store_name"]).execute()
+            
+            if existing.data:
+                # 更新现有记录
+                result = self.supabase.table("reports").update(report_data).eq("store_name", report_data["store_name"]).execute()
+            else:
+                # 插入新记录
+                result = self.supabase.table("reports").insert(report_data).execute()
+            
+            return len(result.data) > 0
+            
+        except Exception as e:
+            logger.error(f"保存报表元数据失败: {str(e)}")
+            return False
+    
+    def load_report_metadata(self, store_name: str = None) -> List[Dict]:
+        """加载报表元数据"""
+        try:
+            query = self.supabase.table("reports").select("*")
+            
+            if store_name:
+                query = query.eq("store_name", store_name)
+            
+            result = query.execute()
+            return result.data
+            
+        except Exception as e:
+            logger.error(f"加载报表元数据失败: {str(e)}")
+            return []
+    
+    def delete_report_metadata(self, report_id: int) -> bool:
+        """删除报表元数据"""
+        try:
+            result = self.supabase.table("reports").delete().eq("id", report_id).execute()
+            return len(result.data) > 0
+            
+        except Exception as e:
+            logger.error(f"删除报表元数据失败: {str(e)}")
+            return False
+
+class TencentSupabaseSystem:
+    """腾讯云+Supabase混合存储系统"""
+    
+    def __init__(self):
+        self.cos_manager = TencentCOSManager()
+        self.database = SupabaseManager()
+        self.initialized = True
+    
+    def show_architecture_info(self):
+        """显示架构信息"""
+        st.markdown('''
+        <div class="architecture-info">
+        <h4>🏗️ 腾讯云 + Supabase 混合架构</h4>
+        <p><strong>📦 腾讯云COS</strong>: 存储Excel文件 (50GB永久免费)</p>
+        <p><strong>🗄️ Supabase</strong>: 存储权限、元数据、分析结果 (500MB免费)</p>
+        <p><strong>💫 优势</strong>: 中国用户优化 + 大文件支持 + 快速查询 + 微信支付</p>
+        </div>
+        ''', unsafe_allow_html=True)
+    
+    def upload_and_process_permissions(self, uploaded_file) -> bool:
+        """上传并处理权限文件"""
+        try:
+            # 读取Excel文件
+            df = pd.read_excel(uploaded_file)
+            
+            if len(df.columns) < 2:
+                st.error("❌ 权限文件格式错误：需要至少两列（门店名称、人员编号）")
+                return False
+            
+            # 转换为数据库格式
+            permissions_data = []
+            for _, row in df.iterrows():
+                store_name = str(row.iloc[0]).strip()
+                user_id = str(row.iloc[1]).strip()
+                
+                if store_name and user_id and store_name != 'nan' and user_id != 'nan':
+                    permissions_data.append({
+                        "store_name": store_name,
+                        "user_id": user_id,
+                        "created_at": datetime.now().isoformat(),
+                        "updated_at": datetime.now().isoformat()
+                    })
+            
+            # 保存到数据库
+            success = self.database.save_permissions(permissions_data)
+            
+            if success:
+                st.success(f"✅ 权限数据保存成功：{len(permissions_data)} 条记录")
+                return True
+            else:
+                st.error("❌ 权限数据保存失败")
+                return False
+                
+        except Exception as e:
+            st.error(f"❌ 处理权限文件失败：{str(e)}")
+            logger.error(f"处理权限文件失败: {str(e)}")
+            return False
+    
+    def upload_and_process_reports(self, uploaded_file) -> bool:
+        """上传并处理报表文件"""
+        try:
+            file_size_mb = len(uploaded_file.getvalue()) / 1024 / 1024
+            st.info(f"📄 文件大小: {file_size_mb:.2f} MB")
+            
+            # 生成唯一文件名
+            timestamp = int(time.time())
+            file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()[:8]
+            filename = f"reports_{timestamp}_{file_hash}.xlsx"
+            
+            # 先清理旧数据
+            with st.spinner("正在清理旧数据..."):
+                self._cleanup_old_reports()
+            
+            # 上传原始文件到腾讯云COS
+            with st.spinner("正在上传文件到腾讯云COS..."):
+                file_url = self.cos_manager.upload_file(uploaded_file.getvalue(), filename)
+                
+                if not file_url:
+                    st.error("❌ 文件上传失败")
+                    return False
+            
+            st.success(f"✅ 文件上传成功: {filename}")
+            
+            # 解析Excel文件并提取元数据
+            with st.spinner("正在分析文件内容..."):
+                excel_file = pd.ExcelFile(uploaded_file)
+                
+                reports_processed = 0
+                
+                for sheet_name in excel_file.sheet_names:
+                    try:
+                        df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                        
+                        if df.empty:
+                            continue
+                        
+                        # 分析应收-未收额
+                        analysis_result = self.analyze_receivable_data(df)
+                        
+                        # 生成数据摘要
+                        summary = {
+                            "total_rows": len(df),
+                            "total_columns": len(df.columns),
+                            "columns": df.columns.tolist()[:10],  # 只保存前10列名
+                            "has_data": not df.empty
+                        }
+                        
+                        # 保存报表元数据到数据库
+                        report_metadata = {
+                            "store_name": sheet_name,
+                            "filename": filename,
+                            "file_url": file_url,
+                            "file_size_mb": file_size_mb,
+                            "upload_time": datetime.now().isoformat(),
+                            "summary": json.dumps(summary),
+                            "analysis_result": json.dumps(analysis_result),
+                            "row_count": len(df),
+                            "column_count": len(df.columns)
+                        }
+                        
+                        if self.database.save_report_metadata(report_metadata):
+                            reports_processed += 1
+                            st.success(f"✅ {sheet_name}: {len(df)} 行数据已处理")
+                        else:
+                            st.warning(f"⚠️ {sheet_name}: 元数据保存失败")
+                            
+                    except Exception as e:
+                        st.warning(f"⚠️ 跳过工作表 '{sheet_name}': {str(e)}")
+                        continue
+                
+                if reports_processed > 0:
+                    st.success(f"🎉 报表处理完成：{reports_processed} 个工作表")
+                    
+                    # 显示存储统计
+                    self._show_storage_stats()
+                    return True
+                else:
+                    st.error("❌ 没有成功处理任何工作表")
+                    return False
+                
+        except Exception as e:
+            st.error(f"❌ 处理报表文件失败：{str(e)}")
+            logger.error(f"处理报表文件失败: {str(e)}")
+            return False
+    
+    def _cleanup_old_reports(self):
+        """清理旧的报表数据"""
+        try:
+            # 获取所有报表元数据
+            all_reports = self.database.load_report_metadata()
+            
+            # 删除腾讯云COS中的旧文件
+            deleted_count = 0
+            for report in all_reports:
+                try:
+                    filename = report.get("filename")
+                    if filename and self.cos_manager.delete_file(filename):
+                        deleted_count += 1
+                except:
+                    continue
+            
+            # 清空数据库中的报表元数据
+            self.database.supabase.table("reports").delete().neq("id", 0).execute()
+            
+            if deleted_count > 0:
+                st.info(f"🧹 已清理 {deleted_count} 个旧文件")
+                
+        except Exception as e:
+            st.warning(f"清理旧数据时出错: {str(e)}")
+    
+    def _show_storage_stats(self):
+        """显示存储统计信息"""
+        try:
+            # 获取COS使用情况
+            cos_usage = self.cos_manager.get_storage_usage()
+            
+            # 获取数据库记录数
+            reports_count = len(self.database.load_report_metadata())
+            permissions_count = len(self.database.load_permissions())
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("📦 COS文件数", cos_usage['file_count'])
+                st.metric("💾 COS使用", f"{cos_usage['total_size_mb']:.2f} MB")
+                
+                # 使用率计算
+                usage_percent = (cos_usage['total_size_mb'] / (50 * 1024)) * 100
+                st.progress(min(usage_percent / 100, 1.0))
+                st.caption(f"使用率: {usage_percent:.1f}% / 50GB免费")
+            
+            with col2:
+                st.metric("🗄️ 报表记录", reports_count)
+                st.metric("👥 权限记录", permissions_count)
+            
+            with col3:
+                st.metric("📊 总门店数", reports_count)
+                st.metric("🚀 系统状态", "正常运行")
+                
+        except Exception as e:
+            st.warning(f"获取存储统计失败: {str(e)}")
+    
+    def analyze_receivable_data(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """分析应收未收额数据"""
+        result = {}
+        
+        if len(df.columns) == 0 or len(df) == 0:
+            return result
+        
+        # 查找第69行
+        target_row_index = 68  # 第69行
+        
+        if len(df) > target_row_index:
+            row = df.iloc[target_row_index]
+            first_col_value = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
+            
+            # 检查关键词
+            keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收未收']
+            
+            for keyword in keywords:
+                if keyword in first_col_value:
+                    # 查找数值
+                    for col_idx in range(len(row)-1, 0, -1):
+                        val = row.iloc[col_idx]
+                        if pd.notna(val) and str(val).strip() not in ['', 'None', 'nan']:
+                            cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
+                            
+                            if cleaned.startswith('(') and cleaned.endswith(')'):
+                                cleaned = '-' + cleaned[1:-1]
+                            
+                            try:
+                                amount = float(cleaned)
+                                if amount != 0:
+                                    result['应收-未收额'] = {
+                                        'amount': amount,
+                                        'column_name': str(df.columns[col_idx]),
+                                        'row_name': first_col_value,
+                                        'row_index': target_row_index,
+                                        'actual_row_number': target_row_index + 1
+                                    }
+                                    return result
+                            except ValueError:
+                                continue
+                    break
+        
         return result
     
-    # 查找第69行
-    target_row_index = 68  # 第69行
+    def load_store_data(self, store_name: str) -> Optional[pd.DataFrame]:
+        """加载指定门店的数据"""
+        try:
+            # 从数据库获取报表元数据
+            reports = self.database.load_report_metadata(store_name)
+            
+            if not reports:
+                return None
+            
+            # 获取最新的报表
+            latest_report = max(reports, key=lambda x: x.get('upload_time', ''))
+            filename = latest_report.get('filename')
+            
+            if not filename:
+                return None
+            
+            # 从腾讯云COS下载文件
+            with st.spinner(f"正在从腾讯云加载 {store_name} 的数据..."):
+                file_data = self.cos_manager.download_file(filename)
+                
+                if file_data:
+                    # 解析Excel文件
+                    excel_file = pd.ExcelFile(io.BytesIO(file_data))
+                    
+                    # 查找匹配的工作表
+                    matching_sheets = [sheet for sheet in excel_file.sheet_names 
+                                     if store_name in sheet or sheet in store_name]
+                    
+                    if matching_sheets:
+                        df = pd.read_excel(io.BytesIO(file_data), sheet_name=matching_sheets[0])
+                        return df
+                    
+            return None
+            
+        except Exception as e:
+            st.error(f"❌ 加载 {store_name} 数据失败：{str(e)}")
+            logger.error(f"加载门店数据失败: {str(e)}")
+            return None
     
-    if len(df) > target_row_index:
-        row = df.iloc[target_row_index]
-        first_col_value = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
-        
-        # 检查关键词
-        keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收未收']
-        
-        for keyword in keywords:
-            if keyword in first_col_value:
-                # 查找数值
-                for col_idx in range(len(row)-1, 0, -1):
-                    val = row.iloc[col_idx]
-                    if pd.notna(val) and str(val).strip() not in ['', 'None', 'nan']:
-                        cleaned = str(val).replace(',', '').replace('¥', '').replace('￥', '').strip()
-                        
-                        if cleaned.startswith('(') and cleaned.endswith(')'):
-                            cleaned = '-' + cleaned[1:-1]
-                        
-                        try:
-                            amount = float(cleaned)
-                            if amount != 0:
-                                result['应收-未收额'] = {
-                                    'amount': amount,
-                                    'column_name': str(df.columns[col_idx]),
-                                    'row_name': first_col_value,
-                                    'row_index': target_row_index,
-                                    'actual_row_number': target_row_index + 1
-                                }
-                                return result
-                        except ValueError:
-                            continue
-                break
+    def verify_user_permission(self, store_name: str, user_id: str) -> bool:
+        """验证用户权限"""
+        try:
+            permissions = self.database.load_permissions()
+            
+            for perm in permissions:
+                stored_store = perm.get('store_name', '').strip()
+                stored_id = perm.get('user_id', '').strip()
+                
+                if (store_name in stored_store or stored_store in store_name) and stored_id == str(user_id):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            st.error(f"❌ 权限验证失败：{str(e)}")
+            logger.error(f"权限验证失败: {str(e)}")
+            return False
     
-    return result
-
-def verify_user_permission(store_name: str, user_id: str, permissions_data: Optional[pd.DataFrame]) -> bool:
-    """验证用户权限"""
-    if permissions_data is None or len(permissions_data.columns) < 2:
-        return False
+    def get_available_stores(self) -> List[str]:
+        """获取可用的门店列表"""
+        try:
+            permissions = self.database.load_permissions()
+            stores = list(set(perm.get('store_name', '') for perm in permissions))
+            return sorted([store for store in stores if store.strip()])
+            
+        except Exception as e:
+            st.error(f"❌ 获取门店列表失败：{str(e)}")
+            logger.error(f"获取门店列表失败: {str(e)}")
+            return []
     
-    store_col = permissions_data.columns[0]
-    id_col = permissions_data.columns[1]
-    
-    for _, row in permissions_data.iterrows():
-        stored_store = str(row[store_col]).strip()
-        stored_id = str(row[id_col]).strip()
-        
-        if (store_name in stored_store or stored_store in store_name) and stored_id == str(user_id):
-            return True
-    
-    return False
-
-def find_matching_reports(store_name: str, reports_data: Dict[str, pd.DataFrame]) -> List[str]:
-    """查找匹配的报表"""
-    matching = []
-    for sheet_name in reports_data.keys():
-        if store_name in sheet_name or sheet_name in store_name:
-            matching.append(sheet_name)
-    return matching
+    def cleanup_storage(self, cleanup_type: str = "all"):
+        """清理存储空间"""
+        try:
+            if cleanup_type == "all":
+                # 清理所有数据
+                cos_files = self.cos_manager.list_files()
+                deleted_cos = 0
+                
+                for file_info in cos_files:
+                    if self.cos_manager.delete_file(file_info['filename']):
+                        deleted_cos += 1
+                
+                # 清理数据库
+                self.database.supabase.table("reports").delete().neq("id", 0).execute()
+                self.database.supabase.table("permissions").delete().neq("id", 0).execute()
+                
+                st.success(f"🧹 清理完成：删除了 {deleted_cos} 个COS文件和所有数据库记录")
+                
+        except Exception as e:
+            st.error(f"❌ 清理失败：{str(e)}")
+            logger.error(f"存储清理失败: {str(e)}")
 
 # 初始化会话状态
 if 'logged_in' not in st.session_state:
@@ -729,17 +673,25 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = ""
 if 'is_admin' not in st.session_state:
     st.session_state.is_admin = False
-if 'sheets_manager' not in st.session_state:
-    st.session_state.sheets_manager = None
+if 'storage_system' not in st.session_state:
+    st.session_state.storage_system = None
 
 # 主标题
-st.markdown('<h1 class="main-header">📊 门店报表查询系统 (优化版)</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">📊 门店报表查询系统 (腾讯云版)</h1>', unsafe_allow_html=True)
 
-# 初始化 Google Sheets 管理器
-if not st.session_state.sheets_manager:
-    st.session_state.sheets_manager = OptimizedGoogleSheetsManager()
+# 初始化存储系统
+if not st.session_state.storage_system:
+    try:
+        st.session_state.storage_system = TencentSupabaseSystem()
+        st.success("✅ 腾讯云+Supabase存储系统初始化成功")
+    except Exception as e:
+        st.error(f"❌ 存储系统初始化失败: {str(e)}")
+        st.stop()
 
-sheets_manager = st.session_state.sheets_manager
+storage_system = st.session_state.storage_system
+
+# 显示架构信息
+storage_system.show_architecture_info()
 
 # 侧边栏
 with st.sidebar:
@@ -776,133 +728,73 @@ with st.sidebar:
 if user_type == "管理员" and st.session_state.is_admin:
     st.markdown('''
     <div class="admin-panel">
-    <h3>👨‍💼 管理员控制面板 (优化版)</h3>
-    <p>✨ 新功能：自动清理旧数据、压缩存储、API限流优化</p>
+    <h3>👨‍💼 管理员控制面板 (腾讯云版)</h3>
+    <p>✨ 架构：腾讯云COS(50GB免费) + Supabase(500MB免费) = 高性能 + 中国优化</p>
     </div>
     ''', unsafe_allow_html=True)
     
-    # 初始化客户端
-    if not sheets_manager.client:
-        if st.button("🔌 初始化连接"):
-            sheets_manager.create_client()
+    # 存储管理区域
+    st.subheader("📊 存储管理")
+    storage_system._show_storage_stats()
     
-    if sheets_manager.client:
+    st.divider()
+    
+    # 文件上传区域
+    st.subheader("📁 文件管理")
+    
+    tab1, tab2, tab3 = st.tabs(["📋 权限表", "📊 报表数据", "🧹 存储清理"])
+    
+    with tab1:
+        st.markdown("#### 上传门店权限表")
+        st.info("💡 Excel文件格式：第一列为门店名称，第二列为人员编号")
         
-        # 存储管理区域
-        st.subheader("🧹 存储空间管理")
+        permissions_file = st.file_uploader("选择权限Excel文件", type=['xlsx', 'xls'], key="permissions")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🧹 清理旧数据", help="删除所有旧文件，释放存储空间"):
-                with st.spinner("正在清理旧数据..."):
-                    sheets_manager.cleanup_old_files()
-        
-        with col2:
-            storage_info = f"""
-            💾 **存储优化功能**
-            - 自动压缩：减少70-90%存储空间
-            - 智能清理：删除旧文件释放空间  
-            - API限流：避免配额超限
-            - 分片存储：处理大文件
-            """
-            st.info(storage_info)
-        
-        st.divider()
-        
-        # 文件上传区域
-        st.subheader("📁 文件管理")
+        if permissions_file and st.button("📤 上传权限表", key="upload_permissions"):
+            if storage_system.upload_and_process_permissions(permissions_file):
+                st.balloons()
+    
+    with tab2:
+        st.markdown("#### 上传财务报表")
         
         st.markdown('''
-        <div class="storage-warning">
-        <strong>⚠️ 上传提示</strong><br>
-        每次上传新文件前，系统会自动清理旧数据以释放存储空间。
-        只保留最新上传的数据，确保不会超出存储配额。
+        <div class="success-box">
+        <strong>🚀 腾讯云COS优势</strong><br>
+        • 50GB永久免费存储<br>
+        • 支持任意大小Excel文件<br>
+        • 中国地区访问速度快<br>
+        • 微信支付便捷管理
         </div>
         ''', unsafe_allow_html=True)
         
-        # 上传权限表
-        st.markdown("#### 📋 门店权限表")
-        permissions_file = st.file_uploader("上传门店权限表", type=['xlsx', 'xls'], key="permissions")
-        if permissions_file and st.button("保存权限表", key="save_permissions"):
-            try:
-                with st.spinner("处理权限表文件..."):
-                    df = pd.read_excel(permissions_file)
-                    if len(df.columns) >= 2:
-                        with st.spinner("保存到云端（自动清理+压缩）..."):
-                            # 确保获取表格
-                            sheets_manager.get_or_create_spreadsheet()
-                            if sheets_manager.save_permissions_optimized(df):
-                                st.balloons()
-                    else:
-                        st.error("❌ 格式错误：需要至少两列（门店名称、人员编号）")
-            except Exception as e:
-                st.error(f"❌ 处理失败：{str(e)}")
-        
-        st.divider()
-        
-        # 上传财务报表
-        st.markdown("#### 📊 财务报表")
-        reports_file = st.file_uploader("上传财务报表", type=['xlsx', 'xls'], key="reports")
+        reports_file = st.file_uploader("选择报表Excel文件", type=['xlsx', 'xls'], key="reports")
         
         if reports_file:
-            # 显示文件信息
-            file_size = len(reports_file.getvalue()) / 1024 / 1024  # MB
-            st.info(f"📄 文件大小: {file_size:.2f} MB")
+            file_size = len(reports_file.getvalue()) / 1024 / 1024
+            st.metric("文件大小", f"{file_size:.2f} MB")
             
-            if file_size > 10:
-                st.warning("⚠️ 文件较大，将启用高级压缩和分片存储")
+            if file_size > 100:
+                st.markdown('''
+                <div class="warning-box">
+                <strong>⚠️ 大文件提醒</strong><br>
+                文件较大，上传可能需要较长时间，请耐心等待。<br>
+                腾讯云COS支持大文件上传，无需担心大小限制。
+                </div>
+                ''', unsafe_allow_html=True)
         
-        if reports_file and st.button("保存报表数据", key="save_reports"):
-            try:
-                with st.spinner("处理报表文件..."):
-                    excel_file = pd.ExcelFile(reports_file)
-                    reports_dict = {}
-                    
-                    total_size = 0
-                    for sheet in excel_file.sheet_names:
-                        try:
-                            df = pd.read_excel(reports_file, sheet_name=sheet)
-                            if not df.empty:
-                                reports_dict[sheet] = df
-                                sheet_size = df.memory_usage(deep=True).sum() / 1024 / 1024
-                                total_size += sheet_size
-                                st.success(f"✅ 读取工作表 '{sheet}': {len(df)} 行, {sheet_size:.2f} MB")
-                        except Exception as e:
-                            st.warning(f"⚠️ 跳过工作表 '{sheet}': {str(e)}")
-                            continue
-                    
-                    if reports_dict:
-                        st.info(f"📊 总数据大小: {total_size:.2f} MB，准备压缩存储...")
-                        
-                        with st.spinner("清理旧数据并保存新数据（压缩中）..."):
-                            # 先清理旧数据
-                            sheets_manager.cleanup_old_files()
-                            time.sleep(2)  # 等待清理完成
-                            
-                            # 确保获取表格
-                            sheets_manager.get_or_create_spreadsheet()
-                            
-                            # 保存新数据
-                            if sheets_manager.save_reports_optimized(reports_dict):
-                                st.balloons()
-                            else:
-                                st.error("❌ 保存失败")
-                    else:
-                        st.error("❌ 文件中没有有效的工作表")
-                        
-            except Exception as e:
-                st.error(f"❌ 处理失败：{str(e)}")
-                
-                # 如果是存储配额问题，提供解决方案
-                if "storage" in str(e).lower() or "quota" in str(e).lower():
-                    st.markdown('''
-                    <div class="storage-warning">
-                    <strong>💡 存储配额解决方案</strong><br>
-                    1. 点击"清理旧数据"按钮释放空间<br>
-                    2. 或考虑启用Google Cloud计费（成本很低）<br>
-                    3. 或创建新的Google Cloud项目
-                    </div>
-                    ''', unsafe_allow_html=True)
+        if reports_file and st.button("📤 上传报表数据", key="upload_reports"):
+            if storage_system.upload_and_process_reports(reports_file):
+                st.balloons()
+    
+    with tab3:
+        st.markdown("#### 存储空间清理")
+        
+        st.warning("⚠️ 清理操作将删除所有存储的数据，请谨慎操作！")
+        
+        if st.checkbox("我确认要清理所有数据"):
+            if st.button("🗑️ 清理所有存储数据", type="primary"):
+                storage_system.cleanup_storage("all")
+                st.rerun()
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     st.info("👈 请在左侧边栏输入管理员密码")
@@ -911,118 +803,99 @@ else:
     if not st.session_state.logged_in:
         st.subheader("🔐 用户登录")
         
-        # 初始化客户端
-        if not sheets_manager.client:
-            if sheets_manager.create_client():
-                pass
-        
-        if sheets_manager.client:
-            try:
-                with st.spinner("加载权限数据..."):
-                    sheets_manager.get_or_create_spreadsheet()
-                    permissions_data = sheets_manager.load_permissions_optimized()
-                
-                if permissions_data is None:
-                    st.warning("⚠️ 系统维护中，请联系管理员")
-                else:
-                    stores = sorted(permissions_data[permissions_data.columns[0]].unique().tolist())
+        try:
+            stores = storage_system.get_available_stores()
+            
+            if not stores:
+                st.warning("⚠️ 系统维护中，请联系管理员上传权限表")
+            else:
+                with st.form("login_form"):
+                    selected_store = st.selectbox("选择门店", stores)
+                    user_id = st.text_input("人员编号")
+                    submit = st.form_submit_button("🚀 登录")
                     
-                    with st.form("login_form"):
-                        selected_store = st.selectbox("选择门店", stores)
-                        user_id = st.text_input("人员编号")
-                        submit = st.form_submit_button("🚀 登录")
-                        
-                        if submit and selected_store and user_id:
-                            if verify_user_permission(selected_store, user_id, permissions_data):
-                                st.session_state.logged_in = True
-                                st.session_state.store_name = selected_store
-                                st.session_state.user_id = user_id
-                                st.success("✅ 登录成功！")
-                                st.balloons()
-                                st.rerun()
-                            else:
-                                st.error("❌ 门店或编号错误！")
-                                
-            except Exception as e:
-                st.error(f"❌ 权限验证失败：{str(e)}")
-        else:
-            st.error("❌ 系统连接失败，请联系管理员")
+                    if submit and selected_store and user_id:
+                        if storage_system.verify_user_permission(selected_store, user_id):
+                            st.session_state.logged_in = True
+                            st.session_state.store_name = selected_store
+                            st.session_state.user_id = user_id
+                            st.success("✅ 登录成功！")
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.error("❌ 门店或编号错误！")
+                            
+        except Exception as e:
+            st.error(f"❌ 系统连接失败：{str(e)}")
     
     else:
         # 已登录用户界面
         st.markdown(f'<div class="store-info"><h3>🏪 {st.session_state.store_name}</h3><p>操作员：{st.session_state.user_id}</p></div>', unsafe_allow_html=True)
         
-        if not sheets_manager.client:
-            sheets_manager.create_client()
-        
-        if sheets_manager.client:
-            try:
-                with st.spinner("加载报表数据..."):
-                    sheets_manager.get_or_create_spreadsheet()
-                    reports_data = sheets_manager.load_reports_optimized()
-                    matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
+        try:
+            df = storage_system.load_store_data(st.session_state.store_name)
+            
+            if df is not None:
+                # 应收-未收额分析
+                st.subheader("💰 应收-未收额")
                 
-                if matching_sheets:
-                    if len(matching_sheets) > 1:
-                        selected_sheet = st.selectbox("选择报表", matching_sheets)
-                    else:
-                        selected_sheet = matching_sheets[0]
-                    
-                    df = reports_data[selected_sheet]
-                    
-                    # 应收-未收额分析
-                    st.subheader("💰 应收-未收额")
-                    
-                    analysis_results = analyze_receivable_data(df)
-                    
-                    if '应收-未收额' in analysis_results:
-                        data = analysis_results['应收-未收额']
-                        amount = data['amount']
-                        
-                        if amount > 0:
-                            st.error(f"💳 应付款：¥{amount:,.2f}")
-                        elif amount < 0:
-                            st.success(f"💚 应退款：¥{abs(amount):,.2f}")
-                        else:
-                            st.info("⚖️ 收支平衡：¥0.00")
-                    else:
-                        st.warning("⚠️ 未找到应收-未收额数据")
-                    
-                    # 报表展示
-                    st.subheader("📋 报表数据")
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # 下载功能
-                    if st.button("📥 下载报表"):
-                        try:
-                            buffer = io.BytesIO()
-                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                df.to_excel(writer, index=False)
-                            
-                            st.download_button(
-                                "点击下载",
-                                buffer.getvalue(),
-                                f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        except Exception as e:
-                            st.error(f"下载失败：{str(e)}")
+                analysis_results = storage_system.analyze_receivable_data(df)
                 
+                if '应收-未收额' in analysis_results:
+                    data = analysis_results['应收-未收额']
+                    amount = data['amount']
+                    
+                    if amount > 0:
+                        st.error(f"💳 应付款：¥{amount:,.2f}")
+                    elif amount < 0:
+                        st.success(f"💚 应退款：¥{abs(amount):,.2f}")
+                    else:
+                        st.info("⚖️ 收支平衡：¥0.00")
+                    
+                    # 显示详细信息
+                    with st.expander("📊 详细信息"):
+                        st.write(f"**所在行**: 第{data['actual_row_number']}行")
+                        st.write(f"**所在列**: {data['column_name']}")
+                        st.write(f"**行标题**: {data['row_name']}")
                 else:
-                    st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
-                    
-            except Exception as e:
-                st.error(f"❌ 报表加载失败：{str(e)}")
-        else:
-            st.error("❌ 系统连接失败")
+                    st.warning("⚠️ 未找到应收-未收额数据")
+                
+                # 报表展示
+                st.subheader("📋 报表数据")
+                st.dataframe(df, use_container_width=True, height=400)
+                
+                # 下载功能
+                if st.button("📥 下载完整报表"):
+                    try:
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False, sheet_name=st.session_state.store_name)
+                        
+                        st.download_button(
+                            "点击下载",
+                            buffer.getvalue(),
+                            f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"下载失败：{str(e)}")
+            
+            else:
+                st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
+                st.info("请联系管理员上传最新的报表数据")
+                
+        except Exception as e:
+            st.error(f"❌ 数据加载失败：{str(e)}")
 
 # 页面底部
 st.divider()
-col1, col2, col3 = st.columns(3)
+
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.caption(f"🕒 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 with col2:
-    compression_status = "🗜️ 启用" if COMPRESSION_ENABLED else "❌ 禁用"
-    st.caption(f"压缩存储: {compression_status}")
+    st.caption("🏢 腾讯云COS存储")
 with col3:
-    st.caption("🔧 版本: v3.0 (优化版)")
+    st.caption("🗄️ Supabase数据库")
+with col4:
+    st.caption("🔧 v5.0 (腾讯云版)")
