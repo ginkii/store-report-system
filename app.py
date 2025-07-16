@@ -36,7 +36,7 @@ CACHE_DURATION = 300  # 缓存5分钟
 
 # *** 新增配置：你个人 Google Drive 中目标 Google Sheets 表格的完整 URL ***
 # 请确保这是你已经创建并共享给服务账户（编辑者权限）的 Google Sheets 表格的完整 URL。
-TARGET_SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZyNSxyWDp_Y/edit?gid=0#gid=0' # <--- 现在直接使用你提供的URL，没有多余检查了！
+TARGET_SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1Ly2QCB3zAhQ7o_8h2Aj-lbSLL8YdPI2UZjNSxyWDp_Y/edit?gid=0#gid=0' # <--- 现在直接使用你提供的URL，没有多余检查了！
 
 # Google Drive API 权限范围，允许读写 Drive 文件
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
