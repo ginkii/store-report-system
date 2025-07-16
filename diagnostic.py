@@ -9,18 +9,13 @@ import logging
 from typing import Optional, Dict, Any, List
 import traceback
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-class GoogleSheetsErrorTracker:
-    """Google Sheets API 错误追踪工具"""
+class Enhanced403DiagnosticTool:
+    """增强版403错误诊断工具 - 深度分析"""
     
     def __init__(self):
         self.client = None
         self.test_results = []
-        self.error_details = []
-        self.permissions_tested = []
+        self.service_account_info = {}
     
     def log_test_result(self, test_name: str, success: bool, details: str, error_info: str = None):
         """记录测试结果"""
@@ -32,13 +27,6 @@ class GoogleSheetsErrorTracker:
             'error_info': error_info
         }
         self.test_results.append(result)
-        
-        if not success and error_info:
-            self.error_details.append({
-                'test_name': test_name,
-                'error_info': error_info,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            })
     
     def display_progress(self, message: str, status: str = "info"):
         """显示测试进度"""
@@ -51,397 +39,395 @@ class GoogleSheetsErrorTracker:
         else:
             st.info(f"🔍 {message}")
     
-    def test_1_basic_authentication(self):
-        """测试1: 基础认证"""
-        st.subheader("🔐 测试1: 基础认证")
+    def verify_service_account_identity(self):
+        """验证服务账户身份信息"""
+        st.subheader("🔐 服务账户身份验证")
         
         try:
-            # 检查配置
             if "google_sheets" not in st.secrets:
-                self.log_test_result("基础认证", False, "未找到 google_sheets 配置", "Missing secrets configuration")
                 self.display_progress("未找到 google_sheets 配置", "error")
                 return False
             
             config = st.secrets["google_sheets"]
             
-            # 验证必要字段
-            required_fields = ["type", "project_id", "private_key", "client_email", "client_id"]
-            missing_fields = [field for field in required_fields if field not in config]
+            # 显示当前服务账户信息
+            st.markdown("### 📋 当前服务账户信息")
             
-            if missing_fields:
-                error_msg = f"缺少必要字段: {', '.join(missing_fields)}"
-                self.log_test_result("基础认证", False, error_msg, error_msg)
-                self.display_progress(error_msg, "error")
-                return False
+            client_email = config.get('client_email', '未知')
+            project_id = config.get('project_id', '未知')
+            client_id = config.get('client_id', '未知')
+            private_key_id = config.get('private_key_id', '未知')
             
-            # 显示配置信息
-            self.display_progress(f"项目ID: {config.get('project_id')}", "info")
-            self.display_progress(f"服务账户: {config.get('client_email')}", "info")
+            self.service_account_info = {
+                'client_email': client_email,
+                'project_id': project_id,
+                'client_id': client_id,
+                'private_key_id': private_key_id[:10] + '...' if private_key_id != '未知' else '未知'
+            }
             
-            # 创建认证
-            scopes = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/drive.file"
+            # 创建信息表格
+            info_data = [
+                ['项目ID', project_id],
+                ['服务账户邮箱', client_email],
+                ['客户端ID', client_id],
+                ['私钥ID', private_key_id[:10] + '...' if private_key_id != '未知' else '未知']
             ]
             
-            credentials = Credentials.from_service_account_info(config, scopes=scopes)
-            self.client = gspread.authorize(credentials)
+            df = pd.DataFrame(info_data, columns=['配置项', '值'])
+            st.dataframe(df, use_container_width=True)
             
-            self.log_test_result("基础认证", True, "认证成功", None)
-            self.display_progress("基础认证成功", "success")
+            # 检查是否是新账户
+            if 'v2' in client_email or 'new' in client_email:
+                st.success("✅ 检测到这可能是新创建的服务账户")
+            else:
+                st.warning("⚠️ 这可能仍是旧的服务账户")
+            
+            self.log_test_result("服务账户验证", True, f"当前使用账户: {client_email}", None)
             return True
             
         except Exception as e:
-            error_msg = f"认证失败: {str(e)}"
-            self.log_test_result("基础认证", False, error_msg, traceback.format_exc())
+            error_msg = f"服务账户验证失败: {str(e)}"
+            self.log_test_result("服务账户验证", False, error_msg, traceback.format_exc())
             self.display_progress(error_msg, "error")
             return False
     
-    def test_2_drive_permissions(self):
-        """测试2: Google Drive 权限"""
-        st.subheader("🗂️ 测试2: Google Drive 权限")
+    def test_authentication_detailed(self):
+        """详细的认证测试"""
+        st.subheader("🔐 详细认证测试")
         
-        if not self.client:
-            self.display_progress("需要先通过基础认证", "error")
-            return False
-        
-        # 测试2.1: 创建文件权限
         try:
-            self.display_progress("测试创建文件权限...", "info")
+            config = st.secrets["google_sheets"]
             
-            # 尝试创建一个简单的文件
-            test_sheet = self.client.create("ErrorTracker_测试文件_请删除")
-            sheet_id = test_sheet.id
+            # 测试不同的认证范围
+            scope_tests = [
+                {
+                    'name': '基础Sheets权限',
+                    'scopes': ["https://www.googleapis.com/auth/spreadsheets"]
+                },
+                {
+                    'name': '基础Drive权限', 
+                    'scopes': ["https://www.googleapis.com/auth/drive"]
+                },
+                {
+                    'name': '完整权限组合',
+                    'scopes': [
+                        "https://www.googleapis.com/auth/spreadsheets",
+                        "https://www.googleapis.com/auth/drive",
+                        "https://www.googleapis.com/auth/drive.file"
+                    ]
+                }
+            ]
             
-            self.log_test_result("创建文件权限", True, f"成功创建文件: {sheet_id}", None)
-            self.display_progress(f"文件创建成功: {sheet_id}", "success")
+            for scope_test in scope_tests:
+                try:
+                    self.display_progress(f"测试 {scope_test['name']}...", "info")
+                    
+                    credentials = Credentials.from_service_account_info(config, scopes=scope_test['scopes'])
+                    client = gspread.authorize(credentials)
+                    
+                    self.log_test_result(f"认证-{scope_test['name']}", True, "认证成功", None)
+                    self.display_progress(f"{scope_test['name']} 认证成功", "success")
+                    
+                    # 保存最完整的客户端
+                    if scope_test['name'] == '完整权限组合':
+                        self.client = client
+                    
+                except Exception as e:
+                    error_msg = f"{scope_test['name']} 认证失败: {str(e)}"
+                    self.log_test_result(f"认证-{scope_test['name']}", False, error_msg, traceback.format_exc())
+                    self.display_progress(error_msg, "error")
             
-            # 测试2.2: 文件访问权限
-            try:
-                self.display_progress("测试文件访问权限...", "info")
-                
-                # 尝试访问文件
-                worksheet = test_sheet.sheet1
-                worksheet.update('A1', [['测试', '数据', datetime.now().strftime('%Y-%m-%d %H:%M:%S')]])
-                
-                self.log_test_result("文件访问权限", True, "成功写入数据", None)
-                self.display_progress("文件访问成功", "success")
-                
-            except Exception as e:
-                error_msg = f"文件访问失败: {str(e)}"
-                self.log_test_result("文件访问权限", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
-            
-            # 测试2.3: 文件共享权限
-            try:
-                self.display_progress("测试文件共享权限...", "info")
-                
-                # 尝试设置文件权限（这是常见的403错误来源）
-                test_sheet.share('', perm_type='anyone', role='reader')
-                
-                self.log_test_result("文件共享权限", True, "成功设置共享权限", None)
-                self.display_progress("文件共享成功", "success")
-                
-            except Exception as e:
-                error_msg = f"文件共享失败: {str(e)}"
-                self.log_test_result("文件共享权限", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "warning")
-                # 共享权限失败不一定是致命错误
-            
-            # 测试2.4: 文件删除权限
-            try:
-                self.display_progress("测试文件删除权限...", "info")
-                
-                # 尝试删除文件
-                self.client.del_spreadsheet(sheet_id)
-                
-                self.log_test_result("文件删除权限", True, "成功删除文件", None)
-                self.display_progress("文件删除成功", "success")
-                
-            except Exception as e:
-                error_msg = f"文件删除失败: {str(e)}"
-                self.log_test_result("文件删除权限", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
-            
-            return True
+            return self.client is not None
             
         except Exception as e:
-            error_msg = f"创建文件失败: {str(e)}"
-            self.log_test_result("创建文件权限", False, error_msg, traceback.format_exc())
+            error_msg = f"认证测试失败: {str(e)}"
+            self.log_test_result("详细认证测试", False, error_msg, traceback.format_exc())
             self.display_progress(error_msg, "error")
-            
-            # 分析具体的403错误
-            if "403" in str(e):
-                self.analyze_403_error(str(e), "Drive API - 创建文件")
-            
             return False
     
-    def test_3_sheets_permissions(self):
-        """测试3: Google Sheets 权限"""
-        st.subheader("📊 测试3: Google Sheets 权限")
+    def test_api_quotas(self):
+        """测试API配额限制"""
+        st.subheader("📊 API配额测试")
         
         if not self.client:
-            self.display_progress("需要先通过基础认证", "error")
+            self.display_progress("需要先通过认证", "error")
             return False
         
         try:
-            # 创建测试表格
-            self.display_progress("创建测试表格...", "info")
-            test_sheet = self.client.create("ErrorTracker_Sheets测试_请删除")
+            # 测试1: 快速连续请求（测试每分钟限制）
+            self.display_progress("测试每分钟请求限制...", "info")
             
-            # 测试3.1: 基本读写权限
-            try:
-                self.display_progress("测试基本读写权限...", "info")
-                
-                worksheet = test_sheet.sheet1
-                
-                # 写入数据
-                test_data = [
-                    ['测试列1', '测试列2', '测试列3'],
-                    ['数据1', '数据2', '数据3'],
-                    ['时间', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '测试完成']
-                ]
-                worksheet.update('A1', test_data)
-                
-                # 读取数据
-                read_data = worksheet.get_all_values()
-                
-                self.log_test_result("Sheets读写权限", True, f"成功读写数据: {len(read_data)} 行", None)
-                self.display_progress(f"读写测试成功: {len(read_data)} 行数据", "success")
-                
-            except Exception as e:
-                error_msg = f"Sheets读写失败: {str(e)}"
-                self.log_test_result("Sheets读写权限", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
+            start_time = time.time()
+            success_count = 0
+            error_count = 0
             
-            # 测试3.2: 批量操作权限
-            try:
-                self.display_progress("测试批量操作权限...", "info")
-                
-                # 创建大量数据
-                batch_data = []
-                for i in range(100):
-                    batch_data.append([f'行{i+1}', f'数据{i+1}', f'时间{i+1}'])
-                
-                worksheet.update('A5', batch_data)
-                
-                self.log_test_result("Sheets批量操作", True, f"成功批量写入 {len(batch_data)} 行", None)
-                self.display_progress(f"批量操作成功: {len(batch_data)} 行", "success")
-                
-            except Exception as e:
-                error_msg = f"批量操作失败: {str(e)}"
-                self.log_test_result("Sheets批量操作", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
+            for i in range(10):  # 尝试10次快速请求
+                try:
+                    # 尝试创建和立即删除文件
+                    test_sheet = self.client.create(f"配额测试_{i}_{int(time.time())}")
+                    self.client.del_spreadsheet(test_sheet.id)
+                    success_count += 1
+                    time.sleep(0.1)  # 短暂延迟
+                    
+                except Exception as e:
+                    error_count += 1
+                    if "quota" in str(e).lower() or "limit" in str(e).lower():
+                        self.display_progress(f"检测到配额限制: {str(e)}", "warning")
+                        break
+                    elif "403" in str(e):
+                        self.display_progress(f"403错误 (第{i+1}次): {str(e)}", "error")
+                        # 分析这个403错误
+                        self.analyze_specific_403_error(str(e), f"配额测试第{i+1}次")
+                        break
             
-            # 测试3.3: 工作表管理权限
-            try:
-                self.display_progress("测试工作表管理权限...", "info")
-                
-                # 添加新工作表
-                new_worksheet = test_sheet.add_worksheet(title="测试工作表2", rows=100, cols=10)
-                
-                # 删除工作表
-                test_sheet.del_worksheet(new_worksheet)
-                
-                self.log_test_result("工作表管理权限", True, "成功创建和删除工作表", None)
-                self.display_progress("工作表管理成功", "success")
-                
-            except Exception as e:
-                error_msg = f"工作表管理失败: {str(e)}"
-                self.log_test_result("工作表管理权限", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
+            end_time = time.time()
+            duration = end_time - start_time
             
-            # 清理测试文件
-            try:
-                self.client.del_spreadsheet(test_sheet.id)
-                self.display_progress("测试文件已清理", "success")
-            except Exception as e:
-                self.display_progress(f"清理测试文件失败: {str(e)}", "warning")
+            result_msg = f"完成 {success_count} 次成功请求，{error_count} 次失败，耗时 {duration:.2f} 秒"
             
-            return True
+            if error_count == 0:
+                self.log_test_result("API配额测试", True, result_msg, None)
+                self.display_progress("API配额测试通过", "success")
+            else:
+                self.log_test_result("API配额测试", False, result_msg, f"失败次数: {error_count}")
+                self.display_progress(f"API配额可能有限制: {result_msg}", "warning")
+            
+            return error_count == 0
             
         except Exception as e:
-            error_msg = f"Sheets权限测试失败: {str(e)}"
-            self.log_test_result("Sheets权限测试", False, error_msg, traceback.format_exc())
+            error_msg = f"API配额测试失败: {str(e)}"
+            self.log_test_result("API配额测试", False, error_msg, traceback.format_exc())
             self.display_progress(error_msg, "error")
-            
-            # 分析具体的403错误
-            if "403" in str(e):
-                self.analyze_403_error(str(e), "Sheets API")
-            
             return False
     
-    def test_4_simulate_app_operations(self):
-        """测试4: 模拟应用实际操作"""
-        st.subheader("🔄 测试4: 模拟应用实际操作")
+    def test_project_billing_status(self):
+        """测试项目计费状态"""
+        st.subheader("💳 项目计费状态检查")
         
-        if not self.client:
-            self.display_progress("需要先通过基础认证", "error")
-            return False
-        
+        # 这是一个间接测试，通过尝试特定操作来判断计费状态
         try:
-            # 模拟创建主数据表格
-            self.display_progress("模拟创建主数据表格...", "info")
-            main_sheet = self.client.create("门店报表系统数据_测试")
+            self.display_progress("检查项目计费状态...", "info")
             
-            # 模拟创建权限表
-            try:
-                self.display_progress("模拟创建权限表...", "info")
-                
-                permissions_ws = main_sheet.add_worksheet(title="store_permissions", rows=1000, cols=20)
-                
-                # 模拟权限数据
-                permissions_data = [
-                    ['门店名称', '人员编号', '更新时间'],
-                    ['测试门店1', '001', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
-                    ['测试门店2', '002', datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-                ]
-                permissions_ws.update('A1', permissions_data)
-                
-                self.log_test_result("权限表创建", True, "成功创建权限表", None)
-                self.display_progress("权限表创建成功", "success")
-                
-            except Exception as e:
-                error_msg = f"权限表创建失败: {str(e)}"
-                self.log_test_result("权限表创建", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
+            # 某些操作可能需要启用计费
+            test_operations = [
+                {
+                    'name': '创建文件',
+                    'action': lambda: self.client.create(f"计费测试_{int(time.time())}")
+                },
+            ]
             
-            # 模拟创建报表数据表
-            try:
-                self.display_progress("模拟创建报表数据表...", "info")
-                
-                reports_ws = main_sheet.add_worksheet(title="store_reports", rows=2000, cols=10)
-                
-                # 模拟报表数据
-                reports_data = [
-                    ['门店名称', '报表数据JSON', '行数', '列数', '更新时间'],
-                    ['测试门店1', '{"test": "data"}', '10', '5', datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-                ]
-                reports_ws.update('A1', reports_data)
-                
-                self.log_test_result("报表数据表创建", True, "成功创建报表数据表", None)
-                self.display_progress("报表数据表创建成功", "success")
-                
-            except Exception as e:
-                error_msg = f"报表数据表创建失败: {str(e)}"
-                self.log_test_result("报表数据表创建", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
+            billing_issues = []
             
-            # 模拟大数据写入
-            try:
-                self.display_progress("模拟大数据写入...", "info")
-                
-                # 创建大量数据
-                large_data = [['门店名称', '报表数据JSON', '行数', '列数', '更新时间']]
-                for i in range(50):
-                    large_data.append([
-                        f'门店{i+1}',
-                        f'{{"data": "large_test_data_{i}", "size": {i*100}}}',
-                        str(i*10),
-                        str(i*2),
-                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    ])
-                
-                # 分批写入
-                batch_size = 15
-                for i in range(0, len(large_data), batch_size):
-                    batch = large_data[i:i+batch_size]
-                    if i == 0:
-                        reports_ws.update('A1', batch)
+            for op in test_operations:
+                try:
+                    self.display_progress(f"测试 {op['name']}...", "info")
+                    result = op['action']()
+                    
+                    # 清理测试文件
+                    if hasattr(result, 'id'):
+                        try:
+                            self.client.del_spreadsheet(result.id)
+                        except:
+                            pass
+                    
+                    self.display_progress(f"{op['name']} 测试成功", "success")
+                    
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if 'billing' in error_str or 'payment' in error_str or 'quota' in error_str:
+                        billing_issues.append(f"{op['name']}: {str(e)}")
+                        self.display_progress(f"{op['name']} 可能需要计费: {str(e)}", "warning")
                     else:
-                        reports_ws.update(f'A{i+1}', batch)
-                    time.sleep(0.1)  # 避免API限制
+                        self.display_progress(f"{op['name']} 失败: {str(e)}", "error")
+                        # 分析403错误
+                        if "403" in str(e):
+                            self.analyze_specific_403_error(str(e), f"计费测试-{op['name']}")
+            
+            if billing_issues:
+                self.log_test_result("计费状态检查", False, f"发现 {len(billing_issues)} 个计费相关问题", str(billing_issues))
+                return False
+            else:
+                self.log_test_result("计费状态检查", True, "未发现计费问题", None)
+                return True
                 
-                self.log_test_result("大数据写入", True, f"成功写入 {len(large_data)} 行数据", None)
-                self.display_progress(f"大数据写入成功: {len(large_data)} 行", "success")
-                
-            except Exception as e:
-                error_msg = f"大数据写入失败: {str(e)}"
-                self.log_test_result("大数据写入", False, error_msg, traceback.format_exc())
-                self.display_progress(error_msg, "error")
-            
-            # 清理测试文件
-            try:
-                self.client.del_spreadsheet(main_sheet.id)
-                self.display_progress("测试文件已清理", "success")
-            except Exception as e:
-                self.display_progress(f"清理测试文件失败: {str(e)}", "warning")
-            
-            return True
-            
         except Exception as e:
-            error_msg = f"应用操作模拟失败: {str(e)}"
-            self.log_test_result("应用操作模拟", False, error_msg, traceback.format_exc())
+            error_msg = f"计费状态检查失败: {str(e)}"
+            self.log_test_result("计费状态检查", False, error_msg, traceback.format_exc())
             self.display_progress(error_msg, "error")
-            
-            # 分析具体的403错误
-            if "403" in str(e):
-                self.analyze_403_error(str(e), "应用操作模拟")
-            
             return False
     
-    def analyze_403_error(self, error_str: str, context: str):
-        """分析403错误的具体原因"""
-        st.subheader(f"🔍 403错误分析 - {context}")
+    def analyze_specific_403_error(self, error_str: str, context: str):
+        """分析具体的403错误类型"""
+        st.subheader(f"🔍 403错误深度分析 - {context}")
         
-        error_analysis = {
-            'context': context,
-            'error_string': error_str,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'possible_causes': [],
-            'solutions': []
-        }
+        error_lower = error_str.lower()
+        error_type = "未知403错误"
+        possible_solutions = []
         
-        # 分析具体的403错误类型
-        if "insufficient permissions" in error_str.lower():
-            error_analysis['possible_causes'].append("权限不足")
-            error_analysis['solutions'].append("检查服务账户是否有足够的权限")
-        
-        if "quota exceeded" in error_str.lower():
-            error_analysis['possible_causes'].append("配额超限")
-            error_analysis['solutions'].append("等待配额重置或升级账户")
-        
-        if "api not enabled" in error_str.lower():
-            error_analysis['possible_causes'].append("API未启用")
-            error_analysis['solutions'].append("在Google Cloud Console中启用相关API")
-        
-        if "invalid credentials" in error_str.lower():
-            error_analysis['possible_causes'].append("认证凭据无效")
-            error_analysis['solutions'].append("检查服务账户密钥是否正确")
-        
-        if "access denied" in error_str.lower():
-            error_analysis['possible_causes'].append("访问被拒绝")
-            error_analysis['solutions'].append("检查IAM权限设置")
+        # 分析不同类型的403错误
+        if "storage quota" in error_lower or "quota exceeded" in error_lower:
+            error_type = "存储配额超限"
+            possible_solutions = [
+                "清理服务账户的文件",
+                "创建新的服务账户",
+                "升级Google Workspace计划"
+            ]
+        elif "rate limit" in error_lower or "too many requests" in error_lower:
+            error_type = "请求频率限制"
+            possible_solutions = [
+                "减少API请求频率",
+                "添加请求间延迟",
+                "检查每分钟/每日配额"
+            ]
+        elif "insufficient permissions" in error_lower or "access denied" in error_lower:
+            error_type = "权限不足"
+            possible_solutions = [
+                "检查服务账户IAM权限",
+                "确认API已启用",
+                "验证OAuth范围"
+            ]
+        elif "billing" in error_lower or "payment" in error_lower:
+            error_type = "计费问题"
+            possible_solutions = [
+                "启用项目计费",
+                "检查付款方式",
+                "确认账户状态"
+            ]
+        elif "project" in error_lower:
+            error_type = "项目配置问题"
+            possible_solutions = [
+                "确认项目ID正确",
+                "检查项目状态",
+                "验证API启用状态"
+            ]
         
         # 显示分析结果
-        st.error(f"**错误上下文**: {context}")
-        st.error(f"**错误信息**: {error_str}")
+        st.error(f"**错误类型**: {error_type}")
+        st.code(error_str)
         
-        if error_analysis['possible_causes']:
-            st.warning("**可能的原因**:")
-            for cause in error_analysis['possible_causes']:
-                st.write(f"- {cause}")
+        if possible_solutions:
+            st.markdown("**建议的解决方案**:")
+            for i, solution in enumerate(possible_solutions, 1):
+                st.write(f"{i}. {solution}")
         
-        if error_analysis['solutions']:
-            st.info("**建议的解决方案**:")
-            for solution in error_analysis['solutions']:
-                st.write(f"- {solution}")
+        # 记录到测试结果中
+        self.log_test_result(f"403错误分析-{context}", False, f"错误类型: {error_type}", error_str)
         
-        self.error_details.append(error_analysis)
+        return error_type
     
-    def display_summary(self):
-        """显示测试总结"""
-        st.subheader("📋 测试总结")
+    def comprehensive_403_test(self):
+        """综合403错误测试"""
+        st.subheader("🔬 综合403错误测试")
+        
+        if not self.client:
+            self.display_progress("需要先通过认证", "error")
+            return
+        
+        # 测试各种可能触发403的操作
+        test_operations = [
+            {
+                'name': '创建简单文件',
+                'action': lambda: self.client.create(f"简单测试_{int(time.time())}")
+            },
+            {
+                'name': '创建大型文件',
+                'action': lambda: self._create_large_file()
+            },
+            {
+                'name': '快速连续操作',
+                'action': lambda: self._rapid_operations()
+            },
+            {
+                'name': '批量数据写入',
+                'action': lambda: self._batch_write_test()
+            }
+        ]
+        
+        for op in test_operations:
+            try:
+                self.display_progress(f"执行 {op['name']}...", "info")
+                result = op['action']()
+                
+                # 清理
+                if hasattr(result, 'id'):
+                    try:
+                        self.client.del_spreadsheet(result.id)
+                    except:
+                        pass
+                
+                self.log_test_result(f"综合测试-{op['name']}", True, "操作成功", None)
+                self.display_progress(f"{op['name']} 成功", "success")
+                
+            except Exception as e:
+                self.log_test_result(f"综合测试-{op['name']}", False, f"操作失败: {str(e)}", traceback.format_exc())
+                
+                if "403" in str(e):
+                    self.analyze_specific_403_error(str(e), op['name'])
+                else:
+                    self.display_progress(f"{op['name']} 失败: {str(e)}", "error")
+    
+    def _create_large_file(self):
+        """创建大型文件测试"""
+        sheet = self.client.create(f"大型测试_{int(time.time())}")
+        worksheet = sheet.sheet1
+        
+        # 创建大量数据
+        large_data = []
+        for i in range(1000):
+            large_data.append([f'数据{i}', f'内容{i}', f'测试{i}', datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+        
+        worksheet.update('A1', large_data)
+        return sheet
+    
+    def _rapid_operations(self):
+        """快速连续操作测试"""
+        for i in range(5):
+            sheet = self.client.create(f"快速测试_{i}_{int(time.time())}")
+            self.client.del_spreadsheet(sheet.id)
+            time.sleep(0.1)
+        return None
+    
+    def _batch_write_test(self):
+        """批量写入测试"""
+        sheet = self.client.create(f"批量测试_{int(time.time())}")
+        worksheet = sheet.sheet1
+        
+        # 多次批量写入
+        for batch in range(5):
+            data = [[f'批次{batch}行{row}列{col}' for col in range(10)] for row in range(100)]
+            worksheet.update(f'A{batch*100+1}', data)
+            time.sleep(0.5)
+        
+        return sheet
+    
+    def display_enhanced_summary(self):
+        """显示增强版总结"""
+        st.subheader("📋 深度诊断总结")
         
         if not self.test_results:
             st.warning("没有测试结果")
             return
         
-        # 创建结果表格
-        df = pd.DataFrame(self.test_results)
+        # 显示服务账户信息
+        if self.service_account_info:
+            st.markdown("### 🔐 当前服务账户")
+            st.json(self.service_account_info)
         
-        # 显示成功/失败统计
+        # 按类型分组显示结果
+        categories = {
+            '认证相关': [r for r in self.test_results if '认证' in r['test_name']],
+            '配额相关': [r for r in self.test_results if '配额' in r['test_name']],
+            '403错误': [r for r in self.test_results if '403' in r['test_name']],
+            '其他测试': [r for r in self.test_results if not any(keyword in r['test_name'] for keyword in ['认证', '配额', '403'])]
+        }
+        
+        for category, results in categories.items():
+            if results:
+                st.markdown(f"### {category}")
+                df = pd.DataFrame(results)
+                st.dataframe(df, use_container_width=True)
+        
+        # 总体统计
         success_count = len([r for r in self.test_results if r['success']])
         total_count = len(self.test_results)
         
@@ -453,70 +439,80 @@ class GoogleSheetsErrorTracker:
         with col3:
             st.metric("失败数", total_count - success_count)
         
-        # 显示详细结果
-        st.dataframe(df, use_container_width=True)
-        
-        # 显示错误详情
-        if self.error_details:
-            st.subheader("❌ 错误详情")
-            for error in self.error_details:
-                with st.expander(f"错误: {error['context']} - {error['timestamp']}"):
-                    st.code(error['error_string'])
-                    if error['possible_causes']:
-                        st.write("**可能原因**:")
-                        for cause in error['possible_causes']:
-                            st.write(f"- {cause}")
-                    if error['solutions']:
-                        st.write("**解决方案**:")
-                        for solution in error['solutions']:
-                            st.write(f"- {solution}")
+        # 关键建议
+        failed_tests = [r for r in self.test_results if not r['success']]
+        if failed_tests:
+            st.subheader("🎯 关键建议")
+            
+            error_types = {}
+            for test in failed_tests:
+                if test['error_info']:
+                    if "storage quota" in test['error_info'].lower():
+                        error_types['存储配额'] = error_types.get('存储配额', 0) + 1
+                    elif "rate limit" in test['error_info'].lower():
+                        error_types['请求限制'] = error_types.get('请求限制', 0) + 1
+                    elif "billing" in test['error_info'].lower():
+                        error_types['计费问题'] = error_types.get('计费问题', 0) + 1
+                    else:
+                        error_types['其他'] = error_types.get('其他', 0) + 1
+            
+            for error_type, count in error_types.items():
+                if error_type == '存储配额':
+                    st.error(f"🚨 检测到 {count} 个存储配额问题")
+                    st.markdown("""
+                    **即使是新服务账户，仍然出现存储配额问题，可能的原因：**
+                    1. 服务账户配置没有更新
+                    2. 项目级别的存储限制
+                    3. Google Cloud项目本身的问题
+                    
+                    **建议：**
+                    - 确认Streamlit Cloud中的Secrets已更新
+                    - 重启应用确保使用新配置
+                    - 考虑升级到Google Workspace
+                    """)
+                elif error_type == '请求限制':
+                    st.warning(f"⚠️ 检测到 {count} 个请求频率问题")
+                elif error_type == '计费问题':
+                    st.error(f"💳 检测到 {count} 个计费相关问题")
+        else:
+            st.success("🎉 所有测试都通过了！")
     
-    def run_full_diagnostic(self):
-        """运行完整诊断"""
-        st.title("🔍 Google Sheets API 错误追踪诊断")
+    def run_enhanced_diagnostic(self):
+        """运行增强版诊断"""
+        st.title("🔬 增强版403错误深度诊断")
         
         st.markdown("""
-        这个工具会逐步测试各种Google Sheets API操作，帮助精确定位403错误的原因。
+        这个增强版诊断工具会深度分析各种403错误的可能原因，包括：
+        - 服务账户身份验证
+        - API配额限制
+        - 项目计费状态
+        - 存储空间问题
+        - 权限配置问题
         """)
         
         # 清空之前的结果
         self.test_results = []
-        self.error_details = []
+        self.service_account_info = {}
         
-        # 运行测试
-        test1_success = self.test_1_basic_authentication()
+        # 运行诊断
+        step1 = self.verify_service_account_identity()
         
-        if test1_success:
-            test2_success = self.test_2_drive_permissions()
-            test3_success = self.test_3_sheets_permissions()
-            test4_success = self.test_4_simulate_app_operations()
-        
-        # 显示总结
-        self.display_summary()
-        
-        # 提供建议
-        st.subheader("🎯 下一步建议")
-        
-        failed_tests = [r for r in self.test_results if not r['success']]
-        
-        if not failed_tests:
-            st.success("🎉 所有测试都通过了！你的Google Sheets配置是正确的。")
-            st.info("如果你的应用仍然出现403错误，可能是代码逻辑问题或特定操作的权限问题。")
-        else:
-            st.error(f"发现 {len(failed_tests)} 个问题:")
-            for test in failed_tests:
-                st.write(f"- **{test['test_name']}**: {test['details']}")
+        if step1:
+            step2 = self.test_authentication_detailed()
             
-            st.info("请根据上面的错误分析和解决方案来修复这些问题。")
+            if step2:
+                step3 = self.test_api_quotas()
+                step4 = self.test_project_billing_status()
+                step5 = self.comprehensive_403_test()
+        
+        # 显示增强版总结
+        self.display_enhanced_summary()
 
-# 在你的Streamlit应用中使用这个工具
-def run_error_diagnostic():
-    """运行错误诊断工具"""
-    tracker = GoogleSheetsErrorTracker()
-    tracker.run_full_diagnostic()
+# 运行增强版诊断工具
+def run_enhanced_diagnostic():
+    """运行增强版诊断工具"""
+    tracker = Enhanced403DiagnosticTool()
+    tracker.run_enhanced_diagnostic()
 
-# 在管理员界面中添加这个诊断功能
 if __name__ == "__main__":
-    run_error_diagnostic()
-
-st.write("当前服务账户:", st.secrets["google_sheets"]["client_email"])
+    run_enhanced_diagnostic()
