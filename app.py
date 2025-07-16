@@ -1568,4 +1568,4 @@ with col4:
 # 自动API限制清理（清理过期的请求记录）
 current_time = time.time()
 cutoff_time = current_time - 70  # 70秒前的记录
-api_limiter.request_times = [t for t in api_limiter.request_times if t > cutoff_time]_times if t > cutoff_time]
+api_limiter.request_times = [t for t in api_limiter.request_times if t > cutoff_time]
