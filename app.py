@@ -13,7 +13,6 @@ import logging
 from typing import Optional, Dict, Any, List
 import hashlib
 import traceback
-from contextlib import contextmanager
 import zlib
 import base64
 import urllib.parse as urlparse
@@ -874,16 +873,6 @@ def show_service_auth_panel():
         st.markdown('</div>', unsafe_allow_html=True)
         return None
 
-@contextmanager
-def error_handler(operation_name: str):
-    """通用错误处理上下文管理器"""
-    try:
-        yield
-    except Exception as e:
-        logger.error(f"{operation_name} 失败: {str(e)}")
-        st.error(f"❌ {operation_name} 失败: {str(e)}")
-        raise
-
 def compress_data(data: str) -> str:
     """压缩数据"""
     try:
@@ -950,7 +939,7 @@ def clean_and_compress_dataframe(df: pd.DataFrame) -> str:
 
 def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
     """保存权限数据"""
-    with error_handler("保存权限数据"):
+    try:
         spreadsheet = get_or_create_spreadsheet(gc)
         worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME, rows=100, cols=5)
         
@@ -982,6 +971,10 @@ def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
             del st.session_state['cache_permissions_load']
         
         return True
+    except Exception as e:
+        logger.error(f"保存权限数据失败: {str(e)}")
+        st.error(f"❌ 保存权限数据失败: {str(e)}")
+        return False
 
 def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
     """加载权限数据"""
@@ -992,54 +985,57 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
             logger.info("从缓存加载权限数据")
             return cache_data['data']
     
-    with error_handler("加载权限数据"):
-        try:
-            spreadsheet = get_or_create_spreadsheet(gc)
-            worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
-            data = worksheet.get_all_values()
-            
-            if len(data) <= 1:
-                logger.info("权限表为空")
-                return None
-            
-            if len(data) >= 2 and len(data[1]) >= 2:
-                compressed_data = data[1][1]
-                decompressed_data = decompress_data(compressed_data)
-                
-                permissions = []
-                for item in decompressed_data.split(';'):
-                    if '|' in item:
-                        store_name, user_id = item.split('|', 1)
-                        permissions.append({
-                            '门店名称': store_name.strip(),
-                            '人员编号': user_id.strip()
-                        })
-                
-                if permissions:
-                    result_df = pd.DataFrame(permissions)
-                    result_df = result_df[
-                        (result_df['门店名称'] != '') & 
-                        (result_df['人员编号'] != '')
-                    ]
-                    
-                    logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
-                    
-                    # 设置缓存
-                    st.session_state['cache_permissions_load'] = {
-                        'data': result_df,
-                        'timestamp': time.time()
-                    }
-                    return result_df
-            
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
+        data = worksheet.get_all_values()
+        
+        if len(data) <= 1:
+            logger.info("权限表为空")
             return None
+        
+        if len(data) >= 2 and len(data[1]) >= 2:
+            compressed_data = data[1][1]
+            decompressed_data = decompress_data(compressed_data)
             
-        except gspread.WorksheetNotFound:
-            logger.info("权限表不存在")
-            return None
+            permissions = []
+            for item in decompressed_data.split(';'):
+                if '|' in item:
+                    store_name, user_id = item.split('|', 1)
+                    permissions.append({
+                        '门店名称': store_name.strip(),
+                        '人员编号': user_id.strip()
+                    })
+            
+            if permissions:
+                result_df = pd.DataFrame(permissions)
+                result_df = result_df[
+                    (result_df['门店名称'] != '') & 
+                    (result_df['人员编号'] != '')
+                ]
+                
+                logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
+                
+                # 设置缓存
+                st.session_state['cache_permissions_load'] = {
+                    'data': result_df,
+                    'timestamp': time.time()
+                }
+                return result_df
+        
+        return None
+        
+    except gspread.WorksheetNotFound:
+        logger.info("权限表不存在")
+        return None
+    except Exception as e:
+        logger.error(f"加载权限数据失败: {str(e)}")
+        st.error(f"❌ 加载权限数据失败: {str(e)}")
+        return None
 
 def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
     """保存报表数据"""
-    with error_handler("保存报表数据"):
+    try:
         spreadsheet = get_or_create_spreadsheet(gc)
         worksheet = get_or_create_worksheet(spreadsheet, REPORTS_SHEET_NAME, rows=300, cols=8)
         
@@ -1107,6 +1103,10 @@ def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
             del st.session_state['cache_reports_load']
         
         return True
+    except Exception as e:
+        logger.error(f"保存报表数据失败: {str(e)}")
+        st.error(f"❌ 保存报表数据失败: {str(e)}")
+        return False
 
 def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
     """加载报表数据"""
@@ -1117,109 +1117,112 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
             logger.info("从缓存加载报表数据")
             return cache_data['data']
     
-    with error_handler("加载报表数据"):
-        try:
-            spreadsheet = get_or_create_spreadsheet(gc)
-            worksheet = spreadsheet.worksheet(REPORTS_SHEET_NAME)
-            data = worksheet.get_all_values()
-            
-            if len(data) <= 1:
-                logger.info("报表数据为空")
-                return {}
-            
-            reports_dict = {}
-            fragments_dict = {}
-            
-            for row in data[1:]:
-                if len(row) >= 7:
-                    store_name = row[0]
-                    compressed_data = row[1]
-                    chunk_num = row[5]
-                    total_chunks = row[6]
-                    data_hash = row[7] if len(row) > 7 else ''
-                    
-                    if '_分片' in store_name:
-                        base_name = store_name.split('_分片')[0]
-                        if base_name not in fragments_dict:
-                            fragments_dict[base_name] = []
-                        
-                        fragments_dict[base_name].append({
-                            'data': compressed_data,
-                            'chunk_num': chunk_num,
-                            'total_chunks': total_chunks,
-                            'data_hash': data_hash
-                        })
-                    else:
-                        fragments_dict[store_name] = [{
-                            'data': compressed_data,
-                            'chunk_num': '1',
-                            'total_chunks': '1',
-                            'data_hash': data_hash
-                        }]
-            
-            # 重构所有数据
-            for store_name, fragments in fragments_dict.items():
-                try:
-                    if len(fragments) == 1:
-                        compressed_data = fragments[0]['data']
-                    else:
-                        fragments.sort(key=lambda x: int(x['chunk_num']))
-                        compressed_data = ''.join([frag['data'] for frag in fragments])
-                    
-                    json_data = decompress_data(compressed_data)
-                    df = pd.read_json(json_data, orient='records')
-                    
-                    if not df.empty:
-                        # 数据后处理（简化版本）
-                        if len(df) > 0:
-                            first_row = df.iloc[0]
-                            non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
-                            if non_empty_count <= 2 and len(df) > 1:
-                                df = df.iloc[1:].reset_index(drop=True)
-                        
-                        # 处理表头
-                        if len(df) > 1:
-                            header_row = df.iloc[0].fillna('').astype(str).tolist()
-                            data_rows = df.iloc[1:].copy()
-                            
-                            cols = []
-                            for i, col in enumerate(header_row):
-                                col = str(col).strip()
-                                if col == '' or col == 'nan' or col == '0':
-                                    col = f'列{i+1}' if i > 0 else '项目名称'
-                                
-                                original_col = col
-                                counter = 1
-                                while col in cols:
-                                    col = f"{original_col}_{counter}"
-                                    counter += 1
-                                cols.append(col)
-                            
-                            min_cols = min(len(data_rows.columns), len(cols))
-                            cols = cols[:min_cols]
-                            data_rows = data_rows.iloc[:, :min_cols]
-                            data_rows.columns = cols
-                            df = data_rows.reset_index(drop=True).fillna('')
-                        
-                        reports_dict[store_name] = df
-                        logger.info(f"{store_name} 数据加载成功: {len(df)} 行")
-                
-                except Exception as e:
-                    logger.error(f"解析 {store_name} 数据失败: {str(e)}")
-                    continue
-            
-            logger.info(f"报表数据加载完成: {len(reports_dict)} 个门店")
-            
-            # 设置缓存
-            st.session_state['cache_reports_load'] = {
-                'data': reports_dict,
-                'timestamp': time.time()
-            }
-            return reports_dict
-            
-        except gspread.WorksheetNotFound:
-            logger.info("报表数据表不存在")
+    try:
+        spreadsheet = get_or_create_spreadsheet(gc)
+        worksheet = spreadsheet.worksheet(REPORTS_SHEET_NAME)
+        data = worksheet.get_all_values()
+        
+        if len(data) <= 1:
+            logger.info("报表数据为空")
             return {}
+        
+        reports_dict = {}
+        fragments_dict = {}
+        
+        for row in data[1:]:
+            if len(row) >= 7:
+                store_name = row[0]
+                compressed_data = row[1]
+                chunk_num = row[5]
+                total_chunks = row[6]
+                data_hash = row[7] if len(row) > 7 else ''
+                
+                if '_分片' in store_name:
+                    base_name = store_name.split('_分片')[0]
+                    if base_name not in fragments_dict:
+                        fragments_dict[base_name] = []
+                    
+                    fragments_dict[base_name].append({
+                        'data': compressed_data,
+                        'chunk_num': chunk_num,
+                        'total_chunks': total_chunks,
+                        'data_hash': data_hash
+                    })
+                else:
+                    fragments_dict[store_name] = [{
+                        'data': compressed_data,
+                        'chunk_num': '1',
+                        'total_chunks': '1',
+                        'data_hash': data_hash
+                    }]
+        
+        # 重构所有数据
+        for store_name, fragments in fragments_dict.items():
+            try:
+                if len(fragments) == 1:
+                    compressed_data = fragments[0]['data']
+                else:
+                    fragments.sort(key=lambda x: int(x['chunk_num']))
+                    compressed_data = ''.join([frag['data'] for frag in fragments])
+                
+                json_data = decompress_data(compressed_data)
+                df = pd.read_json(json_data, orient='records')
+                
+                if not df.empty:
+                    # 数据后处理（简化版本）
+                    if len(df) > 0:
+                        first_row = df.iloc[0]
+                        non_empty_count = sum(1 for val in first_row if pd.notna(val) and str(val).strip() != '')
+                        if non_empty_count <= 2 and len(df) > 1:
+                            df = df.iloc[1:].reset_index(drop=True)
+                    
+                    # 处理表头
+                    if len(df) > 1:
+                        header_row = df.iloc[0].fillna('').astype(str).tolist()
+                        data_rows = df.iloc[1:].copy()
+                        
+                        cols = []
+                        for i, col in enumerate(header_row):
+                            col = str(col).strip()
+                            if col == '' or col == 'nan' or col == '0':
+                                col = f'列{i+1}' if i > 0 else '项目名称'
+                            
+                            original_col = col
+                            counter = 1
+                            while col in cols:
+                                col = f"{original_col}_{counter}"
+                                counter += 1
+                            cols.append(col)
+                        
+                        min_cols = min(len(data_rows.columns), len(cols))
+                        cols = cols[:min_cols]
+                        data_rows = data_rows.iloc[:, :min_cols]
+                        data_rows.columns = cols
+                        df = data_rows.reset_index(drop=True).fillna('')
+                    
+                    reports_dict[store_name] = df
+                    logger.info(f"{store_name} 数据加载成功: {len(df)} 行")
+            
+            except Exception as e:
+                logger.error(f"解析 {store_name} 数据失败: {str(e)}")
+                continue
+        
+        logger.info(f"报表数据加载完成: {len(reports_dict)} 个门店")
+        
+        # 设置缓存
+        st.session_state['cache_reports_load'] = {
+            'data': reports_dict,
+            'timestamp': time.time()
+        }
+        return reports_dict
+        
+    except gspread.WorksheetNotFound:
+        logger.info("报表数据表不存在")
+        return {}
+    except Exception as e:
+        logger.error(f"加载报表数据失败: {str(e)}")
+        st.error(f"❌ 加载报表数据失败: {str(e)}")
+        return {}
 
 def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
     """分析应收未收额数据"""
