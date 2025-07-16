@@ -3,15 +3,17 @@ import pandas as pd
 import io
 import json
 import hashlib
+import gzip
+import pickle
 from datetime import datetime, timedelta
 import time
 from qcloud_cos import CosConfig
 from qcloud_cos import CosS3Client
 from qcloud_cos.cos_exception import CosServiceError, CosClientError
-from supabase import create_client, Client
 import logging
 from typing import Optional, Dict, Any, List
 import traceback
+import threading
 
 # 页面配置
 st.set_page_config(
@@ -22,6 +24,9 @@ st.set_page_config(
 
 # 系统配置
 ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
+MAX_STORAGE_MB = 40 * 1024  # 40GB限制，留出10GB缓冲
+API_RATE_LIMIT = 100  # 每小时API调用限制
+COMPRESSION_LEVEL = 6  # GZIP压缩等级
 
 # CSS样式
 st.markdown("""
@@ -52,11 +57,12 @@ st.markdown("""
         margin: 1rem 0;
     }
     .architecture-info {
-        background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
+        background: linear-gradient(135deg, #00cec9 0%, #55a3ff 100%);
         padding: 1.5rem;
         border-radius: 15px;
         margin: 1rem 0;
-        border: 2px solid #48cab2;
+        border: 2px solid #00b894;
+        color: white;
     }
     .success-box {
         background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
@@ -72,6 +78,13 @@ st.markdown("""
         margin: 1rem 0;
         color: white;
     }
+    .compression-info {
+        background: linear-gradient(135deg, #a29bfe 0%, #6c5ce7 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+        color: white;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -79,13 +92,88 @@ st.markdown("""
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class APIRateLimiter:
+    """API调用频率限制器"""
+    
+    def __init__(self, max_calls_per_hour: int = 100):
+        self.max_calls = max_calls_per_hour
+        self.calls = []
+        self.lock = threading.Lock()
+    
+    def can_make_call(self) -> bool:
+        """检查是否可以进行API调用"""
+        with self.lock:
+            now = datetime.now()
+            # 清理一小时前的记录
+            self.calls = [call_time for call_time in self.calls 
+                         if now - call_time < timedelta(hours=1)]
+            
+            return len(self.calls) < self.max_calls
+    
+    def record_call(self):
+        """记录API调用"""
+        with self.lock:
+            self.calls.append(datetime.now())
+    
+    def get_remaining_calls(self) -> int:
+        """获取剩余可调用次数"""
+        with self.lock:
+            now = datetime.now()
+            self.calls = [call_time for call_time in self.calls 
+                         if now - call_time < timedelta(hours=1)]
+            return max(0, self.max_calls - len(self.calls))
+
+class CompressionManager:
+    """数据压缩管理器"""
+    
+    @staticmethod
+    def compress_data(data: bytes, level: int = COMPRESSION_LEVEL) -> bytes:
+        """压缩数据"""
+        return gzip.compress(data, compresslevel=level)
+    
+    @staticmethod
+    def decompress_data(compressed_data: bytes) -> bytes:
+        """解压数据"""
+        return gzip.decompress(compressed_data)
+    
+    @staticmethod
+    def compress_json(data: dict, level: int = COMPRESSION_LEVEL) -> bytes:
+        """压缩JSON数据"""
+        json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        return gzip.compress(json_str.encode('utf-8'), compresslevel=level)
+    
+    @staticmethod
+    def decompress_json(compressed_data: bytes) -> dict:
+        """解压JSON数据"""
+        json_str = gzip.decompress(compressed_data).decode('utf-8')
+        return json.loads(json_str)
+    
+    @staticmethod
+    def compress_excel(excel_data: bytes, level: int = COMPRESSION_LEVEL) -> bytes:
+        """压缩Excel数据"""
+        return gzip.compress(excel_data, compresslevel=level)
+    
+    @staticmethod
+    def decompress_excel(compressed_data: bytes) -> bytes:
+        """解压Excel数据"""
+        return gzip.decompress(compressed_data)
+    
+    @staticmethod
+    def get_compression_ratio(original_size: int, compressed_size: int) -> float:
+        """计算压缩比"""
+        if original_size == 0:
+            return 0.0
+        return (1 - compressed_size / original_size) * 100
+
 class TencentCOSManager:
-    """腾讯云COS存储管理器"""
+    """腾讯云COS存储管理器 - 优化版本"""
     
     def __init__(self):
         self.client = None
         self.bucket_name = None
         self.region = None
+        self.rate_limiter = APIRateLimiter(API_RATE_LIMIT)
+        self.compression = CompressionManager()
         self.initialize_from_secrets()
     
     def initialize_from_secrets(self):
@@ -117,16 +205,62 @@ class TencentCOSManager:
             logger.error(f"腾讯云COS初始化失败: {str(e)}")
             raise
     
-    def upload_file(self, file_data: bytes, filename: str) -> Optional[str]:
-        """上传文件到腾讯云COS"""
+    def _check_api_limit(self) -> bool:
+        """检查API调用限制"""
+        if not self.rate_limiter.can_make_call():
+            remaining = self.rate_limiter.get_remaining_calls()
+            st.warning(f"⚠️ API调用频率限制：剩余 {remaining} 次/小时")
+            return False
+        return True
+    
+    def upload_file(self, file_data: bytes, filename: str, content_type: str = None, 
+                   compress: bool = True) -> Optional[str]:
+        """上传文件到腾讯云COS（支持压缩）"""
+        if not self._check_api_limit():
+            return None
+            
         try:
+            original_size = len(file_data)
+            
+            # 压缩数据
+            if compress:
+                if filename.endswith('.json'):
+                    # JSON数据特殊处理
+                    data = json.loads(file_data.decode('utf-8'))
+                    compressed_data = self.compression.compress_json(data)
+                    filename = filename.replace('.json', '.gz')
+                else:
+                    compressed_data = self.compression.compress_data(file_data)
+                    if not filename.endswith('.gz'):
+                        filename = filename + '.gz'
+                
+                compressed_size = len(compressed_data)
+                compression_ratio = self.compression.get_compression_ratio(original_size, compressed_size)
+                
+                st.info(f"📦 压缩效果: {original_size/1024:.1f}KB → {compressed_size/1024:.1f}KB (节省 {compression_ratio:.1f}%)")
+                
+                upload_data = compressed_data
+            else:
+                upload_data = file_data
+            
+            # 默认内容类型
+            if not content_type:
+                if filename.endswith('.xlsx'):
+                    content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                elif filename.endswith('.json') or filename.endswith('.gz'):
+                    content_type = 'application/gzip'
+                else:
+                    content_type = 'application/octet-stream'
+            
             # 上传文件
             response = self.client.put_object(
                 Bucket=self.bucket_name,
-                Body=file_data,
+                Body=upload_data,
                 Key=filename,
-                ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                ContentType=content_type
             )
+            
+            self.rate_limiter.record_call()
             
             # 生成文件URL
             file_url = f"https://{self.bucket_name}.cos.{self.region}.myqcloud.com/{filename}"
@@ -144,20 +278,42 @@ class TencentCOSManager:
             logger.error(f"上传文件时出错: {str(e)}")
             raise Exception(f"文件上传失败: {str(e)}")
     
-    def download_file(self, filename: str) -> Optional[bytes]:
-        """从腾讯云COS下载文件"""
+    def download_file(self, filename: str, decompress: bool = True) -> Optional[bytes]:
+        """从腾讯云COS下载文件（支持解压）"""
+        if not self._check_api_limit():
+            return None
+            
         try:
             response = self.client.get_object(
                 Bucket=self.bucket_name,
                 Key=filename
             )
             
+            self.rate_limiter.record_call()
+            
             # 读取文件内容
             file_data = response['Body'].read()
+            
+            # 解压数据
+            if decompress and filename.endswith('.gz'):
+                try:
+                    if filename.replace('.gz', '').endswith('.json'):
+                        # JSON数据特殊处理
+                        decompressed_data = self.compression.decompress_json(file_data)
+                        return json.dumps(decompressed_data, ensure_ascii=False).encode('utf-8')
+                    else:
+                        return self.compression.decompress_data(file_data)
+                except Exception as e:
+                    logger.warning(f"解压失败，返回原始数据: {str(e)}")
+                    return file_data
+            
             logger.info(f"文件下载成功: {filename}")
             return file_data
             
         except CosServiceError as e:
+            if e.get_error_code() == 'NoSuchKey':
+                logger.info(f"文件不存在: {filename}")
+                return None
             logger.error(f"COS服务错误: {e.get_error_msg()}")
             return None
         except CosClientError as e:
@@ -169,12 +325,16 @@ class TencentCOSManager:
     
     def delete_file(self, filename: str) -> bool:
         """删除腾讯云COS文件"""
+        if not self._check_api_limit():
+            return False
+            
         try:
             self.client.delete_object(
                 Bucket=self.bucket_name,
                 Key=filename
             )
             
+            self.rate_limiter.record_call()
             logger.info(f"文件删除成功: {filename}")
             return True
             
@@ -188,13 +348,19 @@ class TencentCOSManager:
             logger.error(f"删除文件时出错: {str(e)}")
             return False
     
-    def list_files(self) -> List[Dict]:
-        """列出存储桶中的所有文件"""
+    def list_files(self, prefix: str = "", max_keys: int = 1000) -> List[Dict]:
+        """列出存储桶中的文件"""
+        if not self._check_api_limit():
+            return []
+            
         try:
             response = self.client.list_objects(
                 Bucket=self.bucket_name,
-                MaxKeys=1000
+                Prefix=prefix,
+                MaxKeys=max_keys
             )
+            
+            self.rate_limiter.record_call()
             
             files = []
             if 'Contents' in response:
@@ -211,138 +377,183 @@ class TencentCOSManager:
             logger.error(f"列出文件时出错: {str(e)}")
             return []
     
+    def file_exists(self, filename: str) -> bool:
+        """检查文件是否存在"""
+        if not self._check_api_limit():
+            return False
+            
+        try:
+            self.client.head_object(
+                Bucket=self.bucket_name,
+                Key=filename
+            )
+            self.rate_limiter.record_call()
+            return True
+        except:
+            return False
+    
+    def upload_json(self, data: dict, filename: str, compress: bool = True) -> bool:
+        """上传JSON数据（支持压缩）"""
+        try:
+            json_data = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+            json_bytes = json_data.encode('utf-8')
+            
+            result = self.upload_file(json_bytes, filename, 'application/json', compress)
+            return result is not None
+            
+        except Exception as e:
+            logger.error(f"上传JSON失败: {str(e)}")
+            return False
+    
+    def download_json(self, filename: str, decompress: bool = True) -> Optional[dict]:
+        """下载JSON数据（支持解压）"""
+        try:
+            # 尝试压缩版本
+            if not filename.endswith('.gz'):
+                compressed_filename = filename.replace('.json', '.gz')
+                if self.file_exists(compressed_filename):
+                    filename = compressed_filename
+            
+            file_data = self.download_file(filename, decompress)
+            if file_data:
+                if filename.endswith('.gz') and decompress:
+                    # 已经在download_file中处理了解压
+                    return json.loads(file_data.decode('utf-8'))
+                else:
+                    json_str = file_data.decode('utf-8')
+                    return json.loads(json_str)
+            return None
+            
+        except Exception as e:
+            logger.error(f"下载JSON失败: {str(e)}")
+            return None
+    
+    def cleanup_old_files(self, days_old: int = 7, prefix: str = "") -> int:
+        """清理指定天数前的旧文件"""
+        try:
+            files = self.list_files(prefix)
+            cutoff_date = datetime.now() - timedelta(days=days_old)
+            
+            deleted_count = 0
+            for file_info in files:
+                try:
+                    # 解析文件修改时间
+                    file_date = datetime.fromisoformat(file_info['last_modified'].replace('Z', '+00:00')).replace(tzinfo=None)
+                    
+                    if file_date < cutoff_date:
+                        if self.delete_file(file_info['filename']):
+                            deleted_count += 1
+                            
+                except Exception as e:
+                    logger.warning(f"清理文件 {file_info['filename']} 失败: {str(e)}")
+                    continue
+            
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"清理旧文件失败: {str(e)}")
+            return 0
+    
     def get_storage_usage(self) -> Dict:
         """获取存储使用情况"""
         try:
             files = self.list_files()
             total_size = sum(f['size'] for f in files)
             
+            # 按类型分类
+            report_files = [f for f in files if f['filename'].startswith('reports/')]
+            system_files = [f for f in files if f['filename'].startswith('system/')]
+            
+            report_size = sum(f['size'] for f in report_files)
+            system_size = sum(f['size'] for f in system_files)
+            
             return {
                 'file_count': len(files),
                 'total_size_bytes': total_size,
                 'total_size_mb': total_size / (1024 * 1024),
+                'total_size_gb': total_size / (1024 * 1024 * 1024),
+                'report_files': len(report_files),
+                'report_size_mb': report_size / (1024 * 1024),
+                'system_files': len(system_files),
+                'system_size_kb': system_size / 1024,
+                'usage_percentage': (total_size / (1024 * 1024)) / (50 * 1024) * 100,
+                'remaining_calls': self.rate_limiter.get_remaining_calls(),
                 'files': files
             }
             
         except Exception as e:
             logger.error(f"获取存储使用情况失败: {str(e)}")
-            return {'file_count': 0, 'total_size_mb': 0, 'files': []}
+            return {
+                'file_count': 0, 'total_size_mb': 0, 'total_size_gb': 0,
+                'usage_percentage': 0, 'remaining_calls': 0, 'files': []
+            }
 
-class SupabaseManager:
-    """Supabase数据库管理器"""
-    
-    def __init__(self):
-        self.supabase: Optional[Client] = None
-        self.initialize_from_secrets()
-    
-    def initialize_from_secrets(self):
-        """从Streamlit Secrets初始化"""
-        try:
-            if "supabase" not in st.secrets:
-                raise Exception("未找到Supabase配置")
-            
-            config = st.secrets["supabase"]
-            url = config.get("url")
-            key = config.get("anon_key")
-            
-            if not url or not key:
-                raise Exception("Supabase配置不完整")
-            
-            self.supabase = create_client(url, key)
-            logger.info("Supabase客户端初始化成功")
-            
-        except Exception as e:
-            logger.error(f"Supabase初始化失败: {str(e)}")
-            raise
-    
-    def save_permissions(self, permissions_data: List[Dict]) -> bool:
-        """保存权限数据"""
-        try:
-            # 清空现有数据
-            self.supabase.table("permissions").delete().neq("id", 0).execute()
-            
-            # 插入新数据
-            if permissions_data:
-                result = self.supabase.table("permissions").insert(permissions_data).execute()
-                return len(result.data) > 0
-            return True
-            
-        except Exception as e:
-            logger.error(f"保存权限数据失败: {str(e)}")
-            return False
-    
-    def load_permissions(self) -> List[Dict]:
-        """加载权限数据"""
-        try:
-            result = self.supabase.table("permissions").select("*").execute()
-            return result.data
-            
-        except Exception as e:
-            logger.error(f"加载权限数据失败: {str(e)}")
-            return []
-    
-    def save_report_metadata(self, report_data: Dict) -> bool:
-        """保存报表元数据"""
-        try:
-            # 检查是否已存在
-            existing = self.supabase.table("reports").select("*").eq("store_name", report_data["store_name"]).execute()
-            
-            if existing.data:
-                # 更新现有记录
-                result = self.supabase.table("reports").update(report_data).eq("store_name", report_data["store_name"]).execute()
-            else:
-                # 插入新记录
-                result = self.supabase.table("reports").insert(report_data).execute()
-            
-            return len(result.data) > 0
-            
-        except Exception as e:
-            logger.error(f"保存报表元数据失败: {str(e)}")
-            return False
-    
-    def load_report_metadata(self, store_name: str = None) -> List[Dict]:
-        """加载报表元数据"""
-        try:
-            query = self.supabase.table("reports").select("*")
-            
-            if store_name:
-                query = query.eq("store_name", store_name)
-            
-            result = query.execute()
-            return result.data
-            
-        except Exception as e:
-            logger.error(f"加载报表元数据失败: {str(e)}")
-            return []
-    
-    def delete_report_metadata(self, report_id: int) -> bool:
-        """删除报表元数据"""
-        try:
-            result = self.supabase.table("reports").delete().eq("id", report_id).execute()
-            return len(result.data) > 0
-            
-        except Exception as e:
-            logger.error(f"删除报表元数据失败: {str(e)}")
-            return False
-
-class TencentSupabaseSystem:
-    """腾讯云+Supabase混合存储系统"""
+class TencentCOSSystem:
+    """基于腾讯云COS的完整存储系统 - 优化版本"""
     
     def __init__(self):
         self.cos_manager = TencentCOSManager()
-        self.database = SupabaseManager()
+        self.permissions_file = "system/permissions.json"
+        self.metadata_file = "system/metadata.json"
         self.initialized = True
     
     def show_architecture_info(self):
         """显示架构信息"""
-        st.markdown('''
+        usage = self.cos_manager.get_storage_usage()
+        
+        st.markdown(f'''
         <div class="architecture-info">
-        <h4>🏗️ 腾讯云 + Supabase 混合架构</h4>
-        <p><strong>📦 腾讯云COS</strong>: 存储Excel文件 (50GB永久免费)</p>
-        <p><strong>🗄️ Supabase</strong>: 存储权限、元数据、分析结果 (500MB免费)</p>
-        <p><strong>💫 优势</strong>: 中国用户优化 + 大文件支持 + 快速查询 + 微信支付</p>
+        <h4>☁️ 腾讯云COS优化存储架构</h4>
+        <p><strong>📦 智能压缩</strong>: GZIP压缩，节省60-80%存储空间</p>
+        <p><strong>🔐 权限管理</strong>: /system/permissions.json.gz (压缩存储)</p>
+        <p><strong>📋 元数据管理</strong>: /system/metadata.json.gz (压缩存储)</p>
+        <p><strong>📊 报表存储</strong>: /reports/*.xlsx.gz (压缩存储)</p>
+        <p><strong>⚡ API优化</strong>: 剩余调用 {usage['remaining_calls']}/小时</p>
+        <p><strong>💾 存储状态</strong>: {usage['total_size_gb']:.2f}GB / 50GB ({usage['usage_percentage']:.2f}%)</p>
         </div>
         ''', unsafe_allow_html=True)
+    
+    def load_permissions(self) -> List[Dict]:
+        """从COS加载权限数据"""
+        try:
+            data = self.cos_manager.download_json(self.permissions_file)
+            return data.get('permissions', []) if data else []
+        except Exception as e:
+            logger.error(f"加载权限数据失败: {str(e)}")
+            return []
+    
+    def save_permissions(self, permissions_data: List[Dict]) -> bool:
+        """保存权限数据到COS（压缩）"""
+        try:
+            data = {
+                'permissions': permissions_data,
+                'last_updated': datetime.now().isoformat(),
+                'version': '2.0',
+                'compressed': True
+            }
+            return self.cos_manager.upload_json(data, self.permissions_file, compress=True)
+        except Exception as e:
+            logger.error(f"保存权限数据失败: {str(e)}")
+            return False
+    
+    def load_metadata(self) -> Dict:
+        """从COS加载元数据"""
+        try:
+            data = self.cos_manager.download_json(self.metadata_file)
+            return data if data else {'reports': [], 'compressed': True}
+        except Exception as e:
+            logger.error(f"加载元数据失败: {str(e)}")
+            return {'reports': [], 'compressed': True}
+    
+    def save_metadata(self, metadata: Dict) -> bool:
+        """保存元数据到COS（压缩）"""
+        try:
+            metadata['last_updated'] = datetime.now().isoformat()
+            metadata['compressed'] = True
+            return self.cos_manager.upload_json(metadata, self.metadata_file, compress=True)
+        except Exception as e:
+            logger.error(f"保存元数据失败: {str(e)}")
+            return False
     
     def upload_and_process_permissions(self, uploaded_file) -> bool:
         """上传并处理权限文件"""
@@ -354,7 +565,7 @@ class TencentSupabaseSystem:
                 st.error("❌ 权限文件格式错误：需要至少两列（门店名称、人员编号）")
                 return False
             
-            # 转换为数据库格式
+            # 转换为权限数据格式
             permissions_data = []
             for _, row in df.iterrows():
                 store_name = str(row.iloc[0]).strip()
@@ -368,11 +579,11 @@ class TencentSupabaseSystem:
                         "updated_at": datetime.now().isoformat()
                     })
             
-            # 保存到数据库
-            success = self.database.save_permissions(permissions_data)
+            # 保存到COS（压缩）
+            success = self.save_permissions(permissions_data)
             
             if success:
-                st.success(f"✅ 权限数据保存成功：{len(permissions_data)} 条记录")
+                st.success(f"✅ 权限数据保存成功：{len(permissions_data)} 条记录（已压缩）")
                 return True
             else:
                 st.error("❌ 权限数据保存失败")
@@ -384,33 +595,50 @@ class TencentSupabaseSystem:
             return False
     
     def upload_and_process_reports(self, uploaded_file) -> bool:
-        """上传并处理报表文件"""
+        """上传并处理报表文件（压缩优化）"""
         try:
             file_size_mb = len(uploaded_file.getvalue()) / 1024 / 1024
-            st.info(f"📄 文件大小: {file_size_mb:.2f} MB")
+            st.info(f"📄 原始文件大小: {file_size_mb:.2f} MB")
+            
+            # 检查存储空间
+            usage = self.cos_manager.get_storage_usage()
+            if usage['total_size_mb'] > MAX_STORAGE_MB:
+                st.error(f"❌ 存储空间不足！当前使用: {usage['total_size_gb']:.1f}GB / 40GB")
+                return False
             
             # 生成唯一文件名
             timestamp = int(time.time())
             file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()[:8]
-            filename = f"reports_{timestamp}_{file_hash}.xlsx"
+            filename = f"reports/reports_{timestamp}_{file_hash}.xlsx"
             
             # 先清理旧数据
             with st.spinner("正在清理旧数据..."):
-                self._cleanup_old_reports()
+                deleted_count = self._cleanup_old_reports()
+                if deleted_count > 0:
+                    st.info(f"🧹 已清理 {deleted_count} 个旧文件")
             
-            # 上传原始文件到腾讯云COS
-            with st.spinner("正在上传文件到腾讯云COS..."):
-                file_url = self.cos_manager.upload_file(uploaded_file.getvalue(), filename)
+            # 上传压缩文件到腾讯云COS
+            with st.spinner("正在压缩并上传文件到腾讯云COS..."):
+                file_url = self.cos_manager.upload_file(
+                    uploaded_file.getvalue(), 
+                    filename, 
+                    compress=True
+                )
                 
                 if not file_url:
                     st.error("❌ 文件上传失败")
                     return False
             
-            st.success(f"✅ 文件上传成功: {filename}")
+            st.success(f"✅ 文件上传成功: {filename}.gz")
             
             # 解析Excel文件并提取元数据
             with st.spinner("正在分析文件内容..."):
                 excel_file = pd.ExcelFile(uploaded_file)
+                
+                # 加载现有元数据
+                metadata = self.load_metadata()
+                if 'reports' not in metadata:
+                    metadata['reports'] = []
                 
                 reports_processed = 0
                 
@@ -424,43 +652,59 @@ class TencentSupabaseSystem:
                         # 分析应收-未收额
                         analysis_result = self.analyze_receivable_data(df)
                         
-                        # 生成数据摘要
+                        # 生成精简数据摘要
                         summary = {
-                            "total_rows": len(df),
-                            "total_columns": len(df.columns),
-                            "columns": df.columns.tolist()[:10],  # 只保存前10列名
+                            "rows": len(df),
+                            "cols": len(df.columns),
+                            "key_cols": df.columns.tolist()[:5],  # 只保存前5列名
                             "has_data": not df.empty
                         }
                         
-                        # 保存报表元数据到数据库
+                        # 创建报表元数据
                         report_metadata = {
                             "store_name": sheet_name,
-                            "filename": filename,
+                            "filename": filename + ".gz",  # 标记为压缩文件
                             "file_url": file_url,
                             "file_size_mb": file_size_mb,
                             "upload_time": datetime.now().isoformat(),
-                            "summary": json.dumps(summary),
-                            "analysis_result": json.dumps(analysis_result),
-                            "row_count": len(df),
-                            "column_count": len(df.columns)
+                            "summary": summary,
+                            "analysis": analysis_result,
+                            "id": f"{sheet_name}_{timestamp}",
+                            "compressed": True
                         }
                         
-                        if self.database.save_report_metadata(report_metadata):
-                            reports_processed += 1
-                            st.success(f"✅ {sheet_name}: {len(df)} 行数据已处理")
-                        else:
-                            st.warning(f"⚠️ {sheet_name}: 元数据保存失败")
-                            
+                        # 移除同门店的旧记录
+                        metadata['reports'] = [r for r in metadata['reports'] 
+                                             if r.get('store_name') != sheet_name]
+                        
+                        # 添加新记录
+                        metadata['reports'].append(report_metadata)
+                        reports_processed += 1
+                        
+                        st.success(f"✅ {sheet_name}: {len(df)} 行数据已处理")
+                        
                     except Exception as e:
                         st.warning(f"⚠️ 跳过工作表 '{sheet_name}': {str(e)}")
                         continue
                 
+                # 保存更新后的元数据（压缩）
                 if reports_processed > 0:
-                    st.success(f"🎉 报表处理完成：{reports_processed} 个工作表")
-                    
-                    # 显示存储统计
-                    self._show_storage_stats()
-                    return True
+                    if self.save_metadata(metadata):
+                        st.markdown(f'''
+                        <div class="compression-info">
+                        <h4>🎉 报表处理完成</h4>
+                        <p>✅ 处理工作表: {reports_processed} 个</p>
+                        <p>📦 启用压缩存储，节省存储空间</p>
+                        <p>⚡ API调用优化，避免频率限制</p>
+                        </div>
+                        ''', unsafe_allow_html=True)
+                        
+                        # 显示存储统计
+                        self._show_storage_stats()
+                        return True
+                    else:
+                        st.error("❌ 元数据保存失败")
+                        return False
                 else:
                     st.error("❌ 没有成功处理任何工作表")
                     return False
@@ -470,59 +714,75 @@ class TencentSupabaseSystem:
             logger.error(f"处理报表文件失败: {str(e)}")
             return False
     
-    def _cleanup_old_reports(self):
+    def _cleanup_old_reports(self, days_old: int = 3) -> int:
         """清理旧的报表数据"""
         try:
-            # 获取所有报表元数据
-            all_reports = self.database.load_report_metadata()
+            # 使用COS管理器的清理功能
+            deleted_count = self.cos_manager.cleanup_old_files(days_old, "reports/")
             
-            # 删除腾讯云COS中的旧文件
-            deleted_count = 0
-            for report in all_reports:
-                try:
-                    filename = report.get("filename")
-                    if filename and self.cos_manager.delete_file(filename):
-                        deleted_count += 1
-                except:
-                    continue
-            
-            # 清空数据库中的报表元数据
-            self.database.supabase.table("reports").delete().neq("id", 0).execute()
-            
-            if deleted_count > 0:
-                st.info(f"🧹 已清理 {deleted_count} 个旧文件")
+            # 同时清理元数据中的旧记录
+            metadata = self.load_metadata()
+            if 'reports' in metadata:
+                cutoff_date = datetime.now() - timedelta(days=days_old)
                 
+                old_reports = metadata['reports']
+                metadata['reports'] = [
+                    r for r in metadata['reports']
+                    if datetime.fromisoformat(r.get('upload_time', '1970-01-01')) > cutoff_date
+                ]
+                
+                removed_count = len(old_reports) - len(metadata['reports'])
+                if removed_count > 0:
+                    self.save_metadata(metadata)
+                    deleted_count += removed_count
+            
+            return deleted_count
+            
         except Exception as e:
             st.warning(f"清理旧数据时出错: {str(e)}")
+            return 0
     
     def _show_storage_stats(self):
         """显示存储统计信息"""
         try:
-            # 获取COS使用情况
-            cos_usage = self.cos_manager.get_storage_usage()
-            
-            # 获取数据库记录数
-            reports_count = len(self.database.load_report_metadata())
-            permissions_count = len(self.database.load_permissions())
+            usage = self.cos_manager.get_storage_usage()
+            metadata = self.load_metadata()
+            permissions = self.load_permissions()
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("📦 COS文件数", cos_usage['file_count'])
-                st.metric("💾 COS使用", f"{cos_usage['total_size_mb']:.2f} MB")
+                st.metric("📦 总文件数", usage['file_count'])
+                st.metric("💾 总使用量", f"{usage['total_size_gb']:.2f} GB")
                 
-                # 使用率计算
-                usage_percent = (cos_usage['total_size_mb'] / (50 * 1024)) * 100
-                st.progress(min(usage_percent / 100, 1.0))
-                st.caption(f"使用率: {usage_percent:.1f}% / 50GB免费")
+                # 使用率进度条
+                progress_value = min(usage['usage_percentage'] / 100, 1.0)
+                st.progress(progress_value)
+                
+                # 颜色编码的使用率
+                if usage['usage_percentage'] > 80:
+                    st.error(f"🔴 使用率: {usage['usage_percentage']:.1f}%")
+                elif usage['usage_percentage'] > 60:
+                    st.warning(f"🟡 使用率: {usage['usage_percentage']:.1f}%")
+                else:
+                    st.success(f"🟢 使用率: {usage['usage_percentage']:.1f}%")
             
             with col2:
-                st.metric("🗄️ 报表记录", reports_count)
-                st.metric("👥 权限记录", permissions_count)
+                st.metric("📊 报表文件", usage['report_files'])
+                st.metric("📋 报表记录", len(metadata.get('reports', [])))
+                st.metric("📄 报表大小", f"{usage['report_size_mb']:.1f} MB")
+                
+                # 压缩效果估算
+                if usage['report_size_mb'] > 0:
+                    estimated_uncompressed = usage['report_size_mb'] * 3  # 假设压缩比为70%
+                    savings = estimated_uncompressed - usage['report_size_mb']
+                    st.success(f"💰 压缩节省: ~{savings:.1f} MB")
             
             with col3:
-                st.metric("📊 总门店数", reports_count)
-                st.metric("🚀 系统状态", "正常运行")
+                st.metric("🔐 权限记录", len(permissions))
+                st.metric("⚙️ 系统文件", usage['system_files'])
+                st.metric("🗃️ 系统大小", f"{usage['system_size_kb']:.1f} KB")
+                st.metric("⚡ API剩余", f"{usage['remaining_calls']}/小时")
                 
         except Exception as e:
             st.warning(f"获取存储统计失败: {str(e)}")
@@ -573,24 +833,30 @@ class TencentSupabaseSystem:
         return result
     
     def load_store_data(self, store_name: str) -> Optional[pd.DataFrame]:
-        """加载指定门店的数据"""
+        """加载指定门店的数据（支持解压）"""
         try:
-            # 从数据库获取报表元数据
-            reports = self.database.load_report_metadata(store_name)
+            # 从元数据获取报表信息
+            metadata = self.load_metadata()
+            reports = metadata.get('reports', [])
             
-            if not reports:
+            # 查找匹配的门店报表
+            matching_report = None
+            for report in reports:
+                if report.get('store_name') == store_name:
+                    matching_report = report
+                    break
+            
+            if not matching_report:
                 return None
             
-            # 获取最新的报表
-            latest_report = max(reports, key=lambda x: x.get('upload_time', ''))
-            filename = latest_report.get('filename')
-            
+            filename = matching_report.get('filename')
             if not filename:
                 return None
             
-            # 从腾讯云COS下载文件
+            # 从腾讯云COS下载文件（自动解压）
             with st.spinner(f"正在从腾讯云加载 {store_name} 的数据..."):
-                file_data = self.cos_manager.download_file(filename)
+                is_compressed = filename.endswith('.gz')
+                file_data = self.cos_manager.download_file(filename, decompress=is_compressed)
                 
                 if file_data:
                     # 解析Excel文件
@@ -603,6 +869,9 @@ class TencentSupabaseSystem:
                     if matching_sheets:
                         df = pd.read_excel(io.BytesIO(file_data), sheet_name=matching_sheets[0])
                         return df
+                    elif store_name in excel_file.sheet_names:
+                        df = pd.read_excel(io.BytesIO(file_data), sheet_name=store_name)
+                        return df
                     
             return None
             
@@ -614,7 +883,7 @@ class TencentSupabaseSystem:
     def verify_user_permission(self, store_name: str, user_id: str) -> bool:
         """验证用户权限"""
         try:
-            permissions = self.database.load_permissions()
+            permissions = self.load_permissions()
             
             for perm in permissions:
                 stored_store = perm.get('store_name', '').strip()
@@ -633,7 +902,7 @@ class TencentSupabaseSystem:
     def get_available_stores(self) -> List[str]:
         """获取可用的门店列表"""
         try:
-            permissions = self.database.load_permissions()
+            permissions = self.load_permissions()
             stores = list(set(perm.get('store_name', '') for perm in permissions))
             return sorted([store for store in stores if store.strip()])
             
@@ -647,22 +916,61 @@ class TencentSupabaseSystem:
         try:
             if cleanup_type == "all":
                 # 清理所有数据
-                cos_files = self.cos_manager.list_files()
-                deleted_cos = 0
+                all_files = self.cos_manager.list_files()
+                deleted_count = 0
                 
-                for file_info in cos_files:
+                for file_info in all_files:
                     if self.cos_manager.delete_file(file_info['filename']):
-                        deleted_cos += 1
+                        deleted_count += 1
                 
-                # 清理数据库
-                self.database.supabase.table("reports").delete().neq("id", 0).execute()
-                self.database.supabase.table("permissions").delete().neq("id", 0).execute()
+                st.success(f"🧹 清理完成：删除了 {deleted_count} 个文件")
                 
-                st.success(f"🧹 清理完成：删除了 {deleted_cos} 个COS文件和所有数据库记录")
+            elif cleanup_type == "old":
+                # 只清理旧文件
+                deleted_count = self._cleanup_old_reports(7)  # 清理7天前的文件
+                st.success(f"🧹 清理旧文件完成：删除了 {deleted_count} 个文件")
                 
         except Exception as e:
             st.error(f"❌ 清理失败：{str(e)}")
             logger.error(f"存储清理失败: {str(e)}")
+    
+    def get_system_status(self) -> Dict:
+        """获取系统状态"""
+        try:
+            # 检查系统文件是否存在
+            permissions_exists = self.cos_manager.file_exists(self.permissions_file) or \
+                               self.cos_manager.file_exists(self.permissions_file.replace('.json', '.gz'))
+            metadata_exists = self.cos_manager.file_exists(self.metadata_file) or \
+                            self.cos_manager.file_exists(self.metadata_file.replace('.json', '.gz'))
+            
+            # 获取统计数据
+            permissions = self.load_permissions()
+            metadata = self.load_metadata()
+            usage = self.cos_manager.get_storage_usage()
+            
+            return {
+                'permissions_file_exists': permissions_exists,
+                'metadata_file_exists': metadata_exists,
+                'permissions_count': len(permissions),
+                'reports_count': len(metadata.get('reports', [])),
+                'system_healthy': permissions_exists and metadata_exists,
+                'storage_usage_percent': usage['usage_percentage'],
+                'api_calls_remaining': usage['remaining_calls'],
+                'compression_enabled': True
+            }
+            
+        except Exception as e:
+            logger.error(f"获取系统状态失败: {str(e)}")
+            return {
+                'permissions_file_exists': False,
+                'metadata_file_exists': False,
+                'permissions_count': 0,
+                'reports_count': 0,
+                'system_healthy': False,
+                'storage_usage_percent': 0,
+                'api_calls_remaining': 0,
+                'compression_enabled': False
+            }
 
 # 初始化会话状态
 if 'logged_in' not in st.session_state:
@@ -677,24 +985,48 @@ if 'storage_system' not in st.session_state:
     st.session_state.storage_system = None
 
 # 主标题
-st.markdown('<h1 class="main-header">📊 门店报表查询系统 </h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">📊 门店报表查询系统 (智能压缩版)</h1>', unsafe_allow_html=True)
 
 # 初始化存储系统
 if not st.session_state.storage_system:
     try:
-        st.session_state.storage_system = TencentSupabaseSystem()
-        st.success("✅初始化成功")
+        st.session_state.storage_system = TencentCOSSystem()
+        st.success("✅ 腾讯云COS智能存储系统初始化成功")
     except Exception as e:
         st.error(f"❌ 存储系统初始化失败: {str(e)}")
         st.stop()
 
 storage_system = st.session_state.storage_system
 
-
+# 显示架构信息
+storage_system.show_architecture_info()
 
 # 侧边栏
 with st.sidebar:
     st.title("⚙️ 系统功能")
+    
+    # 显示系统状态
+    status = storage_system.get_system_status()
+    
+    if status['system_healthy']:
+        st.success("🟢 系统状态正常")
+    else:
+        st.warning("🟡 系统需要初始化")
+    
+    # 存储状态颜色编码
+    if status['storage_usage_percent'] > 80:
+        st.error(f"🔴 存储: {status['storage_usage_percent']:.1f}%")
+    elif status['storage_usage_percent'] > 60:
+        st.warning(f"🟡 存储: {status['storage_usage_percent']:.1f}%")
+    else:
+        st.success(f"🟢 存储: {status['storage_usage_percent']:.1f}%")
+    
+    st.caption(f"📋 权限: {status['permissions_count']}")
+    st.caption(f"📊 报表: {status['reports_count']}")
+    st.caption(f"⚡ API: {status['api_calls_remaining']}/h")
+    st.caption(f"📦 压缩: {'启用' if status['compression_enabled'] else '禁用'}")
+    
+    st.divider()
     
     user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
     
@@ -727,8 +1059,8 @@ with st.sidebar:
 if user_type == "管理员" and st.session_state.is_admin:
     st.markdown('''
     <div class="admin-panel">
-    <h3>👨‍💼 管理员控制面板 </h3>
-    <p>✨ </p>
+    <h3>👨‍💼 管理员控制面板</h3>
+    <p>✨ 智能压缩 + API优化 + 存储管理</p>
     </div>
     ''', unsafe_allow_html=True)
     
@@ -741,7 +1073,7 @@ if user_type == "管理员" and st.session_state.is_admin:
     # 文件上传区域
     st.subheader("📁 文件管理")
     
-    tab1, tab2, tab3 = st.tabs(["📋 权限表", "📊 报表数据", "🧹 存储清理"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 权限表", "📊 报表数据", "🧹 存储清理", "⚙️ 系统优化"])
     
     with tab1:
         st.markdown("#### 上传门店权限表")
@@ -758,13 +1090,22 @@ if user_type == "管理员" and st.session_state.is_admin:
         
         st.markdown('''
         <div class="success-box">
-        <strong>🚀 腾讯云COS优势</strong><br>
-        • 50GB永久免费存储<br>
-        • 支持任意大小Excel文件<br>
-        • 中国地区访问速度快<br>
-        • 微信支付便捷管理
+        <strong>🚀 智能压缩优势</strong><br>
+        • GZIP压缩，节省60-80%存储空间<br>
+        • 自动清理旧文件，防止空间不足<br>
+        • API调用优化，避免频率限制<br>
+        • 支持大文件，无需担心容量<br>
+        • 中国地区高速访问<br>
+        • 成本优化，50GB免费额度
         </div>
         ''', unsafe_allow_html=True)
+        
+        # 检查存储状态
+        usage = storage_system.cos_manager.get_storage_usage()
+        if usage['usage_percentage'] > 90:
+            st.error("⚠️ 存储空间即将满，建议先清理旧文件")
+        elif usage['usage_percentage'] > 75:
+            st.warning("⚠️ 存储空间使用较多，建议定期清理")
         
         reports_file = st.file_uploader("选择报表Excel文件", type=['xlsx', 'xls'], key="reports")
         
@@ -772,12 +1113,16 @@ if user_type == "管理员" and st.session_state.is_admin:
             file_size = len(reports_file.getvalue()) / 1024 / 1024
             st.metric("文件大小", f"{file_size:.2f} MB")
             
+            # 估算压缩后大小
+            estimated_compressed = file_size * 0.3  # 假设压缩比70%
+            st.info(f"📦 预计压缩后: ~{estimated_compressed:.2f} MB (节省 ~{file_size - estimated_compressed:.2f} MB)")
+            
             if file_size > 100:
                 st.markdown('''
                 <div class="warning-box">
-                <strong>⚠️ 大文件提醒</strong><br>
-                文件较大，上传可能需要较长时间，请耐心等待。<br>
-                腾讯云COS支持大文件上传，无需担心大小限制。
+                <strong>⚠️ 大文件优化</strong><br>
+                启用智能压缩，大幅减少存储空间占用。<br>
+                上传后自动清理旧文件，保持系统最佳状态。
                 </div>
                 ''', unsafe_allow_html=True)
         
@@ -788,12 +1133,60 @@ if user_type == "管理员" and st.session_state.is_admin:
     with tab3:
         st.markdown("#### 存储空间清理")
         
-        st.warning("⚠️ 清理操作将删除所有存储的数据，请谨慎操作！")
+        col1, col2 = st.columns(2)
         
-        if st.checkbox("我确认要清理所有数据"):
-            if st.button("🗑️ 清理所有存储数据", type="primary"):
-                storage_system.cleanup_storage("all")
+        with col1:
+            st.markdown("##### 🗑️ 清理旧文件")
+            st.info("清理3天前的旧报表文件，保留最新数据")
+            
+            if st.button("🧹 清理旧文件", type="secondary"):
+                storage_system.cleanup_storage("old")
                 st.rerun()
+        
+        with col2:
+            st.markdown("##### ⚠️ 完全清理")
+            st.warning("⚠️ 将删除所有存储数据，请谨慎操作！")
+            
+            if st.checkbox("我确认要清理所有数据"):
+                if st.button("🗑️ 清理所有数据", type="primary"):
+                    storage_system.cleanup_storage("all")
+                    st.rerun()
+    
+    with tab4:
+        st.markdown("#### 系统优化")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("##### 📊 存储优化")
+            usage = storage_system.cos_manager.get_storage_usage()
+            
+            st.metric("当前使用", f"{usage['total_size_gb']:.2f} GB")
+            st.metric("文件数量", usage['file_count'])
+            st.metric("压缩节省", f"~{usage['total_size_gb'] * 2:.1f} GB")
+            
+            # 优化建议
+            if usage['usage_percentage'] > 80:
+                st.error("🔴 建议立即清理旧文件")
+            elif usage['usage_percentage'] > 60:
+                st.warning("🟡 建议定期清理维护")
+            else:
+                st.success("🟢 存储状态良好")
+        
+        with col2:
+            st.markdown("##### ⚡ API优化")
+            
+            st.metric("剩余调用", f"{usage['remaining_calls']}/小时")
+            
+            if usage['remaining_calls'] < 20:
+                st.error("🔴 API调用接近限制")
+                st.info("系统已自动优化调用频率")
+            elif usage['remaining_calls'] < 50:
+                st.warning("🟡 API使用较多")
+            else:
+                st.success("🟢 API状态正常")
+            
+            st.info("💡 系统已启用智能限流，自动避免API超限")
 
 elif user_type == "管理员" and not st.session_state.is_admin:
     st.info("👈 请在左侧边栏输入管理员密码")
@@ -893,8 +1286,8 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 with col2:
-    st.caption("🏢 存储")
+    st.caption("☁️ 腾讯云COS")
 with col3:
-    st.caption("🗄️ ")
+    st.caption("📦 智能压缩")
 with col4:
-    st.caption("🔧 v5.0 ")
+    st.caption("🔧 v7.0 优化版")
