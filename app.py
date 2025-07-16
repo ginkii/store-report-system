@@ -560,6 +560,66 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
 
         return safe_sheet_operation(_load_operation)
 
+def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
+    """保存权限数据到表格"""
+    with error_handler("保存权限数据"):
+        def _save_operation():
+            # 获取指定的表格
+            spreadsheet = get_target_spreadsheet(gc)
+            worksheet = get_or_create_worksheet(spreadsheet, PERMISSIONS_SHEET_NAME)
+
+            # 清空现有数据
+            with st.spinner("清理旧数据..."):
+                worksheet.clear()
+                time.sleep(1) # 增加延迟，避免API限制
+
+            # 确保DataFrame不为空
+            if df.empty:
+                logger.warning("权限DataFrame为空，不执行保存。")
+                return False
+
+            # 准备数据，确保所有数据都是字符串
+            values = [df.columns.astype(str).tolist()] + df.astype(str).values.tolist()
+
+            # 使用 batch_update 优化写入
+            with st.spinner("保存新数据..."):
+                worksheet.update('A1', values)
+            logger.info("权限数据保存成功")
+            return True
+
+        return safe_sheet_operation(_save_operation)
+
+
+def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
+    """加载权限数据 - 使用缓存"""
+    cache_key = get_cache_key("permissions", "load")
+    cached_data = get_cache(cache_key)
+    if cached_data is not None:
+        logger.info("从缓存加载权限数据")
+        return cached_data
+
+    with error_handler("加载权限数据"):
+        def _load_operation():
+            # 获取指定的表格
+            spreadsheet = get_target_spreadsheet(gc)
+
+            try:
+                worksheet = spreadsheet.worksheet(PERMISSIONS_SHEET_NAME)
+                data = worksheet.get_all_values()
+                if len(data) <= 1:
+                    logger.info("权限数据为空")
+                    return None
+                df = pd.DataFrame(data[1:], columns=data[0])
+                logger.info(f"权限数据加载成功: {len(df)} 条记录")
+                set_cache(cache_key, df) # 设置缓存
+                return df
+            except gspread.WorksheetNotFound:
+                logger.info("权限数据表不存在")
+                return None
+
+        return safe_sheet_operation(_load_operation)
+
+
 def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
     """分析应收未收额数据 - 专门查找第69行"""
     result = {}
@@ -774,8 +834,8 @@ with st.sidebar:
                                 if save_permissions_to_sheets(df, gc):
                                     show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
                                     st.balloons()
-                                else:
-                                st.session_state.operation_status.append({"message": "❌ 权限表保存失败", "type": "error"})
+                                else: # 修正缩进：这行属于 if save_permissions_to_sheets(df, gc): else 分支
+                                    st.session_state.operation_status.append({"message": "❌ 权限表保存失败", "type": "error"})
                         else:
                             st.session_state.operation_status.append({"message": "❌ 格式错误：需要至少两列（门店名称、人员编号）", "type": "error"})
                 except Exception as e:
