@@ -214,6 +214,362 @@ def safe_cos_operation(operation_func, *args, **kwargs):
     """安全的COS操作"""
     return retry_operation(operation_func, *args, **kwargs)
 
+def unified_excel_reader(cos_client, bucket_name: str, file_key: str, file_type: str = "unknown") -> Optional[pd.DataFrame]:
+    """统一的Excel文件读取器 - 用于权限表和报表文件"""
+    try:
+        logger.info(f"开始读取 {file_type} 文件: {file_key}")
+        
+        # 1. 获取文件元数据
+        try:
+            head_response = cos_client.head_object(Bucket=bucket_name, Key=file_key)
+            file_size = head_response.get('Content-Length', 0)
+            content_type = head_response.get('Content-Type', '')
+            last_modified = head_response.get('Last-Modified', '')
+            
+            logger.info(f"文件元数据 - 大小: {file_size} 字节, 类型: {content_type}, 修改时间: {last_modified}")
+            
+            # 在Streamlit中显示文件信息
+            st.info(f"📁 {file_type} 文件信息: {file_key}")
+            st.write(f"- 文件大小: {file_size:,} 字节")
+            st.write(f"- Content-Type: {content_type}")
+            st.write(f"- 最后修改: {last_modified}")
+            
+        except Exception as e:
+            logger.error(f"获取文件元数据失败: {str(e)}")
+            st.error(f"❌ 获取文件 {file_key} 的元数据失败: {str(e)}")
+            return None
+        
+        # 2. 下载文件内容
+        try:
+            response = cos_client.get_object(Bucket=bucket_name, Key=file_key)
+            raw_content = response['Body'].read()
+            
+            logger.info(f"下载完成 - 实际大小: {len(raw_content)} 字节")
+            
+            # 验证下载大小
+            if len(raw_content) != file_size:
+                logger.warning(f"文件大小不匹配! 预期: {file_size}, 实际: {len(raw_content)}")
+                st.warning(f"⚠️ 文件大小不匹配! 预期: {file_size:,}, 实际: {len(raw_content):,}")
+            
+            # 检查文件头部（Excel文件应该以PK开头）
+            if len(raw_content) >= 2:
+                file_header = raw_content[:2]
+                hex_header = file_header.hex().upper()
+                logger.info(f"文件头部: {hex_header}")
+                
+                # Excel文件应该以PK开头（zip格式）
+                if file_header != b'PK':
+                    logger.error(f"文件头部不是Excel格式! 头部: {hex_header}")
+                    st.error(f"❌ 文件头部不是Excel格式! 头部: {hex_header}")
+                    
+                    # 显示文件前64个字节用于调试
+                    preview_bytes = raw_content[:64]
+                    st.code(f"文件前64字节: {preview_bytes.hex()}")
+                    
+                    # 尝试以文本形式显示
+                    try:
+                        preview_text = preview_bytes.decode('utf-8', errors='ignore')
+                        st.code(f"文本预览: {preview_text}")
+                    except:
+                        pass
+                    
+                    return None
+                else:
+                    st.success(f"✅ 文件头部验证通过: {hex_header}")
+            
+        except Exception as e:
+            logger.error(f"下载文件失败: {str(e)}")
+            st.error(f"❌ 下载文件失败: {str(e)}")
+            return None
+        
+        # 3. 读取Excel文件
+        try:
+            # 创建字节流并确保指针在开始位置
+            excel_buffer = io.BytesIO(raw_content)
+            excel_buffer.seek(0)
+            
+            logger.info("开始解析Excel文件...")
+            
+            # 使用pandas读取Excel
+            df = pd.read_excel(excel_buffer, engine='openpyxl')
+            
+            logger.info(f"Excel解析成功: {len(df)} 行 × {len(df.columns)} 列")
+            st.success(f"✅ Excel解析成功: {len(df)} 行 × {len(df.columns)} 列")
+            
+            # 显示列名
+            st.write(f"**列名**: {df.columns.tolist()}")
+            
+            # 显示数据预览
+            if len(df) > 0:
+                with st.expander("📊 数据预览（前5行）", expanded=False):
+                    st.dataframe(df.head(), use_container_width=True)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Excel解析失败: {str(e)}")
+            st.error(f"❌ Excel解析失败: {str(e)}")
+            
+            # 提供详细的错误信息
+            error_type = type(e).__name__
+            st.write(f"**错误类型**: {error_type}")
+            st.write(f"**错误详情**: {str(e)}")
+            
+            # 如果是BadZipFile错误，提供更多调试信息
+            if "zip" in str(e).lower():
+                st.write("**可能原因**:")
+                st.write("- 文件不是有效的Excel格式")
+                st.write("- 文件在传输过程中损坏")
+                st.write("- 文件实际上是其他格式但扩展名为.xlsx")
+            
+            return None
+            
+    except Exception as e:
+        logger.error(f"统一Excel读取器出错: {str(e)}")
+        st.error(f"❌ 读取 {file_type} 文件时出错: {str(e)}")
+        return None
+
+def load_permissions_from_cos_enhanced_v2(cos_client, bucket_name: str, permissions_file: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
+    """权限表读取器 - 使用统一的Excel读取逻辑"""
+    
+    # 临时禁用缓存选项
+    if not force_reload:
+        cache_key = get_cache_key("permissions", "load")
+        cached_data = get_cache(cache_key)
+        if cached_data is not None:
+            logger.info("使用缓存数据")
+            st.info("📦 使用缓存数据")
+            return cached_data
+    
+    st.subheader("🔍 权限表读取诊断")
+    
+    with error_handler("加载权限数据"):
+        def _load_operation():
+            # 确定文件名
+            if permissions_file.endswith('.csv'):
+                excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
+            elif permissions_file.endswith('.xlsx'):
+                excel_permissions_file = permissions_file
+            else:
+                excel_permissions_file = permissions_file + '.xlsx'
+            
+            st.write(f"📁 配置文件名: `{permissions_file}`")
+            st.write(f"📁 实际查找文件: `{excel_permissions_file}`")
+            
+            # 使用统一的Excel读取器
+            df = unified_excel_reader(cos_client, bucket_name, excel_permissions_file, "权限表")
+            
+            if df is None:
+                st.warning("⚠️ Excel格式读取失败，尝试CSV格式...")
+                
+                # 尝试CSV格式回退
+                csv_file = permissions_file if permissions_file.endswith('.csv') else permissions_file.replace('.xlsx', '.csv')
+                try:
+                    response = cos_client.get_object(Bucket=bucket_name, Key=csv_file)
+                    csv_content = response['Body'].read().decode('utf-8-sig')
+                    df = pd.read_csv(io.StringIO(csv_content))
+                    st.success(f"✅ CSV格式读取成功: {len(df)} 行")
+                except Exception as e:
+                    st.error(f"❌ CSV格式也失败: {str(e)}")
+                    return None
+            
+            if df is None or len(df) == 0:
+                st.warning("⚠️ 权限表为空或无效")
+                return None
+            
+            # 权限表数据处理
+            if len(df.columns) < 2:
+                st.error("❌ 权限表格式错误：需要至少两列")
+                return None
+            
+            # 标准化处理
+            result_df = df.iloc[:, :2].copy()
+            result_df.columns = ['门店名称', '人员编号']
+            
+            # 数据清理
+            original_count = len(result_df)
+            result_df['门店名称'] = result_df['门店名称'].astype(str).str.strip()
+            result_df['人员编号'] = result_df['人员编号'].astype(str).str.strip()
+            
+            # 移除无效数据
+            result_df = result_df[
+                (result_df['门店名称'] != '') & 
+                (result_df['人员编号'] != '') &
+                (result_df['门店名称'] != 'nan') &
+                (result_df['人员编号'] != 'nan')
+            ]
+            
+            final_count = len(result_df)
+            st.write(f"📊 数据清理: {original_count} → {final_count} 条记录")
+            
+            if final_count == 0:
+                st.warning("⚠️ 清理后权限数据为空")
+                return None
+            
+            # 显示处理后的数据预览
+            with st.expander("📋 权限数据预览（前10行）", expanded=False):
+                st.dataframe(result_df.head(10), use_container_width=True)
+            
+            logger.info(f"权限数据加载成功: {final_count} 条记录")
+            
+            # 设置缓存
+            if not force_reload:
+                set_cache(cache_key, result_df)
+            
+            return result_df
+        
+        return safe_cos_operation(_load_operation)
+
+def get_single_report_from_cos_v2(cos_client, bucket_name: str, store_name: str) -> Optional[pd.DataFrame]:
+    """报表文件读取器 - 使用统一的Excel读取逻辑"""
+    cache_key = get_cache_key("single_report", store_name)
+    cached_data = get_cache(cache_key)
+    if cached_data is not None:
+        st.info("📦 使用缓存的报表数据")
+        return cached_data
+    
+    st.subheader(f"🔍 报表文件读取诊断 - {store_name}")
+    
+    with error_handler(f"加载门店 {store_name} 的报表"):
+        def _load_operation():
+            # 查找文件
+            safe_store_name = store_name.replace(' ', '_')
+            
+            try:
+                response = cos_client.list_objects(
+                    Bucket=bucket_name,
+                    Prefix=f'reports/{safe_store_name}_',
+                    MaxKeys=100
+                )
+                
+                if 'Contents' not in response or len(response['Contents']) == 0:
+                    st.warning(f"⚠️ 未找到门店 {store_name} 的报表文件")
+                    return None
+                
+                # 查找最新文件
+                latest_file = None
+                latest_time = None
+                
+                st.write(f"📁 找到 {len(response['Contents'])} 个文件:")
+                for obj in response['Contents']:
+                    key = obj['Key']
+                    file_time = obj['LastModified']
+                    file_size = obj['Size']
+                    
+                    st.write(f"- {key} ({file_size:,} 字节, {file_time})")
+                    
+                    if key.endswith('.xlsx'):
+                        if latest_time is None or file_time > latest_time:
+                            latest_time = file_time
+                            latest_file = key
+                
+                if latest_file is None:
+                    st.error(f"❌ 没有找到有效的Excel文件")
+                    return None
+                
+                st.success(f"✅ 选择最新文件: {latest_file}")
+                
+                # 使用统一的Excel读取器
+                df = unified_excel_reader(cos_client, bucket_name, latest_file, f"报表({store_name})")
+                
+                if df is not None:
+                    # 报表数据处理
+                    processed_df = process_report_dataframe(df)
+                    
+                    # 设置缓存
+                    set_cache(cache_key, processed_df)
+                    
+                    return processed_df
+                else:
+                    return None
+                
+            except Exception as e:
+                st.error(f"❌ 查找报表文件失败: {str(e)}")
+                return None
+        
+        return safe_cos_operation(_load_operation)
+
+def compare_file_properties(cos_client, bucket_name: str, permissions_file: str, store_name: str):
+    """对比权限表和报表文件的属性"""
+    st.subheader("🔍 文件属性对比")
+    
+    try:
+        # 权限表文件
+        excel_permissions_file = permissions_file.replace('.csv', '.xlsx') if permissions_file.endswith('.csv') else permissions_file
+        
+        try:
+            perm_head = cos_client.head_object(Bucket=bucket_name, Key=excel_permissions_file)
+            perm_info = {
+                'file': excel_permissions_file,
+                'size': perm_head.get('Content-Length', 0),
+                'type': perm_head.get('Content-Type', ''),
+                'modified': perm_head.get('Last-Modified', '')
+            }
+        except Exception as e:
+            perm_info = {'error': str(e)}
+        
+        # 报表文件
+        safe_store_name = store_name.replace(' ', '_')
+        try:
+            list_response = cos_client.list_objects(
+                Bucket=bucket_name,
+                Prefix=f'reports/{safe_store_name}_',
+                MaxKeys=1
+            )
+            
+            if 'Contents' in list_response and len(list_response['Contents']) > 0:
+                report_key = list_response['Contents'][0]['Key']
+                report_head = cos_client.head_object(Bucket=bucket_name, Key=report_key)
+                report_info = {
+                    'file': report_key,
+                    'size': report_head.get('Content-Length', 0),
+                    'type': report_head.get('Content-Type', ''),
+                    'modified': report_head.get('Last-Modified', '')
+                }
+            else:
+                report_info = {'error': 'No report file found'}
+        except Exception as e:
+            report_info = {'error': str(e)}
+        
+        # 显示对比结果
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**权限表文件**")
+            if 'error' in perm_info:
+                st.error(f"❌ {perm_info['error']}")
+            else:
+                st.success(f"✅ {perm_info['file']}")
+                st.write(f"- 大小: {perm_info['size']:,} 字节")
+                st.write(f"- 类型: {perm_info['type']}")
+                st.write(f"- 修改: {perm_info['modified']}")
+        
+        with col2:
+            st.write("**报表文件**")
+            if 'error' in report_info:
+                st.error(f"❌ {report_info['error']}")
+            else:
+                st.success(f"✅ {report_info['file']}")
+                st.write(f"- 大小: {report_info['size']:,} 字节")
+                st.write(f"- 类型: {report_info['type']}")
+                st.write(f"- 修改: {report_info['modified']}")
+        
+        # 对比分析
+        if 'error' not in perm_info and 'error' not in report_info:
+            st.write("**对比分析**:")
+            if perm_info['type'] == report_info['type']:
+                st.success("✅ Content-Type 一致")
+            else:
+                st.warning(f"⚠️ Content-Type 不一致: {perm_info['type']} vs {report_info['type']}")
+            
+            if perm_info['size'] > 0 and report_info['size'] > 0:
+                st.success("✅ 文件大小都大于0")
+            else:
+                st.error("❌ 存在空文件")
+    
+    except Exception as e:
+        st.error(f"❌ 文件属性对比失败: {str(e)}")
+
 def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, permissions_file: str) -> bool:
     """保存权限数据到COS - Excel格式，确保数据完整性"""
     with error_handler("保存权限数据"):
@@ -446,111 +802,9 @@ def clear_permissions_cache():
             del st.session_state[full_key]
             logger.info(f"已清除缓存: {cache_key}")
 
-def load_permissions_from_cos_enhanced(cos_client, bucket_name: str, permissions_file: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
-    """从COS加载权限数据 - Excel格式增强诊断版本"""
-    cache_key = get_cache_key("permissions", "load")
-    
-    if not force_reload:
-        cached_data = get_cache(cache_key)
-        if cached_data is not None:
-            logger.info("使用缓存数据")
-            return cached_data
-    
-    with error_handler("加载权限数据"):
-        def _load_operation():
-            try:
-                # 更改文件扩展名为.xlsx
-                excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
-                
-                logger.info(f"开始从COS下载权限文件: {excel_permissions_file}")
-                
-                # 从COS下载文件
-                response = cos_client.get_object(
-                    Bucket=bucket_name,
-                    Key=excel_permissions_file
-                )
-                
-                # 读取原始内容
-                raw_content = response['Body'].read()
-                logger.info(f"原始文件大小: {len(raw_content)} 字节 (Excel格式)")
-                
-                # 直接使用pandas读取Excel
-                df = pd.read_excel(io.BytesIO(raw_content))
-                logger.info(f"Excel读取成功: {len(df)} 行 × {len(df.columns)} 列")
-                
-                if len(df) == 0:
-                    logger.info("权限表为空")
-                    return None
-                
-                # 确保有必要的列
-                if len(df.columns) < 2:
-                    logger.error("权限表格式错误：列数不足")
-                    return None
-                
-                # 只取前两列作为权限数据
-                result_df = df.iloc[:, :2].copy()
-                result_df.columns = ['门店名称', '人员编号']
-                
-                # 数据清理
-                result_df['门店名称'] = result_df['门店名称'].astype(str).str.strip()
-                result_df['人员编号'] = result_df['人员编号'].astype(str).str.strip()
-                
-                # 移除空行和无效数据
-                result_df = result_df[
-                    (result_df['门店名称'] != '') & 
-                    (result_df['人员编号'] != '') &
-                    (result_df['门店名称'] != 'nan') &
-                    (result_df['人员编号'] != 'nan')
-                ]
-                
-                if len(result_df) == 0:
-                    logger.warning("清理后权限数据为空")
-                    return None
-                
-                logger.info(f"权限数据加载成功 (Excel格式): {len(result_df)} 条记录")
-                
-                # 设置缓存
-                set_cache(cache_key, result_df)
-                return result_df
-                
-            except CosServiceError as e:
-                if e.get_error_code() == 'NoSuchKey':
-                    # 尝试读取旧的CSV格式文件
-                    logger.info("Excel格式权限文件不存在，尝试读取旧的CSV格式")
-                    try:
-                        response = cos_client.get_object(Bucket=bucket_name, Key=permissions_file)
-                        csv_content = response['Body'].read().decode('utf-8-sig')
-                        df = pd.read_csv(io.StringIO(csv_content))
-                        logger.info(f"成功读取旧CSV格式文件: {len(df)} 行")
-                        
-                        # 简单处理并返回
-                        if len(df.columns) >= 2:
-                            result_df = df.iloc[:, :2].copy()
-                            result_df.columns = ['门店名称', '人员编号']
-                            # 基本清理
-                            result_df = result_df.fillna('').astype(str)
-                            result_df = result_df[(result_df['门店名称'] != '') & (result_df['人员编号'] != '')]
-                            
-                            logger.info(f"CSV文件处理完成: {len(result_df)} 条记录")
-                            return result_df
-                        
-                    except Exception as csv_error:
-                        logger.error(f"读取CSV格式也失败: {str(csv_error)}")
-                    
-                    logger.info("权限文件不存在（Excel和CSV格式都没有）")
-                    return None
-                else:
-                    logger.error(f"COS服务错误: {e.get_error_code()} - {e.get_error_msg()}")
-                    raise e
-            except Exception as e:
-                logger.error(f"加载权限数据时发生错误: {str(e)}")
-                raise e
-        
-        return safe_cos_operation(_load_operation)
-
 def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Optional[pd.DataFrame]:
-    """从COS加载权限数据 - 使用增强版本"""
-    return load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=False)
+    """从COS加载权限数据 - 使用统一读取逻辑"""
+    return load_permissions_from_cos_enhanced_v2(cos_client, bucket_name, permissions_file, force_reload=False)
 
 def save_single_report_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, store_name: str) -> bool:
     """保存单个门店报表到COS"""
@@ -721,72 +975,8 @@ def get_store_list_from_cos(cos_client, bucket_name: str) -> List[str]:
         return safe_cos_operation(_load_operation)
 
 def get_single_report_from_cos(cos_client, bucket_name: str, store_name: str) -> Optional[pd.DataFrame]:
-    """从COS获取单个门店的报表数据 - 按需加载优化"""
-    cache_key = get_cache_key("single_report", store_name)
-    cached_data = get_cache(cache_key)
-    if cached_data is not None:
-        return cached_data
-    
-    with error_handler(f"加载门店 {store_name} 的报表"):
-        def _load_operation():
-            try:
-                # 清理门店名称用于搜索
-                safe_store_name = store_name.replace(' ', '_')
-                
-                # 列出该门店的所有报表文件
-                response = cos_client.list_objects(
-                    Bucket=bucket_name,
-                    Prefix=f'reports/{safe_store_name}_',
-                    MaxKeys=100
-                )
-                
-                if 'Contents' not in response or len(response['Contents']) == 0:
-                    logger.info(f"门店 {store_name} 没有报表文件")
-                    return None
-                
-                # 获取最新的文件（按时间排序）
-                latest_file = None
-                latest_time = None
-                
-                for obj in response['Contents']:
-                    key = obj['Key']
-                    if key.endswith('.xlsx'):
-                        file_time = obj['LastModified']
-                        if latest_time is None or file_time > latest_time:
-                            latest_time = file_time
-                            latest_file = key
-                
-                if latest_file is None:
-                    logger.info(f"门店 {store_name} 没有有效的Excel文件")
-                    return None
-                
-                # 下载并解析最新的报表文件
-                file_response = cos_client.get_object(
-                    Bucket=bucket_name,
-                    Key=latest_file
-                )
-                
-                # 读取Excel文件
-                excel_content = file_response['Body'].read()
-                df = pd.read_excel(io.BytesIO(excel_content))
-                
-                # 数据处理和清理
-                df = process_report_dataframe(df)
-                
-                logger.info(f"门店 {store_name} 报表加载成功: {len(df)} 行")
-                
-                # 设置缓存
-                set_cache(cache_key, df)
-                return df
-                
-            except CosServiceError as e:
-                logger.error(f"COS操作失败: {e.get_error_code()} - {e.get_error_msg()}")
-                return None
-            except Exception as e:
-                logger.error(f"加载报表数据失败: {str(e)}")
-                return None
-        
-        return safe_cos_operation(_load_operation)
+    """从COS获取单个门店的报表数据 - 使用统一读取逻辑"""
+    return get_single_report_from_cos_v2(cos_client, bucket_name, store_name)
 
 def process_report_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """处理报表DataFrame - 统一的数据清理逻辑"""
@@ -1011,7 +1201,8 @@ def init_session_state():
         'operation_status': [],
         'reports_uploader_key': 'initial_reports_uploader_key',
         'permissions_uploader_key': 'initial_permissions_uploader_key',
-        'show_diagnosis': False
+        'show_diagnosis': False,
+        'debug_mode': False
     }
     
     for key, default_value in defaults.items():
@@ -1019,7 +1210,6 @@ def init_session_state():
             st.session_state[key] = default_value
 
 # 主程序开始
-# 主程序开始 - 修改后的版本
 def main():
     try:
         # 初始化会话状态
@@ -1059,11 +1249,10 @@ def main():
             
             # 调试选项
             st.subheader("🔧 调试选项")
-            debug_mode = st.checkbox("启用详细调试", value=False)
+            debug_mode = st.checkbox("启用详细调试", value=st.session_state.debug_mode)
+            st.session_state.debug_mode = debug_mode
             
             if debug_mode:
-                st.session_state.debug_mode = True
-                
                 if st.button("🔍 对比文件属性"):
                     if st.session_state.logged_in:
                         compare_file_properties(cos_client, bucket_name, permissions_file, st.session_state.store_name)
@@ -1083,8 +1272,6 @@ def main():
                         del st.session_state[key]
                     st.success("✅ 所有缓存已清除")
                     st.rerun()
-            else:
-                st.session_state.debug_mode = False
             
             # 用户类型选择
             user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
