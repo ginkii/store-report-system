@@ -215,7 +215,7 @@ def safe_cos_operation(operation_func, *args, **kwargs):
     return retry_operation(operation_func, *args, **kwargs)
 
 def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, permissions_file: str) -> bool:
-    """保存权限数据到COS"""
+    """保存权限数据到COS - 增强版，包含详细处理日志"""
     with error_handler("保存权限数据"):
         def _save_operation():
             # 数据验证
@@ -227,26 +227,181 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
+            # 创建处理报告
+            processing_report = {
+                'original_rows': len(df),
+                'original_columns': len(df.columns),
+                'processed_rows': 0,
+                'skipped_rows': [],
+                'error_rows': [],
+                'duplicate_rows': [],
+                'empty_rows': []
+            }
+            
+            # 显示原始数据统计
+            st.info(f"📊 原始数据：{len(df)} 行 × {len(df.columns)} 列")
+            
+            # 显示原始数据预览
+            with st.expander("🔍 原始数据预览（前10行）", expanded=False):
+                st.dataframe(df.head(10), use_container_width=True)
+            
             # 准备CSV数据
             csv_data = []
             csv_data.append(['门店名称', '人员编号', '更新时间'])
             
             processed_count = 0
+            seen_combinations = set()  # 用于检测重复数据
+            
+            # 创建进度条
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
             for idx, row in df.iterrows():
+                progress = (idx + 1) / len(df)
+                progress_bar.progress(progress)
+                status_text.text(f"处理第 {idx + 1}/{len(df)} 行...")
+                
                 try:
-                    store_name = str(row.iloc[0]).strip()
-                    user_id = str(row.iloc[1]).strip()
+                    # 获取原始值
+                    raw_store = row.iloc[0] if pd.notna(row.iloc[0]) else ""
+                    raw_user = row.iloc[1] if pd.notna(row.iloc[1]) else ""
                     
-                    # 跳过空行
-                    if not store_name or not user_id or store_name == 'nan' or user_id == 'nan':
+                    # 转换为字符串并清理
+                    store_name = str(raw_store).strip()
+                    user_id = str(raw_user).strip()
+                    
+                    # 记录空行
+                    if (not store_name or store_name == 'nan' or store_name == 'None') and \
+                       (not user_id or user_id == 'nan' or user_id == 'None'):
+                        processing_report['empty_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '门店和编号都为空'
+                        })
                         continue
                     
+                    # 检查门店名称
+                    if not store_name or store_name == 'nan' or store_name == 'None':
+                        processing_report['skipped_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '门店名称为空'
+                        })
+                        continue
+                    
+                    # 检查人员编号
+                    if not user_id or user_id == 'nan' or user_id == 'None':
+                        processing_report['skipped_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '人员编号为空'
+                        })
+                        continue
+                    
+                    # 清理特殊字符但保留更多有效数据
+                    store_name = store_name.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                    user_id = user_id.replace('\n', '').replace('\r', '').replace('\t', '')
+                    
+                    # 去除多余空格
+                    store_name = ' '.join(store_name.split())
+                    user_id = ' '.join(user_id.split())
+                    
+                    # 最终验证
+                    if len(store_name) == 0 or len(user_id) == 0:
+                        processing_report['skipped_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '清理后数据为空'
+                        })
+                        continue
+                    
+                    # 检查重复数据
+                    combination = (store_name.lower(), user_id.lower())
+                    if combination in seen_combinations:
+                        processing_report['duplicate_rows'].append({
+                            'row': idx + 1,
+                            'store': store_name,
+                            'user': user_id,
+                            'reason': '重复的门店-编号组合'
+                        })
+                        continue
+                    
+                    seen_combinations.add(combination)
                     csv_data.append([store_name, user_id, current_time])
                     processed_count += 1
                     
                 except Exception as e:
-                    logger.warning(f"跳过第{idx+1}行数据: {str(e)}")
+                    processing_report['error_rows'].append({
+                        'row': idx + 1,
+                        'store': raw_store if 'raw_store' in locals() else 'N/A',
+                        'user': raw_user if 'raw_user' in locals() else 'N/A',
+                        'reason': f'处理错误: {str(e)}'
+                    })
+                    logger.warning(f"处理第{idx+1}行时出错: {str(e)}")
                     continue
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            # 更新处理报告
+            processing_report['processed_rows'] = processed_count
+            
+            # 显示处理结果
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("原始数据", f"{processing_report['original_rows']} 行")
+            with col2:
+                st.metric("成功处理", f"{processed_count} 行", 
+                         delta=f"{processed_count - processing_report['original_rows']}")
+            with col3:
+                skipped_total = len(processing_report['skipped_rows']) + \
+                               len(processing_report['error_rows']) + \
+                               len(processing_report['empty_rows']) + \
+                               len(processing_report['duplicate_rows'])
+                st.metric("跳过数据", f"{skipped_total} 行")
+            
+            # 显示详细处理报告
+            with st.expander("📋 详细处理报告", expanded=True):
+                
+                # 成功处理的数据预览
+                if processed_count > 0:
+                    st.subheader("✅ 成功处理的数据")
+                    processed_df = pd.DataFrame(csv_data[1:], columns=csv_data[0])
+                    st.dataframe(processed_df.head(10), use_container_width=True)
+                    if len(processed_df) > 10:
+                        st.caption(f"显示前10条，共{len(processed_df)}条")
+                
+                # 空行报告
+                if processing_report['empty_rows']:
+                    st.subheader("⚪ 空行数据")
+                    st.write(f"发现 {len(processing_report['empty_rows'])} 个完全空行")
+                    if len(processing_report['empty_rows']) <= 5:
+                        for item in processing_report['empty_rows']:
+                            st.caption(f"第{item['row']}行: 门店='{item['store']}', 编号='{item['user']}'")
+                    else:
+                        st.caption(f"显示前5个: {[f'第{item['row']}行' for item in processing_report['empty_rows'][:5]]}")
+                
+                # 跳过的数据报告
+                if processing_report['skipped_rows']:
+                    st.subheader("⚠️ 跳过的数据")
+                    skip_df = pd.DataFrame(processing_report['skipped_rows'])
+                    st.dataframe(skip_df, use_container_width=True)
+                
+                # 重复数据报告
+                if processing_report['duplicate_rows']:
+                    st.subheader("🔄 重复数据")
+                    dup_df = pd.DataFrame(processing_report['duplicate_rows'])
+                    st.dataframe(dup_df, use_container_width=True)
+                
+                # 错误数据报告
+                if processing_report['error_rows']:
+                    st.subheader("❌ 处理错误的数据")
+                    error_df = pd.DataFrame(processing_report['error_rows'])
+                    st.dataframe(error_df, use_container_width=True)
             
             if processed_count == 0:
                 raise DataProcessingError("没有有效的权限数据")
@@ -265,11 +420,16 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 ContentType='text/csv; charset=utf-8',
                 Metadata={
                     'upload-time': current_time,
-                    'record-count': str(processed_count)
+                    'record-count': str(processed_count),
+                    'original-count': str(processing_report['original_rows']),
+                    'skipped-count': str(len(processing_report['skipped_rows']) + 
+                                          len(processing_report['error_rows']) + 
+                                          len(processing_report['empty_rows']) + 
+                                          len(processing_report['duplicate_rows']))
                 }
             )
             
-            logger.info(f"权限数据保存成功: {processed_count} 条记录")
+            logger.info(f"权限数据保存成功: {processed_count} 条记录 (原始: {processing_report['original_rows']} 条)")
             
             # 清除相关缓存
             clear_permissions_cache()
@@ -292,7 +452,7 @@ def clear_permissions_cache():
             logger.info(f"已清除缓存: {cache_key}")
 
 def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Optional[pd.DataFrame]:
-    """从COS加载权限数据 - 使用缓存"""
+    """从COS加载权限数据 - 优化过滤逻辑版本"""
     cache_key = get_cache_key("permissions", "load")
     cached_data = get_cache(cache_key)
     if cached_data is not None:
@@ -315,28 +475,118 @@ def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: st
                     logger.info("权限表为空")
                     return None
                 
+                logger.info(f"从COS读取到原始数据: {len(df)} 行 × {len(df.columns)} 列")
+                
                 # 确保有必要的列
                 if len(df.columns) < 2:
                     logger.error("权限表格式错误：列数不足")
                     return None
                 
-                result_df = df[['门店名称', '人员编号']].copy()
+                # 创建过滤统计
+                filter_stats = {
+                    'original_count': len(df),
+                    'empty_store': 0,
+                    'empty_user': 0,
+                    'both_empty': 0,
+                    'final_count': 0
+                }
                 
-                # 数据清理
-                result_df['门店名称'] = result_df['门店名称'].astype(str).str.strip()
-                result_df['人员编号'] = result_df['人员编号'].astype(str).str.strip()
+                # 只取前两列作为权限数据
+                result_df = df.iloc[:, :2].copy()
+                result_df.columns = ['门店名称', '人员编号']
                 
-                # 移除空行和无效数据
-                result_df = result_df[
-                    (result_df['门店名称'] != '') & 
-                    (result_df['人员编号'] != '') &
-                    (result_df['门店名称'] != 'nan') &
-                    (result_df['人员编号'] != 'nan')
-                ]
+                logger.info(f"提取权限列后: {len(result_df)} 行")
+                
+                # 优化的数据清理 - 更宽松的条件
+                def is_empty_value(val):
+                    """判断值是否为空 - 更宽松的条件"""
+                    if pd.isna(val):
+                        return True
+                    val_str = str(val).strip()
+                    return val_str in ['', 'nan', 'None', 'NaN', 'null', 'NULL']
+                
+                def clean_value(val):
+                    """清理数据值 - 保留更多有效数据"""
+                    if pd.isna(val):
+                        return ''
+                    
+                    val_str = str(val).strip()
+                    
+                    # 移除首尾空格和特殊字符
+                    val_str = val_str.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                    val_str = ' '.join(val_str.split())  # 合并多个空格
+                    
+                    # 如果清理后为这些值，则认为是空
+                    if val_str.lower() in ['nan', 'none', 'null', '']:
+                        return ''
+                    
+                    return val_str
+                
+                # 清理数据
+                result_df['门店名称'] = result_df['门店名称'].apply(clean_value)
+                result_df['人员编号'] = result_df['人员编号'].apply(clean_value)
+                
+                logger.info(f"数据清理后: {len(result_df)} 行")
+                
+                # 统计空值情况
+                empty_store_mask = result_df['门店名称'] == ''
+                empty_user_mask = result_df['人员编号'] == ''
+                both_empty_mask = empty_store_mask & empty_user_mask
+                
+                filter_stats['empty_store'] = empty_store_mask.sum()
+                filter_stats['empty_user'] = empty_user_mask.sum()
+                filter_stats['both_empty'] = both_empty_mask.sum()
+                
+                # 只过滤两个字段都为空的行（更宽松的过滤）
+                result_df = result_df[~both_empty_mask]
+                
+                # 如果门店名称为空但人员编号不为空，保留并标记
+                store_empty_but_user_exists = result_df['门店名称'] == ''
+                if store_empty_but_user_exists.any():
+                    logger.warning(f"发现 {store_empty_but_user_exists.sum()} 行门店名称为空但人员编号不为空的数据，已保留")
+                    result_df.loc[store_empty_but_user_exists, '门店名称'] = '未知门店'
+                
+                # 如果人员编号为空但门店名称不为空，保留并标记
+                user_empty_but_store_exists = result_df['人员编号'] == ''
+                if user_empty_but_store_exists.any():
+                    logger.warning(f"发现 {user_empty_but_store_exists.sum()} 行人员编号为空但门店名称不为空的数据，已保留")
+                    result_df.loc[user_empty_but_store_exists, '人员编号'] = '未知编号'
+                
+                # 移除重复数据（保留第一次出现的）
+                original_len = len(result_df)
+                result_df = result_df.drop_duplicates(subset=['门店名称', '人员编号'], keep='first')
+                duplicates_removed = original_len - len(result_df)
+                if duplicates_removed > 0:
+                    logger.info(f"移除重复数据: {duplicates_removed} 行")
+                
+                filter_stats['final_count'] = len(result_df)
+                
+                # 记录过滤统计
+                logger.info(f"权限数据过滤统计:")
+                logger.info(f"  原始数据: {filter_stats['original_count']} 行")
+                logger.info(f"  门店名称为空: {filter_stats['empty_store']} 行")
+                logger.info(f"  人员编号为空: {filter_stats['empty_user']} 行")
+                logger.info(f"  两者都为空: {filter_stats['both_empty']} 行")
+                logger.info(f"  重复数据: {duplicates_removed} 行")
+                logger.info(f"  最终保留: {filter_stats['final_count']} 行")
+                
+                # 将统计信息保存到session state，供管理员界面显示
+                st.session_state.permissions_filter_stats = {
+                    'original_count': filter_stats['original_count'],
+                    'empty_store': filter_stats['empty_store'],
+                    'empty_user': filter_stats['empty_user'],
+                    'both_empty': filter_stats['both_empty'],
+                    'duplicates_removed': duplicates_removed,
+                    'final_count': filter_stats['final_count'],
+                    'load_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
                 
                 if len(result_df) == 0:
-                    logger.warning("清理后权限数据为空")
+                    logger.warning("过滤后权限数据为空")
                     return None
+                
+                # 重置索引
+                result_df = result_df.reset_index(drop=True)
                 
                 logger.info(f"权限数据加载成功: {len(result_df)} 条记录")
                 
@@ -898,27 +1148,102 @@ def main():
                             st.session_state.last_permissions_hash = file_hash
                             st.session_state.permissions_upload_successful = False
                             
-                            with st.spinner("处理权限表文件..."):
-                                df = pd.read_excel(permissions_file_upload)
+                            with st.spinner("分析Excel文件结构..."):
+                                # 尝试读取Excel文件的所有工作表
+                                excel_file = pd.ExcelFile(permissions_file_upload)
+                                st.info(f"📄 发现 {len(excel_file.sheet_names)} 个工作表：{excel_file.sheet_names}")
                                 
-                                if len(df.columns) >= 2:
-                                    with st.spinner("保存到腾讯云..."):
-                                        if save_permissions_to_cos(df, cos_client, bucket_name, permissions_file):
-                                            show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
-                                            st.session_state.permissions_upload_successful = True
-                                            st.balloons()
-                                            
-                                            # 重置上传器
-                                            st.session_state.permissions_uploader_key = f"{datetime.now().timestamp()}_permissions"
-                                            st.rerun()
-                                        else:
-                                            show_status_message("❌ 保存失败", "error")
-                                            st.session_state.permissions_upload_successful = False
+                                # 让用户选择工作表（如果有多个）
+                                if len(excel_file.sheet_names) > 1:
+                                    selected_sheet = st.selectbox(
+                                        "选择包含权限数据的工作表：", 
+                                        excel_file.sheet_names,
+                                        key="permission_sheet_selector"
+                                    )
                                 else:
-                                    show_status_message("❌ 格式错误：需要至少两列（门店名称、人员编号）", "error")
+                                    selected_sheet = excel_file.sheet_names[0]
+                                
+                                # 读取选定的工作表
+                                df_raw = pd.read_excel(permissions_file_upload, sheet_name=selected_sheet)
+                                st.info(f"📊 原始数据：{len(df_raw)} 行 × {len(df_raw.columns)} 列")
+                                
+                                # 显示原始数据的前几行，帮助用户确认数据结构
+                                st.subheader("🔍 原始数据预览")
+                                st.dataframe(df_raw.head(10), use_container_width=True)
+                                
+                                # 让用户选择包含权限数据的列
+                                if len(df_raw.columns) >= 2:
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        store_column = st.selectbox(
+                                            "选择门店名称列：",
+                                            df_raw.columns.tolist(),
+                                            index=0,
+                                            key="store_column_selector"
+                                        )
+                                    with col2:
+                                        user_column = st.selectbox(
+                                            "选择人员编号列：",
+                                            df_raw.columns.tolist(),
+                                            index=1 if len(df_raw.columns) > 1 else 0,
+                                            key="user_column_selector"
+                                        )
+                                    
+                                    # 检查是否有表头行需要跳过
+                                    header_row = st.number_input(
+                                        "数据开始行（0表示第一行）：",
+                                        min_value=0,
+                                        max_value=len(df_raw)-1,
+                                        value=0,
+                                        key="header_row_selector"
+                                    )
+                                    
+                                    if st.button("🚀 开始处理权限数据", key="process_permissions"):
+                                        try:
+                                            # 重新读取Excel，跳过指定的表头行
+                                            if header_row > 0:
+                                                df_processed = pd.read_excel(
+                                                    permissions_file_upload, 
+                                                    sheet_name=selected_sheet,
+                                                    skiprows=header_row
+                                                )
+                                            else:
+                                                df_processed = df_raw.copy()
+                                            
+                                            # 重新排列列顺序，确保门店名称和人员编号在前两列
+                                            store_idx = df_processed.columns.get_loc(store_column)
+                                            user_idx = df_processed.columns.get_loc(user_column)
+                                            
+                                            # 创建新的DataFrame，门店名称和人员编号作为前两列
+                                            df = pd.DataFrame({
+                                                '门店名称': df_processed[store_column],
+                                                '人员编号': df_processed[user_column]
+                                            })
+                                            
+                                            st.info(f"🔄 处理后数据：{len(df)} 行 × {len(df.columns)} 列")
+                                            
+                                            with st.spinner("保存到腾讯云..."):
+                                                if save_permissions_to_cos(df, cos_client, bucket_name, permissions_file):
+                                                    st.session_state.permissions_upload_successful = True
+                                                    st.balloons()
+                                                    
+                                                    # 重置上传器
+                                                    st.session_state.permissions_uploader_key = f"{datetime.now().timestamp()}_permissions"
+                                                    st.rerun()
+                                                else:
+                                                    show_status_message("❌ 保存失败", "error")
+                                                    st.session_state.permissions_upload_successful = False
+                                        
+                                        except Exception as e:
+                                            show_status_message(f"❌ 数据处理失败：{str(e)}", "error")
+                                            st.session_state.permissions_upload_successful = False
+                                
+                                else:
+                                    show_status_message("❌ 数据格式错误：需要至少两列数据", "error")
                                     st.session_state.permissions_upload_successful = False
+                    
                     except Exception as e:
-                        show_status_message(f"❌ 处理失败：{str(e)}", "error")
+                        show_status_message(f"❌ 文件读取失败：{str(e)}", "error")
                         st.session_state.permissions_upload_successful = False
                 
                 # 上传财务报表
@@ -980,12 +1305,27 @@ def main():
                 
                 # 缓存管理
                 st.subheader("🗂️ 缓存管理")
-                if st.button("清除所有缓存"):
-                    cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
-                    for key in cache_keys:
-                        del st.session_state[key]
-                    show_status_message("✅ 缓存已清除", "success")
-                    st.rerun()
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("清除所有缓存"):
+                        cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
+                        for key in cache_keys:
+                            del st.session_state[key]
+                        # 同时清除统计信息
+                        if hasattr(st.session_state, 'permissions_filter_stats'):
+                            del st.session_state.permissions_filter_stats
+                        show_status_message("✅ 所有缓存已清除", "success")
+                        st.rerun()
+                
+                with col2:
+                    if st.button("🔄 重新加载权限数据"):
+                        # 清除权限相关缓存
+                        clear_permissions_cache()
+                        if hasattr(st.session_state, 'permissions_filter_stats'):
+                            del st.session_state.permissions_filter_stats
+                        show_status_message("✅ 权限数据缓存已清除，将重新加载", "success")
+                        st.rerun()
         
         else:
             if st.session_state.logged_in:
@@ -1026,7 +1366,63 @@ def main():
             # 数据预览
             if permissions_data is not None and len(permissions_data) > 0:
                 st.subheader("👥 权限数据预览")
+                
+                # 显示过滤统计（如果有的话）
+                if hasattr(st.session_state, 'permissions_filter_stats'):
+                    stats = st.session_state.permissions_filter_stats
+                    
+                    # 创建统计显示
+                    st.markdown("#### 📊 数据处理统计")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "原始数据", 
+                            f"{stats['original_count']} 行"
+                        )
+                    with col2:
+                        st.metric(
+                            "最终保留", 
+                            f"{stats['final_count']} 行",
+                            delta=f"{stats['final_count'] - stats['original_count']}"
+                        )
+                    with col3:
+                        filtered_total = stats['both_empty'] + stats.get('duplicates_removed', 0)
+                        st.metric(
+                            "过滤数据", 
+                            f"{filtered_total} 行"
+                        )
+                    with col4:
+                        retention_rate = (stats['final_count'] / stats['original_count'] * 100) if stats['original_count'] > 0 else 0
+                        st.metric(
+                            "保留率", 
+                            f"{retention_rate:.1f}%"
+                        )
+                    
+                    # 详细过滤信息
+                    with st.expander("🔍 详细过滤统计", expanded=False):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write("**过滤原因统计：**")
+                            st.write(f"• 门店名称为空：{stats['empty_store']} 行")
+                            st.write(f"• 人员编号为空：{stats['empty_user']} 行")
+                            st.write(f"• 两者都为空：{stats['both_empty']} 行")
+                            st.write(f"• 重复数据：{stats.get('duplicates_removed', 0)} 行")
+                        with col2:
+                            st.write("**数据质量：**")
+                            if retention_rate >= 90:
+                                st.success("✅ 数据质量良好")
+                            elif retention_rate >= 70:
+                                st.warning("⚠️ 数据质量一般，建议检查原始文件")
+                            else:
+                                st.error("❌ 数据质量较差，请检查文件格式")
+                            
+                            st.caption(f"统计时间：{stats.get('load_time', 'N/A')}")
+                
                 st.dataframe(permissions_data.head(10), use_container_width=True)
+                
+                if len(permissions_data) > 10:
+                    st.caption(f"显示前10条记录，共{len(permissions_data)}条")
             
             if store_list:
                 st.subheader("📊 门店列表预览")
