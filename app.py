@@ -90,7 +90,7 @@ class ReportQueryApp:
         if self.has_permission_handler:
             tab1, tab2, tab3, tab4, tab5 = st.tabs(["📤 上传报表", "🔐 权限管理", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
         else:
-            tab1, tab3, tab4, tab5 = st.tabs(["📤 上传报表", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📤 上传报表", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
         
         with tab1:
             self.admin_upload_report()
@@ -108,13 +108,13 @@ class ReportQueryApp:
             with tab5:
                 self.admin_system_settings()
         else:
-            with tab3:
+            with tab2:
                 self.admin_manage_reports()
             
-            with tab4:
+            with tab3:
                 self.admin_system_stats()
             
-            with tab5:
+            with tab4:
                 self.admin_system_settings()
     
     def admin_upload_report(self):
