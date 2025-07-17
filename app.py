@@ -90,7 +90,7 @@ class ReportQueryApp:
         if self.has_permission_handler:
             tab1, tab2, tab3, tab4, tab5 = st.tabs(["📤 上传报表", "🔐 权限管理", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
         else:
-            tab1, tab2, tab3, tab4 = st.tabs(["📤 上传报表", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
+            tab1, tab3, tab4, tab5 = st.tabs(["📤 上传报表", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
         
         with tab1:
             self.admin_upload_report()
@@ -108,13 +108,13 @@ class ReportQueryApp:
             with tab5:
                 self.admin_system_settings()
         else:
-            with tab2:
+            with tab3:
                 self.admin_manage_reports()
             
-            with tab3:
+            with tab4:
                 self.admin_system_stats()
             
-            with tab4:
+            with tab5:
                 self.admin_system_settings()
     
     def admin_upload_report(self):
@@ -556,6 +556,39 @@ class ReportQueryApp:
         """管理员系统设置"""
         st.subheader("⚙️ 系统设置")
         
+        # 系统诊断
+        st.subheader("🔍 系统诊断")
+        
+        # 获取系统状态
+        system_status = self.json_handler.get_system_status()
+        
+        # 显示关键状态
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            if system_status['data_loaded']:
+                st.success("✅ 数据加载正常")
+            else:
+                st.error("❌ 数据加载失败")
+        
+        with col2:
+            if system_status['has_current_report']:
+                st.success("✅ 有当前报表")
+            else:
+                st.warning("⚠️ 无当前报表")
+        
+        with col3:
+            if system_status['file_accessible']:
+                st.success("✅ 文件可访问")
+            else:
+                st.error("❌ 文件不可访问")
+        
+        with col4:
+            st.info(f"存储: {system_status['storage_type']}")
+        
+        # 详细状态信息
+        with st.expander("📋 详细系统状态"):
+            st.json(system_status)
+        
         # 配置验证
         st.subheader("配置验证")
         
@@ -572,12 +605,31 @@ class ReportQueryApp:
         # 连接测试
         st.subheader("连接测试")
         
-        if st.button("测试存储连接"):
-            with st.spinner("正在测试连接..."):
-                if self.storage_handler.test_connection():
-                    st.success(f"✅ {STORAGE_TYPE} 连接测试成功")
-                else:
-                    st.error(f"❌ {STORAGE_TYPE} 连接测试失败")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("测试存储连接"):
+                with st.spinner("正在测试连接..."):
+                    if self.storage_handler.test_connection():
+                        st.success(f"✅ {STORAGE_TYPE} 连接测试成功")
+                    else:
+                        st.error(f"❌ {STORAGE_TYPE} 连接测试失败")
+        
+        with col2:
+            if st.button("测试数据读写"):
+                with st.spinner("正在测试数据读写..."):
+                    try:
+                        # 测试数据读取
+                        current_report = self.json_handler.get_current_report()
+                        st.success("✅ 数据读取测试成功")
+                        
+                        # 测试数据写入（更新系统信息）
+                        test_info = {"test_time": datetime.now().isoformat()}
+                        if hasattr(self.json_handler, 'update_system_info'):
+                            self.json_handler.update_system_info(test_info)
+                            st.success("✅ 数据写入测试成功")
+                        
+                    except Exception as e:
+                        st.error(f"❌ 数据读写测试失败: {str(e)}")
         
         # 权限系统测试
         if self.has_permission_handler:
@@ -591,6 +643,37 @@ class ReportQueryApp:
                         st.info(f"权限记录数: {permission_stats['total_records']}")
                     except Exception as e:
                         st.error(f"❌ 权限系统测试失败: {str(e)}")
+        
+        # 数据管理
+        st.subheader("数据管理")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("📁 备份数据"):
+                with st.spinner("正在备份数据..."):
+                    if self.json_handler.backup_data():
+                        st.success("✅ 数据备份完成")
+                    else:
+                        st.error("❌ 数据备份失败")
+        
+        with col2:
+            if st.button("🔄 从备份恢复"):
+                if st.button("⚠️ 确认恢复", key="confirm_restore"):
+                    with st.spinner("正在从备份恢复..."):
+                        if self.json_handler.restore_from_backup():
+                            st.rerun()
+                        else:
+                            st.error("❌ 恢复失败")
+        
+        with col3:
+            if st.button("🗑️ 清空数据"):
+                if st.button("⚠️ 确认清空", key="confirm_clear"):
+                    with st.spinner("正在清空数据..."):
+                        if self.json_handler.clear_all_data():
+                            st.rerun()
+                        else:
+                            st.error("❌ 清空失败")
         
         # 索引系统状态
         st.subheader("索引系统状态")
@@ -632,8 +715,8 @@ class ReportQueryApp:
                 for cached_sheet in cache_info['cached_sheets']:
                     st.text(f"• {cached_sheet}")
         
-        # 数据管理
-        st.subheader("数据管理")
+        # 高级操作
+        st.subheader("高级操作")
         
         st.warning("⚠️ 以下操作会影响系统数据，请谨慎操作！")
         
@@ -676,12 +759,76 @@ class ReportQueryApp:
         """用户查询界面"""
         st.title("🔍 门店报表查询")
         
+        # 首先检查系统状态
+        system_status = self.json_handler.get_system_status()
+        
+        # 如果数据加载失败，显示错误信息
+        if not system_status['data_loaded']:
+            st.error("🔧 系统数据加载失败")
+            st.error("请联系管理员检查系统状态")
+            
+            if st.button("🔄 重新加载"):
+                st.rerun()
+            
+            return
+        
+        # 如果没有当前报表
+        if not system_status['has_current_report']:
+            st.warning("📋 系统中暂无报表数据")
+            st.info("请联系管理员上传报表文件")
+            
+            # 显示系统状态
+            with st.expander("📊 查看系统状态"):
+                st.write("存储类型:", system_status['storage_type'])
+                st.write("数据加载状态:", "✅ 正常" if system_status['data_loaded'] else "❌ 异常")
+                if system_status.get('last_updated'):
+                    st.write("最后更新:", system_status['last_updated'])
+            
+            return
+        
+        # 如果报表文件不可访问
+        if not system_status['file_accessible']:
+            st.error("📁 报表文件无法访问")
+            st.error("文件可能已被删除或移动，请联系管理员重新上传")
+            
+            # 显示报表信息
+            current_report = system_status['current_report']
+            if current_report:
+                st.info(f"报表文件: {current_report['file_name']}")
+                st.info(f"上传时间: {current_report.get('upload_time', '未知')}")
+            
+            return
+        
         # 获取可用门店
         available_stores = self.query_handler.get_available_stores()
         
         if not available_stores:
-            st.error("暂无可用门店数据，请联系管理员上传报表")
+            st.warning("🏪 未找到可用门店数据")
+            
+            # 提供更详细的诊断信息
+            with st.expander("🔍 诊断信息"):
+                current_report = system_status['current_report']
+                if current_report:
+                    st.write("当前报表:", current_report['file_name'])
+                    st.write("门店工作表数:", system_status['store_sheets_count'])
+                    
+                    if system_status['store_sheets_count'] == 0:
+                        st.error("报表中没有检测到门店工作表")
+                    else:
+                        st.info(f"检测到 {system_status['store_sheets_count']} 个门店，但查询接口获取失败")
+            
+            if st.button("🔄 刷新门店列表"):
+                st.rerun()
+            
             return
+        
+        # 显示系统状态（正常情况）
+        with st.sidebar:
+            st.success("✅ 系统运行正常")
+            current_report = system_status['current_report']
+            if current_report:
+                st.info(f"📋 当前报表: {current_report['file_name']}")
+                st.info(f"🏪 可用门店: {len(available_stores)} 个")
         
         # 门店选择
         st.subheader("第一步：选择门店")
@@ -701,17 +848,23 @@ class ReportQueryApp:
             with st.expander("🔍 查看门店数据预览"):
                 if st.button("加载预览"):
                     with st.spinner("正在加载预览..."):
-                        preview_data = self.query_handler.get_store_preview(selected_store, 5)
-                        
-                        if preview_data:
-                            st.info(f"总行数: {preview_data['total_rows']}, 总列数: {preview_data['total_columns']}")
+                        try:
+                            preview_data = self.query_handler.get_store_preview(selected_store, 5)
                             
-                            # 显示预览数据
-                            if preview_data['preview_data']:
-                                df = pd.DataFrame(preview_data['preview_data'])
-                                st.dataframe(df, use_container_width=True)
+                            if preview_data:
+                                st.info(f"总行数: {preview_data['total_rows']}, 总列数: {preview_data['total_columns']}")
+                                
+                                # 显示预览数据
+                                if preview_data['preview_data']:
+                                    df = pd.DataFrame(preview_data['preview_data'])
+                                    st.dataframe(df, use_container_width=True)
+                                else:
+                                    st.warning("该门店暂无数据")
                             else:
-                                st.warning("该门店暂无数据")
+                                st.error("无法加载门店预览数据")
+                                st.info("可能原因：工作表不存在或数据格式问题")
+                        except Exception as e:
+                            st.error(f"加载预览失败: {str(e)}")
             
             # 编码查询
             st.subheader("第二步：输入查询编码")
@@ -735,24 +888,31 @@ class ReportQueryApp:
                     return
                 
                 # 执行查询
-                search_results = self.query_handler.search_code_in_store(
-                    selected_store, search_code, fuzzy_match
-                )
+                try:
+                    with st.spinner(f"正在 {selected_store} 中搜索 {search_code}..."):
+                        search_results = self.query_handler.search_code_in_store(
+                            selected_store, search_code, fuzzy_match
+                        )
+                    
+                    if search_results:
+                        # 检查是否权限被拒绝
+                        if search_results.get('permission_denied', False):
+                            st.error("🚫 " + search_results.get('error_message', '您没有权限查询此编码'))
+                            st.info("请联系管理员确认您的查询权限")
+                            return
+                        
+                        # 保存到session state
+                        st.session_state.search_results = search_results
+                        
+                        # 显示搜索结果
+                        self.display_search_results(search_results)
+                    else:
+                        st.info("未找到匹配的结果")
+                        st.info("建议：尝试使用模糊匹配或检查编码是否正确")
                 
-                if search_results:
-                    # 检查是否权限被拒绝
-                    if search_results.get('permission_denied', False):
-                        st.error("🚫 " + search_results.get('error_message', '您没有权限查询此编码'))
-                        st.info("请联系管理员确认您的查询权限")
-                        return
-                    
-                    # 保存到session state
-                    st.session_state.search_results = search_results
-                    
-                    # 显示搜索结果
-                    self.display_search_results(search_results)
-                else:
-                    st.info("未找到匹配的结果")
+                except Exception as e:
+                    st.error(f"查询过程中出现错误: {str(e)}")
+                    st.info("请稍后重试，或联系管理员")
     
     def display_search_results(self, search_results):
         """显示搜索结果"""
