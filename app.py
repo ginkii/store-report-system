@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import hashlib
 import os
+import time
 from typing import Optional
 
 # 导入自定义模块
@@ -591,18 +592,78 @@ class ReportQueryApp:
                     except Exception as e:
                         st.error(f"❌ 权限系统测试失败: {str(e)}")
         
+        # 索引系统状态
+        st.subheader("索引系统状态")
+        
+        # 显示索引进度
+        indexing_progress = self.json_handler.get_indexing_progress()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("总工作表数", indexing_progress['total_sheets'])
+            st.metric("已索引工作表", indexing_progress['indexed_sheets'])
+        
+        with col2:
+            progress_percentage = indexing_progress['progress_percentage']
+            st.metric("索引进度", f"{progress_percentage:.1f}%")
+            st.metric("待索引工作表", indexing_progress['remaining_sheets'])
+        
+        # 显示进度条
+        if indexing_progress['total_sheets'] > 0:
+            st.progress(progress_percentage / 100)
+        
+        # 缓存管理
+        st.subheader("缓存管理")
+        
+        cache_info = self.excel_parser.get_cache_info()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"**工作表缓存**: {cache_info['sheet_data_cache_size']}/{cache_info['max_cache_size']}")
+        
+        with col2:
+            if st.button("清理缓存"):
+                self.excel_parser.clear_cache()
+                st.rerun()
+        
+        # 显示缓存详情
+        if cache_info['cached_sheets']:
+            with st.expander("查看缓存详情"):
+                for cached_sheet in cache_info['cached_sheets']:
+                    st.text(f"• {cached_sheet}")
+        
         # 数据管理
         st.subheader("数据管理")
         
         st.warning("⚠️ 以下操作会影响系统数据，请谨慎操作！")
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("清空查询统计", type="secondary"):
                 # 这里可以添加清空统计的逻辑
                 st.info("功能待实现")
         
         with col2:
+            if st.button("重建索引", type="secondary"):
+                st.info("正在重建索引...")
+                # 这里可以添加重建索引的逻辑
+                current_report = self.json_handler.get_current_report()
+                if current_report:
+                    file_path = current_report.get('file_path')
+                    if file_path:
+                        file_content = self.storage_handler.download_file(file_path)
+                        if file_content:
+                            sheet_names = self.excel_parser.get_sheet_names_fast(file_content)
+                            self._build_sheet_index_with_progress(file_content, sheet_names)
+                            st.success("索引重建完成")
+                        else:
+                            st.error("无法下载文件")
+                    else:
+                        st.error("文件路径不存在")
+                else:
+                    st.error("无当前报表")
+        
+        with col3:
             if self.has_permission_handler:
                 if st.button("重置权限系统", type="secondary"):
                     if self.permission_handler.clear_permissions():
