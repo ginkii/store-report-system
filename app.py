@@ -191,10 +191,7 @@ def get_cos_client():
             Region=cos_config["region"],
             SecretId=cos_config["secret_id"],
             SecretKey=cos_config["secret_key"],
-            # 设置连接超时
-            Max_connection=30,
-            Retry_delay=0.5,
-            Max_retry=3
+            Scheme='https'  # 使用HTTPS协议
         )
         
         client = CosS3Client(config)
