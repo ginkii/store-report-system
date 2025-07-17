@@ -451,31 +451,179 @@ def clear_permissions_cache():
             del st.session_state[full_key]
             logger.info(f"已清除缓存: {cache_key}")
 
-def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Optional[pd.DataFrame]:
-    """从COS加载权限数据 - 优化过滤逻辑版本"""
+def diagnose_csv_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Dict[str, Any]:
+    """诊断COS中的CSV文件 - 原始内容分析"""
+    try:
+        # 从COS下载文件
+        response = cos_client.get_object(
+            Bucket=bucket_name,
+            Key=permissions_file
+        )
+        
+        # 读取原始内容
+        raw_content = response['Body'].read()
+        
+        # 尝试不同编码
+        encodings = ['utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'latin-1']
+        decoded_content = None
+        used_encoding = None
+        
+        for encoding in encodings:
+            try:
+                decoded_content = raw_content.decode(encoding)
+                used_encoding = encoding
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if decoded_content is None:
+            return {
+                'error': '无法解码文件内容，尝试了多种编码方式',
+                'raw_size': len(raw_content)
+            }
+        
+        # 基本统计
+        lines = decoded_content.split('\n')
+        non_empty_lines = [line for line in lines if line.strip()]
+        
+        diagnosis = {
+            'encoding': used_encoding,
+            'raw_size': len(raw_content),
+            'content_length': len(decoded_content),
+            'total_lines': len(lines),
+            'non_empty_lines': len(non_empty_lines),
+            'first_10_lines': lines[:10],
+            'last_10_lines': lines[-10:] if len(lines) > 10 else [],
+            'line_17_18': {
+                'line_17': lines[16] if len(lines) > 16 else 'N/A',
+                'line_18': lines[17] if len(lines) > 17 else 'N/A',
+                'line_19': lines[18] if len(lines) > 18 else 'N/A',
+                'line_20': lines[19] if len(lines) > 19 else 'N/A'
+            },
+            'pandas_test': None
+        }
+        
+        # 测试pandas读取
+        try:
+            df_default = pd.read_csv(io.StringIO(decoded_content))
+            diagnosis['pandas_test'] = {
+                'default': {
+                    'success': True,
+                    'rows': len(df_default),
+                    'cols': len(df_default.columns),
+                    'columns': df_default.columns.tolist()
+                }
+            }
+        except Exception as e:
+            diagnosis['pandas_test'] = {
+                'default': {
+                    'success': False,
+                    'error': str(e)
+                }
+            }
+        
+        # 测试其他pandas参数
+        pandas_options = [
+            {'on_bad_lines': 'skip'},
+            {'on_bad_lines': 'warn'},
+            {'sep': ',', 'quotechar': '"'},
+            {'engine': 'python'},
+            {'encoding': used_encoding}
+        ]
+        
+        diagnosis['pandas_test']['alternatives'] = []
+        
+        for i, options in enumerate(pandas_options):
+            try:
+                df_alt = pd.read_csv(io.StringIO(decoded_content), **options)
+                diagnosis['pandas_test']['alternatives'].append({
+                    'options': options,
+                    'success': True,
+                    'rows': len(df_alt),
+                    'cols': len(df_alt.columns)
+                })
+            except Exception as e:
+                diagnosis['pandas_test']['alternatives'].append({
+                    'options': options,
+                    'success': False,
+                    'error': str(e)
+                })
+        
+        return diagnosis
+        
+    except Exception as e:
+        return {
+            'error': f'诊断过程出错: {str(e)}'
+        }
+
+def load_permissions_from_cos_enhanced(cos_client, bucket_name: str, permissions_file: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
+    """从COS加载权限数据 - 增强诊断版本"""
     cache_key = get_cache_key("permissions", "load")
-    cached_data = get_cache(cache_key)
-    if cached_data is not None:
-        return cached_data
+    
+    if not force_reload:
+        cached_data = get_cache(cache_key)
+        if cached_data is not None:
+            logger.info("使用缓存数据")
+            return cached_data
     
     with error_handler("加载权限数据"):
         def _load_operation():
             try:
+                logger.info("开始从COS下载权限文件...")
+                
                 # 从COS下载文件
                 response = cos_client.get_object(
                     Bucket=bucket_name,
                     Key=permissions_file
                 )
                 
-                # 读取CSV内容
-                csv_content = response['Body'].read().decode('utf-8-sig')
-                df = pd.read_csv(io.StringIO(csv_content))
+                # 读取原始内容
+                raw_content = response['Body'].read()
+                logger.info(f"原始文件大小: {len(raw_content)} 字节")
+                
+                # 解码内容
+                csv_content = raw_content.decode('utf-8-sig')
+                logger.info(f"解码后内容长度: {len(csv_content)} 字符")
+                
+                # 统计原始行数
+                raw_lines = csv_content.split('\n')
+                logger.info(f"原始文件行数: {len(raw_lines)} 行")
+                
+                # 显示前几行内容用于调试
+                logger.info("原始文件前5行内容:")
+                for i, line in enumerate(raw_lines[:5]):
+                    logger.info(f"  第{i+1}行: {repr(line)}")
+                
+                # 尝试多种pandas读取方式
+                df = None
+                read_methods = [
+                    {'name': '默认方式', 'params': {}},
+                    {'name': '跳过错误行', 'params': {'on_bad_lines': 'skip'}},
+                    {'name': '警告错误行', 'params': {'on_bad_lines': 'warn'}},
+                    {'name': 'Python引擎', 'params': {'engine': 'python'}},
+                    {'name': 'Python引擎+跳过错误', 'params': {'engine': 'python', 'on_bad_lines': 'skip'}},
+                ]
+                
+                for method in read_methods:
+                    try:
+                        logger.info(f"尝试使用{method['name']}读取CSV...")
+                        df = pd.read_csv(io.StringIO(csv_content), **method['params'])
+                        logger.info(f"成功读取: {len(df)} 行 × {len(df.columns)} 列")
+                        break
+                    except Exception as e:
+                        logger.warning(f"{method['name']}读取失败: {str(e)}")
+                        continue
+                
+                if df is None:
+                    logger.error("所有CSV读取方式都失败了")
+                    return None
                 
                 if len(df) == 0:
                     logger.info("权限表为空")
                     return None
                 
-                logger.info(f"从COS读取到原始数据: {len(df)} 行 × {len(df.columns)} 列")
+                logger.info(f"pandas读取结果: {len(df)} 行 × {len(df.columns)} 列")
+                logger.info(f"列名: {df.columns.tolist()}")
                 
                 # 确保有必要的列
                 if len(df.columns) < 2:
@@ -496,6 +644,11 @@ def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: st
                 result_df.columns = ['门店名称', '人员编号']
                 
                 logger.info(f"提取权限列后: {len(result_df)} 行")
+                
+                # 显示前几行数据用于调试
+                logger.info("提取后前5行数据:")
+                for i, row in result_df.head().iterrows():
+                    logger.info(f"  第{i+1}行: 门店='{row['门店名称']}', 编号='{row['人员编号']}'")
                 
                 # 优化的数据清理 - 更宽松的条件
                 def is_empty_value(val):
@@ -537,8 +690,11 @@ def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: st
                 filter_stats['empty_user'] = empty_user_mask.sum()
                 filter_stats['both_empty'] = both_empty_mask.sum()
                 
+                logger.info(f"空值统计: 门店空={filter_stats['empty_store']}, 编号空={filter_stats['empty_user']}, 都空={filter_stats['both_empty']}")
+                
                 # 只过滤两个字段都为空的行（更宽松的过滤）
                 result_df = result_df[~both_empty_mask]
+                logger.info(f"过滤完全空行后: {len(result_df)} 行")
                 
                 # 如果门店名称为空但人员编号不为空，保留并标记
                 store_empty_but_user_exists = result_df['门店名称'] == ''
@@ -578,7 +734,9 @@ def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: st
                     'both_empty': filter_stats['both_empty'],
                     'duplicates_removed': duplicates_removed,
                     'final_count': filter_stats['final_count'],
-                    'load_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    'load_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'raw_file_lines': len(raw_lines),
+                    'pandas_rows': len(df)
                 }
                 
                 if len(result_df) == 0:
@@ -606,6 +764,9 @@ def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: st
                 raise e
         
         return safe_cos_operation(_load_operation)
+def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Optional[pd.DataFrame]:
+    """从COS加载权限数据 - 使用增强版本"""
+    return load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=False)
 
 def save_single_report_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, store_name: str) -> bool:
     """保存单个门店报表到COS"""
@@ -1065,7 +1226,8 @@ def init_session_state():
         'cos_client': None,
         'operation_status': [],
         'reports_uploader_key': 'initial_reports_uploader_key',
-        'permissions_uploader_key': 'initial_permissions_uploader_key'
+        'permissions_uploader_key': 'initial_permissions_uploader_key',
+        'show_diagnosis': False
     }
     
     for key, default_value in defaults.items():
@@ -1303,9 +1465,9 @@ def main():
                         show_status_message(f"❌ 处理失败：{str(e)}", "error")
                         st.session_state.reports_upload_successful = False
                 
-                # 缓存管理
-                st.subheader("🗂️ 缓存管理")
-                col1, col2 = st.columns(2)
+                # 缓存管理和诊断
+                st.subheader("🗂️ 缓存管理和诊断")
+                col1, col2, col3 = st.columns(3)
                 
                 with col1:
                     if st.button("清除所有缓存"):
@@ -1319,12 +1481,102 @@ def main():
                         st.rerun()
                 
                 with col2:
-                    if st.button("🔄 重新加载权限数据"):
+                    if st.button("🔄 强制重新加载"):
                         # 清除权限相关缓存
                         clear_permissions_cache()
                         if hasattr(st.session_state, 'permissions_filter_stats'):
                             del st.session_state.permissions_filter_stats
-                        show_status_message("✅ 权限数据缓存已清除，将重新加载", "success")
+                        # 强制重新加载
+                        with st.spinner("强制重新加载权限数据..."):
+                            new_data = load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=True)
+                            if new_data is not None:
+                                show_status_message(f"✅ 重新加载完成，获得 {len(new_data)} 条记录", "success")
+                            else:
+                                show_status_message("⚠️ 重新加载完成，但没有获得数据", "warning")
+                        st.rerun()
+                
+                with col3:
+                    if st.button("🔍 CSV文件诊断"):
+                        st.session_state.show_diagnosis = True
+                        st.rerun()
+                
+                # 显示诊断结果
+                if st.session_state.get('show_diagnosis', False):
+                    st.subheader("🩺 CSV文件诊断报告")
+                    
+                    with st.spinner("正在诊断CSV文件..."):
+                        diagnosis = diagnose_csv_from_cos(cos_client, bucket_name, permissions_file)
+                    
+                    if 'error' in diagnosis:
+                        st.error(f"❌ 诊断失败: {diagnosis['error']}")
+                        if 'raw_size' in diagnosis:
+                            st.info(f"原始文件大小: {diagnosis['raw_size']} 字节")
+                    else:
+                        # 基本信息
+                        st.markdown("#### 📄 文件基本信息")
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("文件编码", diagnosis['encoding'])
+                        with col2:
+                            st.metric("文件大小", f"{diagnosis['raw_size']} 字节")
+                        with col3:
+                            st.metric("总行数", diagnosis['total_lines'])
+                        with col4:
+                            st.metric("非空行数", diagnosis['non_empty_lines'])
+                        
+                        # pandas测试结果
+                        st.markdown("#### 🐼 Pandas读取测试")
+                        if diagnosis['pandas_test']:
+                            default_test = diagnosis['pandas_test'].get('default', {})
+                            if default_test.get('success'):
+                                st.success(f"✅ 默认方式读取成功: {default_test['rows']} 行 × {default_test['cols']} 列")
+                                st.write(f"**列名**: {default_test['columns']}")
+                            else:
+                                st.error(f"❌ 默认方式读取失败: {default_test.get('error')}")
+                                
+                                # 显示替代方案测试结果
+                                st.markdown("##### 🔄 替代读取方案测试")
+                                alternatives = diagnosis['pandas_test'].get('alternatives', [])
+                                for i, alt in enumerate(alternatives):
+                                    if alt['success']:
+                                        st.success(f"✅ 方案{i+1} ({alt['options']}): {alt['rows']} 行 × {alt['cols']} 列")
+                                    else:
+                                        st.error(f"❌ 方案{i+1} ({alt['options']}): {alt['error']}")
+                        
+                        # 关键行内容检查
+                        st.markdown("#### 🔍 关键行内容检查")
+                        line_17_18 = diagnosis.get('line_17_18', {})
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("**第17-20行内容:**")
+                            for line_num in ['line_17', 'line_18', 'line_19', 'line_20']:
+                                content = line_17_18.get(line_num, 'N/A')
+                                if content != 'N/A':
+                                    st.code(f"第{line_num.split('_')[1]}行: {repr(content)}")
+                                else:
+                                    st.caption(f"第{line_num.split('_')[1]}行: 不存在")
+                        
+                        with col2:
+                            st.markdown("**文件开头(前5行):**")
+                            for i, line in enumerate(diagnosis.get('first_10_lines', [])[:5]):
+                                st.code(f"第{i+1}行: {repr(line)}")
+                        
+                        # 原始文件内容预览
+                        with st.expander("📋 原始文件内容预览", expanded=False):
+                            st.markdown("**前10行:**")
+                            for i, line in enumerate(diagnosis.get('first_10_lines', [])):
+                                st.text(f"{i+1:3d}: {line}")
+                            
+                            if diagnosis.get('last_10_lines'):
+                                st.markdown("**后10行:**")
+                                total_lines = diagnosis['total_lines']
+                                for i, line in enumerate(diagnosis['last_10_lines']):
+                                    line_num = total_lines - len(diagnosis['last_10_lines']) + i + 1
+                                    st.text(f"{line_num:3d}: {line}")
+                    
+                    if st.button("关闭诊断报告"):
+                        st.session_state.show_diagnosis = False
                         st.rerun()
         
         else:
@@ -1408,6 +1660,21 @@ def main():
                             st.write(f"• 人员编号为空：{stats['empty_user']} 行")
                             st.write(f"• 两者都为空：{stats['both_empty']} 行")
                             st.write(f"• 重复数据：{stats.get('duplicates_removed', 0)} 行")
+                            
+                            # 添加原始文件统计
+                            if 'raw_file_lines' in stats:
+                                st.write("**文件读取统计：**")
+                                st.write(f"• 原始文件行数：{stats['raw_file_lines']} 行")
+                                st.write(f"• pandas读取行数：{stats.get('pandas_rows', 'N/A')} 行")
+                                
+                                # 计算读取损失
+                                if stats.get('pandas_rows') and stats['raw_file_lines'] > 1:
+                                    read_loss = stats['raw_file_lines'] - 1 - stats['pandas_rows']  # 减1是因为表头
+                                    if read_loss > 0:
+                                        st.error(f"⚠️ 文件读取阶段丢失：{read_loss} 行")
+                                    else:
+                                        st.success("✅ 文件读取完整")
+                        
                         with col2:
                             st.write("**数据质量：**")
                             if retention_rate >= 90:
@@ -1415,9 +1682,18 @@ def main():
                             elif retention_rate >= 70:
                                 st.warning("⚠️ 数据质量一般，建议检查原始文件")
                             else:
-                                st.error("❌ 数据质量较差，请检查文件格式")
+                                st.error("❌ 数据质量较差，请使用CSV诊断功能")
                             
                             st.caption(f"统计时间：{stats.get('load_time', 'N/A')}")
+                            
+                            # 添加诊断建议
+                            if 'raw_file_lines' in stats and stats.get('pandas_rows'):
+                                read_loss = stats['raw_file_lines'] - 1 - stats['pandas_rows']
+                                if read_loss > 0:
+                                    st.markdown("**🔧 建议操作：**")
+                                    st.markdown("1. 点击 'CSV文件诊断' 查看详情")
+                                    st.markdown("2. 检查第17-18行是否有格式问题")
+                                    st.markdown("3. 考虑重新上传Excel文件")
                 
                 st.dataframe(permissions_data.head(10), use_container_width=True)
                 
