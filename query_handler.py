@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import io
 import re
+import time
 
 class QueryHandler:
     def __init__(self):
@@ -113,22 +114,9 @@ class QueryHandler:
             if not file_content:
                 return None
             
-            # 解析Excel文件
-            try:
-                excel_data = pd.read_excel(io.BytesIO(file_content), sheet_name=store_name)
-                
-                # 获取预览数据
-                preview_data = excel_data.head(rows).to_dict('records')
-                
-                return {
-                    'total_rows': len(excel_data),
-                    'total_columns': len(excel_data.columns),
-                    'preview_data': preview_data,
-                    'columns': list(excel_data.columns)
-                }
-            except Exception as e:
-                st.error(f"解析Excel文件失败: {str(e)}")
-                return None
+            # 使用优化的预览方法
+            preview_data = self.excel_parser.get_sheet_preview(file_content, store_name, rows)
+            return preview_data
                 
         except Exception as e:
             st.error(f"获取门店预览失败: {str(e)}")
@@ -178,38 +166,13 @@ class QueryHandler:
                 st.error("无法下载报表文件")
                 return None
             
-            # 解析Excel文件
-            try:
-                excel_data = pd.read_excel(io.BytesIO(file_content), sheet_name=store_name)
-            except Exception as e:
-                st.error(f"解析Excel文件失败: {str(e)}")
+            # 验证工作表是否存在
+            if not self.excel_parser.validate_sheet_exists(file_content, store_name):
+                st.error(f"工作表 {store_name} 不存在")
                 return None
             
-            # 搜索匹配项
-            matches = []
-            search_code_lower = search_code.lower().strip()
-            
-            for row_index, row in excel_data.iterrows():
-                for col_name, cell_value in row.items():
-                    if pd.isna(cell_value):
-                        continue
-                    
-                    cell_str = str(cell_value).lower().strip()
-                    
-                    # 根据匹配模式搜索
-                    is_match = False
-                    if fuzzy_match:
-                        is_match = search_code_lower in cell_str
-                    else:
-                        is_match = search_code_lower == cell_str
-                    
-                    if is_match:
-                        matches.append({
-                            'row_index': row_index,
-                            'column': col_name,
-                            'matched_value': cell_value,
-                            'row_data': row.to_dict()
-                        })
+            # 使用优化的搜索方法
+            matches = self.excel_parser.search_in_sheet(file_content, store_name, search_code, fuzzy_match)
             
             # 更新查询统计
             self._update_query_stats(store_name)
@@ -231,19 +194,8 @@ class QueryHandler:
     def _update_query_stats(self, store_name: str):
         """更新查询统计"""
         try:
-            store_sheets = self.json_handler.get_store_sheets()
-            if not store_sheets:
-                return
-            
-            # 找到对应门店并更新统计
-            for store in store_sheets:
-                if store['sheet_name'] == store_name:
-                    store['query_count'] = store.get('query_count', 0) + 1
-                    store['last_query_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    break
-            
-            # 保存更新后的数据
-            self.json_handler.update_store_sheets(store_sheets)
+            # 使用新的访问统计方法
+            self.json_handler.update_sheet_access_stats(store_name)
             
         except Exception as e:
             st.error(f"更新查询统计失败: {str(e)}")
