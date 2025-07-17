@@ -8,9 +8,19 @@ from typing import Optional
 # 导入自定义模块
 from config import APP_CONFIG, STREAMLIT_CONFIG, ADMIN_PASSWORD, validate_config
 from json_handler import JSONHandler
-from cos_handler import COSHandler
 from excel_parser import ExcelParser
 from query_handler import QueryHandler
+
+# 尝试导入 COS 处理器，如果失败则使用本地存储
+try:
+    from cos_handler import COSHandler
+    storage_handler = COSHandler()
+    STORAGE_TYPE = "COS"
+except ImportError as e:
+    st.warning(f"COS 模块导入失败: {str(e)}")
+    from local_storage_handler import LocalStorageHandler
+    storage_handler = LocalStorageHandler()
+    STORAGE_TYPE = "LOCAL"
 
 # 页面配置
 st.set_page_config(
@@ -23,9 +33,19 @@ st.set_page_config(
 class ReportQueryApp:
     def __init__(self):
         self.json_handler = JSONHandler()
-        self.cos_handler = COSHandler()
+        self.storage_handler = storage_handler
         self.excel_parser = ExcelParser()
         self.query_handler = QueryHandler()
+        
+        # 权限处理器
+        try:
+            from permission_handler import PermissionHandler
+            self.permission_handler = PermissionHandler()
+            self.has_permission_handler = True
+        except ImportError as e:
+            st.error(f"权限处理器导入失败: {str(e)}")
+            self.permission_handler = None
+            self.has_permission_handler = False
         
         # 初始化session state
         if 'admin_logged_in' not in st.session_state:
@@ -66,19 +86,35 @@ class ReportQueryApp:
         st.title("📊 管理员面板")
         
         # 导航标签
-        tab1, tab2, tab3, tab4 = st.tabs(["📤 上传报表", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
+        if self.has_permission_handler:
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📤 上传报表", "🔐 权限管理", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
+        else:
+            tab1, tab2, tab3, tab4 = st.tabs(["📤 上传报表", "📋 报表管理", "📊 系统统计", "⚙️ 系统设置"])
         
         with tab1:
             self.admin_upload_report()
         
-        with tab2:
-            self.admin_manage_reports()
-        
-        with tab3:
-            self.admin_system_stats()
-        
-        with tab4:
-            self.admin_system_settings()
+        if self.has_permission_handler:
+            with tab2:
+                self.admin_permission_management()
+            
+            with tab3:
+                self.admin_manage_reports()
+            
+            with tab4:
+                self.admin_system_stats()
+            
+            with tab5:
+                self.admin_system_settings()
+        else:
+            with tab2:
+                self.admin_manage_reports()
+            
+            with tab3:
+                self.admin_system_stats()
+            
+            with tab4:
+                self.admin_system_settings()
     
     def admin_upload_report(self):
         """管理员上传报表"""
@@ -146,20 +182,20 @@ class ReportQueryApp:
                 )
                 
                 if st.button("确认上传", type="primary"):
-                    with st.spinner("正在上传文件到腾讯云..."):
-                        # 上传文件到COS
-                        cos_path = self.cos_handler.upload_file(
+                    with st.spinner("正在上传文件..."):
+                        # 上传文件
+                        file_path = self.storage_handler.upload_file(
                             file_content,
                             uploaded_file.name,
                             APP_CONFIG['upload_folder']
                         )
                         
-                        if cos_path:
+                        if file_path:
                             # 更新JSON数据
                             report_info = {
                                 'id': datetime.now().strftime('%Y%m%d_%H%M%S'),
                                 'file_name': uploaded_file.name,
-                                'cos_file_path': cos_path,
+                                'file_path': file_path,
                                 'description': description,
                                 'file_size': uploaded_file.size,
                                 'version': '1.0'
@@ -173,6 +209,174 @@ class ReportQueryApp:
                                 st.error("更新报表信息失败")
                         else:
                             st.error("文件上传失败")
+    
+    def admin_permission_management(self):
+        """管理员权限管理"""
+        if not self.has_permission_handler:
+            st.error("权限处理器未可用")
+            return
+        
+        st.subheader("🔐 权限管理")
+        
+        # 获取权限统计
+        try:
+            permission_stats = self.permission_handler.get_permission_statistics()
+        except Exception as e:
+            st.error(f"获取权限统计失败: {str(e)}")
+            return
+        
+        # 上传权限表
+        st.subheader("📤 上传权限表")
+        
+        # 文件上传
+        uploaded_file = st.file_uploader(
+            "选择权限表文件",
+            type=['xlsx', 'xls'],
+            help="请选择包含门店名称和查询编码对应关系的Excel文件"
+        )
+        
+        if uploaded_file is not None:
+            # 显示文件信息
+            st.info(f"文件名: {uploaded_file.name}")
+            st.info(f"文件大小: {uploaded_file.size / 1024:.2f} KB")
+            
+            # 文件大小检查
+            if uploaded_file.size > APP_CONFIG['max_file_size']:
+                st.error(f"文件大小超过限制 ({APP_CONFIG['max_file_size'] / 1024 / 1024:.0f}MB)")
+                return
+            
+            # 读取文件内容
+            file_content = uploaded_file.read()
+            
+            # 验证文件格式
+            is_valid, error_message = self.permission_handler.validate_permission_file(file_content)
+            if not is_valid:
+                st.error(f"文件格式错误: {error_message}")
+                return
+            
+            # 获取文件统计
+            file_stats = self.permission_handler.get_file_statistics(file_content)
+            
+            # 显示文件统计
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("总行数", file_stats.get('total_rows', 0))
+            with col2:
+                st.metric("有效记录", file_stats.get('valid_records', 0))
+            with col3:
+                st.metric("唯一门店", file_stats.get('unique_stores', 0))
+            with col4:
+                st.metric("唯一编码", file_stats.get('unique_codes', 0))
+            
+            # 解析权限表
+            is_parsed, permissions, parse_message = self.permission_handler.parse_permission_file(file_content)
+            if not is_parsed:
+                st.error(f"解析失败: {parse_message}")
+                return
+            
+            st.success(parse_message)
+            
+            # 显示权限预览
+            if permissions:
+                st.subheader("权限预览 (前10条)")
+                preview_df = pd.DataFrame(permissions[:10])
+                preview_df = preview_df.rename(columns={'store': '门店名称', 'code': '查询编码'})
+                st.dataframe(preview_df, use_container_width=True)
+            
+            # 检查权限表与汇总报表的同步
+            available_stores = self.query_handler.get_available_stores()
+            if available_stores:
+                validation_result = self.permission_handler.validate_permissions_with_stores(available_stores)
+                
+                if not validation_result['valid']:
+                    st.warning("⚠️ 权限表中存在汇总报表中不存在的门店")
+                    invalid_stores = validation_result['invalid_stores']
+                    st.error(f"无效门店: {', '.join(invalid_stores)}")
+                    st.error(f"孤立权限记录: {validation_result['orphaned_permissions']} 条")
+                else:
+                    st.success("✅ 权限表与汇总报表同步正常")
+            
+            # 上传确认
+            if st.button("确认上传权限表", type="primary"):
+                with st.spinner("正在上传权限表..."):
+                    # 上传文件
+                    file_path = self.permission_handler.upload_permission_file(
+                        file_content,
+                        uploaded_file.name
+                    )
+                    
+                    if file_path:
+                        # 更新权限数据
+                        if self.permission_handler.update_permissions(
+                            file_path,
+                            permissions,
+                            uploaded_file.name,
+                            uploaded_file.size
+                        ):
+                            st.success("权限表上传成功！")
+                            st.success(f"共更新 {len(permissions)} 条权限记录")
+                            st.balloons()
+                        else:
+                            st.error("更新权限数据失败")
+                    else:
+                        st.error("权限表上传失败")
+        
+        # 当前权限表信息
+        st.subheader("📋 当前权限表")
+        
+        if permission_stats['has_permissions']:
+            file_info = permission_stats['file_info']
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"**文件名**: {file_info.get('file_name', 'N/A')}")
+                st.info(f"**上传时间**: {file_info.get('upload_time', 'N/A')}")
+                st.info(f"**总记录数**: {permission_stats['total_records']}")
+            
+            with col2:
+                st.info(f"**文件大小**: {file_info.get('file_size', 0) / 1024:.2f} KB")
+                st.info(f"**唯一门店**: {permission_stats['unique_stores']}")
+                st.info(f"**唯一编码**: {permission_stats['unique_codes']}")
+            
+            # 权限记录预览
+            st.subheader("权限记录预览")
+            preview_permissions = self.permission_handler.get_permissions_preview(20)
+            
+            if preview_permissions:
+                preview_df = pd.DataFrame(preview_permissions)
+                preview_df = preview_df.rename(columns={'store': '门店名称', 'code': '查询编码'})
+                st.dataframe(preview_df, use_container_width=True)
+            
+            # 权限管理操作
+            st.subheader("权限管理操作")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("导出权限表", type="secondary"):
+                    excel_content = self.permission_handler.export_permissions()
+                    if excel_content:
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        filename = f"权限表_{timestamp}.xlsx"
+                        
+                        st.download_button(
+                            label="下载权限表",
+                            data=excel_content,
+                            file_name=filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    else:
+                        st.error("导出失败")
+            
+            with col2:
+                if st.button("清空权限表", type="secondary"):
+                    if self.permission_handler.clear_permissions():
+                        st.success("权限表已清空")
+                        st.rerun()
+                    else:
+                        st.error("清空失败")
+        
+        else:
+            st.info("暂无权限表，请先上传权限表文件")
     
     def admin_manage_reports(self):
         """管理员报表管理"""
@@ -193,7 +397,9 @@ class ReportQueryApp:
             with col2:
                 st.info(f"**文件大小**: {current_report.get('file_size', 0) / 1024 / 1024:.2f} MB")
                 st.info(f"**版本**: {current_report.get('version', 'N/A')}")
-                st.info(f"**存储路径**: {current_report['cos_file_path']}")
+                # 兼容旧版本的存储路径字段
+                file_path = current_report.get('file_path') or current_report.get('cos_file_path')
+                st.info(f"**存储路径**: {file_path}")
             
             # 门店列表
             store_sheets = self.json_handler.get_store_sheets()
@@ -241,40 +447,106 @@ class ReportQueryApp:
         # 获取系统状态
         status = self.query_handler.get_system_status()
         
+        # 获取权限统计
+        if self.has_permission_handler:
+            try:
+                permission_stats = self.permission_handler.get_permission_statistics()
+            except Exception as e:
+                permission_stats = {'total_records': 0, 'has_permissions': False}
+                st.error(f"权限统计获取失败: {str(e)}")
+        else:
+            permission_stats = {'total_records': 0, 'has_permissions': False}
+        
         # 基础统计
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("门店数量", status['stores_count'])
-        with col2:
-            st.metric("总查询次数", status['total_queries'])
-        with col3:
-            st.metric("历史报表数", status['history_count'])
-        with col4:
-            st.metric("系统状态", "正常" if status['cos_connection'] else "异常")
+        if self.has_permission_handler:
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("门店数量", status['stores_count'])
+            with col2:
+                st.metric("总查询次数", status['total_queries'])
+            with col3:
+                st.metric("历史报表数", status['history_count'])
+            with col4:
+                st.metric("权限记录数", permission_stats['total_records'])
+            with col5:
+                st.metric("系统状态", "正常" if status['cos_connection'] else "异常")
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("门店数量", status['stores_count'])
+            with col2:
+                st.metric("总查询次数", status['total_queries'])
+            with col3:
+                st.metric("历史报表数", status['history_count'])
+            with col4:
+                st.metric("系统状态", "正常" if status['cos_connection'] else "异常")
         
         # 系统状态详情
         st.subheader("系统状态详情")
         
         col1, col2 = st.columns(2)
         with col1:
-            st.success("✅ COS连接正常") if status['cos_connection'] else st.error("❌ COS连接异常")
+            st.success(f"✅ {STORAGE_TYPE} 连接正常") if status['cos_connection'] else st.error(f"❌ {STORAGE_TYPE} 连接异常")
             st.success("✅ 报表文件可访问") if status['file_accessible'] else st.error("❌ 报表文件不可访问")
+            if self.has_permission_handler:
+                st.success("✅ 权限表已配置") if permission_stats['has_permissions'] else st.warning("⚠️ 权限表未配置")
         
         with col2:
             st.info(f"**最后更新时间**: {status['last_updated'] or '无'}")
             st.info(f"**系统时间**: {status['system_time']}")
+            if self.has_permission_handler and permission_stats['has_permissions']:
+                st.info(f"**权限表门店数**: {permission_stats['unique_stores']}")
+        
+        # 权限表状态
+        if self.has_permission_handler and permission_stats['has_permissions']:
+            st.subheader("权限表状态")
+            
+            # 权限同步检查
+            available_stores = self.query_handler.get_available_stores()
+            if available_stores:
+                try:
+                    validation_result = self.permission_handler.validate_permissions_with_stores(available_stores)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if validation_result['valid']:
+                            st.success("✅ 权限表与汇总报表同步正常")
+                        else:
+                            st.error("❌ 权限表与汇总报表不同步")
+                            st.error(f"无效门店: {len(validation_result['invalid_stores'])} 个")
+                            st.error(f"孤立权限: {validation_result['orphaned_permissions']} 条")
+                    
+                    with col2:
+                        st.info(f"**汇总报表门店数**: {validation_result['available_stores']}")
+                        st.info(f"**权限表门店数**: {validation_result['total_permission_stores']}")
+                except Exception as e:
+                    st.error(f"权限同步检查失败: {str(e)}")
+            else:
+                st.warning("⚠️ 无汇总报表数据，无法进行同步检查")
         
         # 查询历史
         st.subheader("最近查询记录")
         query_history = self.query_handler.get_query_history(20)
         
         if query_history:
-            df = pd.DataFrame(query_history)
-            df = df.rename(columns={
-                'store_name': '门店名称',
-                'query_count': '查询次数',
-                'last_query_time': '最后查询时间'
-            })
+            # 处理查询历史数据格式
+            formatted_history = []
+            for record in query_history:
+                if isinstance(record, dict):
+                    formatted_history.append({
+                        '门店名称': record.get('store_name', ''),
+                        '查询次数': record.get('query_count', 0),
+                        '最后查询时间': record.get('last_query_time', '从未查询')
+                    })
+                else:
+                    # 兼容旧格式
+                    formatted_history.append({
+                        '门店名称': getattr(record, 'store_name', ''),
+                        '查询次数': getattr(record, 'query_count', 0),
+                        '最后查询时间': getattr(record, 'last_query_time', '从未查询')
+                    })
+            
+            df = pd.DataFrame(formatted_history)
             st.dataframe(df, use_container_width=True)
         else:
             st.info("暂无查询记录")
@@ -286,29 +558,58 @@ class ReportQueryApp:
         # 配置验证
         st.subheader("配置验证")
         
-        if validate_config():
-            st.success("✅ 配置验证通过")
+        st.info(f"当前使用存储类型: {STORAGE_TYPE}")
+        
+        if STORAGE_TYPE == "COS":
+            if validate_config():
+                st.success("✅ COS 配置验证通过")
+            else:
+                st.error("❌ COS 配置验证失败，请检查腾讯云COS配置")
         else:
-            st.error("❌ 配置验证失败，请检查腾讯云COS配置")
+            st.success("✅ 本地存储配置验证通过")
         
         # 连接测试
         st.subheader("连接测试")
         
-        if st.button("测试COS连接"):
+        if st.button("测试存储连接"):
             with st.spinner("正在测试连接..."):
-                if self.cos_handler.test_connection():
-                    st.success("✅ COS连接测试成功")
+                if self.storage_handler.test_connection():
+                    st.success(f"✅ {STORAGE_TYPE} 连接测试成功")
                 else:
-                    st.error("❌ COS连接测试失败")
+                    st.error(f"❌ {STORAGE_TYPE} 连接测试失败")
+        
+        # 权限系统测试
+        if self.has_permission_handler:
+            st.subheader("权限系统测试")
+            
+            if st.button("测试权限系统"):
+                with st.spinner("正在测试权限系统..."):
+                    try:
+                        permission_stats = self.permission_handler.get_permission_statistics()
+                        st.success("✅ 权限系统测试成功")
+                        st.info(f"权限记录数: {permission_stats['total_records']}")
+                    except Exception as e:
+                        st.error(f"❌ 权限系统测试失败: {str(e)}")
         
         # 数据管理
         st.subheader("数据管理")
         
         st.warning("⚠️ 以下操作会影响系统数据，请谨慎操作！")
         
-        if st.button("清空查询统计", type="secondary"):
-            # 这里可以添加清空统计的逻辑
-            st.info("功能待实现")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("清空查询统计", type="secondary"):
+                # 这里可以添加清空统计的逻辑
+                st.info("功能待实现")
+        
+        with col2:
+            if self.has_permission_handler:
+                if st.button("重置权限系统", type="secondary"):
+                    if self.permission_handler.clear_permissions():
+                        st.success("权限系统已重置")
+                        st.rerun()
+                    else:
+                        st.error("重置失败")
     
     def user_query_interface(self):
         """用户查询界面"""
@@ -378,6 +679,12 @@ class ReportQueryApp:
                 )
                 
                 if search_results:
+                    # 检查是否权限被拒绝
+                    if search_results.get('permission_denied', False):
+                        st.error("🚫 " + search_results.get('error_message', '您没有权限查询此编码'))
+                        st.info("请联系管理员确认您的查询权限")
+                        return
+                    
                     # 保存到session state
                     st.session_state.search_results = search_results
                     
@@ -439,6 +746,12 @@ class ReportQueryApp:
         """侧边栏信息"""
         st.sidebar.title("📊 系统信息")
         
+        # 存储类型显示
+        if STORAGE_TYPE == "COS":
+            st.sidebar.success("🔗 使用腾讯云 COS 存储")
+        else:
+            st.sidebar.warning("💾 使用本地存储模式")
+        
         # 系统状态
         status = self.query_handler.get_system_status()
         
@@ -451,23 +764,47 @@ class ReportQueryApp:
             st.sidebar.info(f"文件: {status['current_report']['file_name']}")
             st.sidebar.info(f"更新: {status['last_updated'] or '未知'}")
         
+        # 权限表信息
+        if self.has_permission_handler:
+            try:
+                permission_stats = self.permission_handler.get_permission_statistics()
+                if permission_stats['has_permissions']:
+                    st.sidebar.subheader("权限表")
+                    st.sidebar.info(f"权限记录: {permission_stats['total_records']}条")
+                    st.sidebar.info(f"涉及门店: {permission_stats['unique_stores']}个")
+                else:
+                    st.sidebar.warning("⚠️ 未配置权限表")
+            except Exception as e:
+                st.sidebar.error(f"权限系统错误: {str(e)}")
+        
         # 最近查询
         st.sidebar.subheader("最近查询")
         query_history = self.query_handler.get_query_history(5)
         
         if query_history:
             for record in query_history:
-                st.sidebar.text(f"📍 {record['store_name']}")
-                st.sidebar.text(f"   查询: {record['query_count']}次")
+                store_name = record.get('store_name', '') if isinstance(record, dict) else getattr(record, 'store_name', '')
+                query_count = record.get('query_count', 0) if isinstance(record, dict) else getattr(record, 'query_count', 0)
+                
+                st.sidebar.text(f"📍 {store_name}")
+                st.sidebar.text(f"   查询: {query_count}次")
         else:
             st.sidebar.info("暂无查询记录")
     
     def run(self):
         """运行应用"""
-        # 验证配置
-        if not validate_config():
-            st.error("系统配置不完整，请联系管理员")
-            return
+        # 验证配置（仅在使用COS时验证）
+        if STORAGE_TYPE == "COS" and not validate_config():
+            st.error("COS 配置不完整，当前使用本地存储模式")
+        
+        # 检查权限表状态
+        if self.has_permission_handler:
+            try:
+                permission_stats = self.permission_handler.get_permission_statistics()
+                if not permission_stats['has_permissions']:
+                    st.warning("⚠️ 系统未配置权限表，用户查询功能将受限")
+            except Exception as e:
+                st.error(f"权限系统初始化失败: {str(e)}")
         
         # 侧边栏信息
         self.sidebar_info()
