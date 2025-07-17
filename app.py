@@ -812,92 +812,167 @@ def load_permissions_from_cos(cos_manager: TencentCOSManager) -> Optional[pd.Dat
         
         return retry_operation(_load_operation)
 
-def save_reports_to_cos(reports_dict: Dict[str, pd.DataFrame], cos_manager: TencentCOSManager) -> bool:
-    """保存报表数据到COS - 直接存储Excel文件"""
-    with error_handler("保存报表数据"):
-        def _save_operation():
-            # 加载现有元数据
-            metadata = cos_manager.download_json(cos_manager.metadata_file) or {'reports': []}
-            
-            current_time = datetime.now().isoformat()
-            reports_processed = 0
-            
+def save_reports_to_cos(reports_dict: Dict[str, pd.DataFrame], cos_manager: TencentCOSManager, original_file_data: bytes) -> bool:
+    """保存报表数据到COS - 混合存储：原始文件 + 预解析数据"""
+    def _save_operation():
+        # 加载现有元数据
+        metadata = cos_manager.download_json(cos_manager.metadata_file) or {'reports': []}
+        
+        current_time = datetime.now().isoformat()
+        timestamp = int(time.time())
+        uploaded_files = []  # 跟踪已上传文件，用于回滚
+        
+        try:
+            # 第一步：为每个门店保存原始文件和预解析数据
             for store_name, df in reports_dict.items():
+                sanitized_name = sanitize_filename(store_name)
+                file_hash = hashlib.md5(str(df.values.tolist()).encode()).hexdigest()[:8]
+                base_name = f"{sanitized_name}_{timestamp}_{file_hash}"
+                
+                # 原始文件路径
+                raw_filename = f"reports/raw/{base_name}.xlsx"
+                parsed_filename = f"reports/parsed/{base_name}_data.json"
+                
+                debug_logger.log('INFO', f'开始处理门店: {store_name}', {
+                    'raw_file': raw_filename,
+                    'parsed_file': parsed_filename
+                })
+                
+                # 1. 保存原始Excel文件
+                raw_url = cos_manager.upload_file(original_file_data, raw_filename, compress=True)
+                if not raw_url:
+                    raise Exception(f"原始文件上传失败: {store_name}")
+                
+                uploaded_files.append(raw_filename + '.gz')
+                debug_logger.log('INFO', f'原始文件上传成功: {store_name}')
+                
+                # 2. 立即验证原始文件
+                verify_data = cos_manager.download_file(raw_filename + '.gz', decompress=True)
+                if not verify_data:
+                    raise Exception(f"原始文件验证失败: {store_name}")
+                
+                # 3. 生成预解析数据
                 try:
-                    # 生成唯一文件名
-                    timestamp = int(time.time())
-                    file_hash = hashlib.md5(str(df.values.tolist()).encode()).hexdigest()[:8]
-                    filename = f"reports/{sanitize_filename(store_name)}_{timestamp}_{file_hash}.xlsx"
+                    # 分析应收-未收额
+                    analysis_result = analyze_receivable_data(df)
                     
-                    # 将DataFrame保存为Excel字节流
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df.to_excel(writer, index=False, sheet_name=store_name[:31])  # Excel工作表名称限制
+                    # 清理DataFrame准备JSON序列化
+                    df_cleaned = clean_dataframe_for_storage(df)
                     
-                    excel_data = buffer.getvalue()
+                    parsed_data = {
+                        'store_name': store_name,
+                        'data': df_cleaned.to_dict('records'),
+                        'columns': list(df_cleaned.columns),
+                        'analysis': analysis_result,
+                        'row_count': len(df),
+                        'col_count': len(df.columns),
+                        'parsed_time': current_time
+                    }
                     
-                    # 上传Excel文件
-                    file_url = cos_manager.upload_file(excel_data, filename, compress=True)
-                    
-                    if file_url:
-                        # 分析应收-未收额
-                        analysis_result = analyze_receivable_data(df)
-                        
-                        # 创建报表元数据
-                        report_metadata = {
-                            "store_name": store_name.strip(),
-                            "filename": filename + '.gz',  # 压缩后的文件名
-                            "file_url": file_url,
-                            "file_size_mb": len(excel_data) / 1024 / 1024,
-                            "upload_time": current_time,
-                            "row_count": len(df),
-                            "col_count": len(df.columns),
-                            "analysis": analysis_result,
-                            "id": f"{store_name}_{timestamp}"
-                        }
-                        
-                        # 移除同门店的旧记录
-                        metadata['reports'] = [r for r in metadata.get('reports', []) 
-                                             if normalize_store_name(r.get('store_name', '')) != normalize_store_name(store_name.strip())]
-                        
-                        # 添加新记录
-                        metadata.setdefault('reports', []).append(report_metadata)
-                        reports_processed += 1
-                        
-                        debug_logger.log('INFO', f'报表 {store_name} 保存成功', {
-                            'filename': filename,
-                            'file_size_mb': len(excel_data) / 1024 / 1024,
-                            'rows': len(df),
-                            'cols': len(df.columns)
-                        })
-                        logger.info(f"报表 {store_name} 保存成功: {len(df)} 行")
+                    # 4. 保存预解析数据
+                    parsed_success = cos_manager.upload_json(parsed_data, parsed_filename)
+                    if parsed_success:
+                        uploaded_files.append(parsed_filename + '.gz')
+                        debug_logger.log('INFO', f'预解析数据保存成功: {store_name}')
+                    else:
+                        debug_logger.log('WARNING', f'预解析数据保存失败，但原始文件已保存: {store_name}')
                 
                 except Exception as e:
-                    debug_logger.log('ERROR', f'保存报表 {store_name} 失败: {str(e)}')
-                    logger.error(f"保存报表 {store_name} 失败: {str(e)}")
-                    continue
-            
-            # 保存元数据
-            if reports_processed > 0:
-                metadata['last_updated'] = current_time
-                success = cos_manager.upload_json(metadata, cos_manager.metadata_file)
+                    debug_logger.log('WARNING', f'预解析失败但原始文件已保存: {store_name}, 错误: {str(e)}')
+                    # 预解析失败不影响整体流程，因为有原始文件兜底
                 
-                if success:
-                    # 清除相关缓存
-                    cache_key = get_cache_key("reports", "load")
-                    if f"cache_{cache_key}" in st.session_state:
-                        del st.session_state[f"cache_{cache_key}"]
-                    
-                    debug_logger.log('INFO', f'报表数据保存完成: {reports_processed} 个门店')
-                    logger.info(f"报表数据保存完成: {reports_processed} 个门店")
-                    return True
+                # 5. 创建报表元数据
+                report_metadata = {
+                    "store_name": store_name.strip(),
+                    "raw_filename": raw_filename + '.gz',
+                    "parsed_filename": parsed_filename + '.gz' if parsed_success else None,
+                    "file_url": raw_url,
+                    "file_size_mb": len(original_file_data) / 1024 / 1024,
+                    "upload_time": current_time,
+                    "row_count": len(df),
+                    "col_count": len(df.columns),
+                    "analysis": analysis_result if 'analysis_result' in locals() else {},
+                    "id": f"{store_name}_{timestamp}",
+                    "has_parsed_data": parsed_success
+                }
+                
+                # 移除同门店的旧记录
+                old_reports = [r for r in metadata.get('reports', []) 
+                             if normalize_store_name(r.get('store_name', '')) == normalize_store_name(store_name.strip())]
+                
+                metadata['reports'] = [r for r in metadata.get('reports', []) 
+                                     if normalize_store_name(r.get('store_name', '')) != normalize_store_name(store_name.strip())]
+                
+                # 清理旧文件
+                for old_report in old_reports:
+                    try:
+                        if old_report.get('raw_filename'):
+                            cos_manager.delete_file(old_report['raw_filename'])
+                        if old_report.get('parsed_filename'):
+                            cos_manager.delete_file(old_report['parsed_filename'])
+                    except:
+                        pass  # 忽略清理错误
+                
+                # 添加新记录
+                metadata.setdefault('reports', []).append(report_metadata)
+                
+                debug_logger.log('INFO', f'门店 {store_name} 处理完成', {
+                    'raw_file_saved': True,
+                    'parsed_file_saved': parsed_success,
+                    'metadata_updated': True
+                })
             
-            return False
-        
+            # 第二步：保存元数据
+            metadata['last_updated'] = current_time
+            metadata_success = cos_manager.upload_json(metadata, cos_manager.metadata_file)
+            
+            if not metadata_success:
+                raise Exception("元数据保存失败")
+            
+            # 第三步：验证元数据
+            verify_metadata = cos_manager.download_json(cos_manager.metadata_file)
+            if not verify_metadata:
+                raise Exception("元数据验证失败")
+            
+            # 第四步：清除缓存
+            cache_keys_to_clear = [
+                get_cache_key("reports", "load"),
+                get_cache_key("metadata", "load")
+            ]
+            
+            for cache_key in cache_keys_to_clear:
+                if f"cache_{cache_key}" in st.session_state:
+                    del st.session_state[f"cache_{cache_key}"]
+            
+            debug_logger.log('INFO', f'报表数据保存完成', {
+                'stores_processed': len(reports_dict),
+                'files_uploaded': len(uploaded_files),
+                'metadata_saved': True
+            })
+            
+            return True
+            
+        except Exception as e:
+            debug_logger.log('ERROR', f'保存过程失败，开始回滚: {str(e)}')
+            
+            # 回滚：删除已上传的文件
+            for filename in uploaded_files:
+                try:
+                    cos_manager.delete_file(filename)
+                    debug_logger.log('INFO', f'回滚删除文件: {filename}')
+                except:
+                    debug_logger.log('WARNING', f'回滚删除文件失败: {filename}')
+            
+            raise Exception(f"保存失败并已回滚: {str(e)}")
+    
+    try:
         return retry_operation(_save_operation)
+    except Exception as e:
+        logger.error(f"报表保存失败: {str(e)}")
+        return False
 
 def load_reports_from_cos(cos_manager: TencentCOSManager) -> Dict[str, pd.DataFrame]:
-    """从COS加载报表数据 - 使用缓存"""
+    """从COS加载报表数据 - 混合存储：优先使用预解析数据，否则解析原始文件"""
     cache_key = get_cache_key("reports", "load")
     cached_data = get_cache(cache_key)
     if cached_data is not None:
@@ -905,63 +980,127 @@ def load_reports_from_cos(cos_manager: TencentCOSManager) -> Dict[str, pd.DataFr
         logger.info("从缓存加载报表数据")
         return cached_data
     
-    with error_handler("加载报表数据"):
-        def _load_operation():
-            metadata = cos_manager.download_json(cos_manager.metadata_file)
+    def _load_operation():
+        metadata = cos_manager.download_json(cos_manager.metadata_file)
+        
+        if not metadata or 'reports' not in metadata:
+            debug_logger.log('INFO', "报表元数据不存在或为空")
+            logger.info("报表元数据不存在或为空")
+            return {}
+        
+        reports_dict = {}
+        reports = metadata['reports']
+        
+        for report in reports:
+            store_name = report.get('store_name')
+            raw_filename = report.get('raw_filename')
+            parsed_filename = report.get('parsed_filename')
+            has_parsed_data = report.get('has_parsed_data', False)
             
-            if not metadata or 'reports' not in metadata:
-                debug_logger.log('INFO', "报表元数据不存在或为空")
-                logger.info("报表元数据不存在或为空")
-                return {}
+            if not store_name:
+                continue
             
-            reports_dict = {}
-            reports = metadata['reports']
+            debug_logger.log('INFO', f'加载报表: {store_name}', {
+                'has_parsed_data': has_parsed_data,
+                'raw_filename': raw_filename,
+                'parsed_filename': parsed_filename
+            })
             
-            for report in reports:
-                store_name = report.get('store_name')
-                filename = report.get('filename')
-                
-                if not store_name or not filename:
-                    continue
-                
+            df = None
+            
+            # 策略1：优先尝试使用预解析数据
+            if has_parsed_data and parsed_filename:
                 try:
-                    # 下载Excel文件
-                    excel_data = cos_manager.download_file(filename, decompress=True)
+                    debug_logger.log('INFO', f'尝试加载预解析数据: {store_name}')
+                    parsed_data = cos_manager.download_json(parsed_filename.replace('.gz', ''))
+                    
+                    if parsed_data and 'data' in parsed_data:
+                        # 从预解析数据重建DataFrame
+                        df = pd.DataFrame(parsed_data['data'])
+                        if 'columns' in parsed_data:
+                            df.columns = parsed_data['columns'][:len(df.columns)]
+                        
+                        debug_logger.log('INFO', f'预解析数据加载成功: {store_name}', {
+                            'rows': len(df),
+                            'cols': len(df.columns)
+                        })
+                
+                except Exception as e:
+                    debug_logger.log('WARNING', f'预解析数据加载失败: {store_name}, 错误: {str(e)}')
+                    df = None
+            
+            # 策略2：预解析数据不可用时，解析原始文件
+            if df is None and raw_filename:
+                try:
+                    debug_logger.log('INFO', f'尝试解析原始文件: {store_name}')
+                    
+                    # 下载原始Excel文件
+                    excel_data = cos_manager.download_file(raw_filename, decompress=True)
                     
                     if excel_data:
                         # 解析Excel文件
                         excel_file = pd.ExcelFile(io.BytesIO(excel_data))
                         
-                        # 优先使用门店名称作为工作表名，否则使用第一个工作表
+                        # 查找合适的工作表
                         sheet_name = None
-                        if store_name in excel_file.sheet_names:
-                            sheet_name = store_name
-                        elif len(excel_file.sheet_names) > 0:
+                        normalized_store = normalize_store_name(store_name)
+                        
+                        # 多层工作表匹配
+                        for sheet in excel_file.sheet_names:
+                            normalized_sheet = normalize_store_name(sheet)
+                            if (sheet == store_name or 
+                                normalized_sheet == normalized_store or
+                                store_name in sheet or sheet in store_name or
+                                normalized_store in normalized_sheet or 
+                                normalized_sheet in normalized_store):
+                                sheet_name = sheet
+                                break
+                        
+                        # 如果没找到匹配的，使用第一个工作表
+                        if not sheet_name and excel_file.sheet_names:
                             sheet_name = excel_file.sheet_names[0]
                         
                         if sheet_name:
                             df = pd.read_excel(io.BytesIO(excel_data), sheet_name=sheet_name)
-                            reports_dict[store_name] = df
                             
-                            debug_logger.log('INFO', f'报表 {store_name} 加载成功', {
-                                'filename': filename,
+                            debug_logger.log('INFO', f'原始文件解析成功: {store_name}', {
+                                'sheet_name': sheet_name,
                                 'rows': len(df),
                                 'cols': len(df.columns)
                             })
+                        else:
+                            debug_logger.log('ERROR', f'未找到合适的工作表: {store_name}')
+                            continue
                 
                 except Exception as e:
-                    debug_logger.log('ERROR', f'加载报表 {store_name} 失败: {str(e)}')
-                    logger.error(f"加载报表 {store_name} 失败: {str(e)}")
+                    debug_logger.log('ERROR', f'原始文件解析失败: {store_name}, 错误: {str(e)}')
+                    logger.error(f"原始文件解析失败 {store_name}: {str(e)}")
                     continue
             
-            debug_logger.log('INFO', f'报表数据加载完成: {len(reports_dict)} 个门店')
-            logger.info(f"报表数据加载完成: {len(reports_dict)} 个门店")
-            
-            # 设置缓存
-            set_cache(cache_key, reports_dict)
-            return reports_dict
+            # 成功加载数据
+            if df is not None:
+                reports_dict[store_name] = df
+                debug_logger.log('INFO', f'报表 {store_name} 加载成功', {
+                    'final_rows': len(df),
+                    'final_cols': len(df.columns),
+                    'load_method': 'parsed_data' if has_parsed_data and parsed_filename else 'raw_file'
+                })
+            else:
+                debug_logger.log('ERROR', f'报表 {store_name} 加载完全失败')
         
+        debug_logger.log('INFO', f'报表数据加载完成: {len(reports_dict)} 个门店')
+        logger.info(f"报表数据加载完成: {len(reports_dict)} 个门店")
+        
+        # 设置缓存
+        set_cache(cache_key, reports_dict)
+        return reports_dict
+    
+    try:
         return retry_operation(_load_operation)
+    except Exception as e:
+        debug_logger.log('ERROR', f'加载报表数据失败: {str(e)}')
+        logger.error(f"加载报表数据失败: {str(e)}")
+        return {}
 
 def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
     """分析应收未收额数据 - 专门查找第69行"""
@@ -1169,6 +1308,82 @@ def find_matching_reports(store_name: str, reports_data: Dict[str, pd.DataFrame]
         logger.error(f"查找匹配报表失败: {str(e)}")
         return []
 
+def get_original_file_for_download(store_name: str, cos_manager: TencentCOSManager) -> Optional[bytes]:
+    """获取门店的原始Excel文件用于下载"""
+    try:
+        # 获取元数据
+        metadata = cos_manager.download_json(cos_manager.metadata_file)
+        if not metadata or 'reports' not in metadata:
+            return None
+        
+        # 查找匹配的报表
+        normalized_target = normalize_store_name(store_name)
+        matching_report = None
+        
+        for report in metadata['reports']:
+            report_store_name = report.get('store_name', '').strip()
+            normalized_report = normalize_store_name(report_store_name)
+            
+            if (report_store_name == store_name or 
+                normalized_report == normalized_target or
+                store_name in report_store_name or 
+                report_store_name in store_name or
+                normalized_target in normalized_report or
+                normalized_report in normalized_target):
+                matching_report = report
+                break
+        
+        if not matching_report:
+            debug_logger.log('WARNING', f'未找到门店 {store_name} 的原始文件')
+            return None
+        
+        raw_filename = matching_report.get('raw_filename')
+        if not raw_filename:
+            debug_logger.log('WARNING', f'门店 {store_name} 没有原始文件记录')
+            return None
+        
+        # 下载原始文件
+        original_data = cos_manager.download_file(raw_filename, decompress=True)
+        if original_data:
+            debug_logger.log('INFO', f'原始文件下载成功: {store_name}', {
+                'filename': raw_filename,
+                'size': len(original_data)
+            })
+            return original_data
+        else:
+            debug_logger.log('ERROR', f'原始文件下载失败: {store_name}')
+            return None
+            
+    except Exception as e:
+        debug_logger.log('ERROR', f'获取原始文件失败: {store_name}, 错误: {str(e)}')
+        logger.error(f"获取原始文件失败 {store_name}: {str(e)}")
+        return None
+    """查找匹配的报表"""
+    try:
+        matching = []
+        normalized_target = normalize_store_name(store_name)
+        
+        for sheet_name in reports_data.keys():
+            normalized_sheet = normalize_store_name(sheet_name)
+            
+            if (store_name == sheet_name or
+                normalized_target == normalized_sheet or
+                store_name in sheet_name or sheet_name in store_name or
+                normalized_target in normalized_sheet or normalized_sheet in normalized_target):
+                matching.append(sheet_name)
+        
+        debug_logger.log('INFO', f'查找匹配报表: {store_name}', {
+            'matching_reports': matching,
+            'total_reports': len(reports_data)
+        })
+        
+        return matching
+        
+    except Exception as e:
+        debug_logger.log('ERROR', f'查找匹配报表失败: {str(e)}')
+        logger.error(f"查找匹配报表失败: {str(e)}")
+        return []
+
 def show_status_message(message: str, status_type: str = "info"):
     """显示状态消息"""
     css_class = f"status-{status_type}"
@@ -1346,6 +1561,9 @@ with st.sidebar:
             if reports_file:
                 try:
                     with st.spinner("处理报表文件..."):
+                        # 获取原始文件数据
+                        original_file_data = reports_file.getvalue()
+                        
                         excel_file = pd.ExcelFile(reports_file)
                         reports_dict = {}
                         
@@ -1363,7 +1581,7 @@ with st.sidebar:
                         
                         if reports_dict:
                             with st.spinner("保存到腾讯云COS..."):
-                                if save_reports_to_cos(reports_dict, cos_manager):
+                                if save_reports_to_cos(reports_dict, cos_manager, original_file_data):
                                     show_status_message(f"✅ 报表已上传：{len(reports_dict)} 个门店", "success")
                                     st.balloons()
                                 else:
@@ -1431,11 +1649,60 @@ if user_type == "管理员" and st.session_state.is_admin:
         
         if reports_data:
             st.subheader("📊 报表数据预览")
+            
+            # 显示存储方式统计
+            total_reports = len(reports_data)
+            parsed_count = 0
+            raw_only_count = 0
+            
+            # 获取元数据统计
+            try:
+                metadata = cos_manager.download_json(cos_manager.metadata_file)
+                if metadata and 'reports' in metadata:
+                    for report in metadata['reports']:
+                        if report.get('has_parsed_data', False):
+                            parsed_count += 1
+                        else:
+                            raw_only_count += 1
+            except:
+                pass
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("总报表数", total_reports)
+            with col2:
+                st.metric("预解析可用", parsed_count, f"{parsed_count/total_reports*100:.1f}%" if total_reports > 0 else "0%")
+            with col3:
+                st.metric("仅原始文件", raw_only_count, f"{raw_only_count/total_reports*100:.1f}%" if total_reports > 0 else "0%")
+            
+            # 显示报表详情
             report_names = list(reports_data.keys())[:5]  # 显示前5个
             for name in report_names:
                 with st.expander(f"📋 {name}"):
                     df = reports_data[name]
                     st.write(f"数据规模: {len(df)} 行 × {len(df.columns)} 列")
+                    
+                    # 显示存储状态
+                    try:
+                        metadata = cos_manager.download_json(cos_manager.metadata_file)
+                        if metadata and 'reports' in metadata:
+                            for report in metadata['reports']:
+                                if report.get('store_name') == name:
+                                    has_parsed = report.get('has_parsed_data', False)
+                                    has_raw = bool(report.get('raw_filename'))
+                                    
+                                    status_info = []
+                                    if has_raw:
+                                        status_info.append("✅ 原始文件")
+                                    if has_parsed:
+                                        status_info.append("⚡ 预解析数据")
+                                    
+                                    if status_info:
+                                        st.info(f"存储状态: {' + '.join(status_info)}")
+                                    break
+                    except:
+                        pass
+                    
                     st.dataframe(df.head(3), use_container_width=True)
                     
     except Exception as e:
@@ -1623,7 +1890,9 @@ else:
                 # 下载功能
                 st.subheader("📥 数据下载")
                 
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
+                
+                # 下载处理后的Excel
                 with col1:
                     try:
                         buffer = io.BytesIO()
@@ -1642,15 +1911,32 @@ else:
                             download_df.to_excel(writer, index=False)
                         
                         st.download_button(
-                            "📥 下载完整报表 (Excel)",
+                            "📊 下载处理后Excel",
                             buffer.getvalue(),
-                            f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            f"{st.session_state.store_name}_处理数据_{datetime.now().strftime('%Y%m%d')}.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     except Exception as e:
-                        show_status_message(f"Excel下载准备失败：{str(e)}", "error")
+                        show_status_message(f"处理后Excel下载准备失败：{str(e)}", "error")
                 
+                # 下载原始Excel文件
                 with col2:
+                    try:
+                        original_data = get_original_file_for_download(st.session_state.store_name, cos_manager)
+                        if original_data:
+                            st.download_button(
+                                "📄 下载原始Excel",
+                                original_data,
+                                f"{st.session_state.store_name}_原始文件_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        else:
+                            st.error("原始文件不可用")
+                    except Exception as e:
+                        show_status_message(f"原始文件下载失败：{str(e)}", "error")
+                
+                # 下载CSV格式
+                with col3:
                     try:
                         csv_df = df.copy()
                         unique_cols = []
@@ -1663,7 +1949,7 @@ else:
                         
                         csv = csv_df.to_csv(index=False, encoding='utf-8-sig')
                         st.download_button(
-                            "📥 下载CSV格式",
+                            "📋 下载CSV格式",
                             csv,
                             f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
                             "text/csv"
