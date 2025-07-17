@@ -306,7 +306,7 @@ def unified_upload_to_cos(cos_client, bucket_name: str, file_key: str, excel_con
         # 使用retry_operation确保完整上传
         with st.spinner("上传中..."):
             upload_success = retry_operation(
-                func=_upload_cos_file_with_integrity_check,
+                _upload_cos_file_with_integrity_check,
                 cos_client, bucket_name, file_key, excel_content, 
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 metadata,
@@ -361,7 +361,7 @@ def unified_download_from_cos(cos_client, bucket_name: str, file_key: str, file_
         # 2. 使用retry_operation确保完整下载
         with st.spinner("下载中..."):
             excel_content = retry_operation(
-                func=_fetch_cos_file_content_with_integrity_check,
+                _fetch_cos_file_content_with_integrity_check,
                 cos_client, bucket_name, file_key, expected_size,
                 max_retries=MAX_RETRIES,
                 delay=RETRY_DELAY
