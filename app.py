@@ -327,26 +327,36 @@ class ReportQueryApp:
             # 显示文件统计
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("工作表数量", stats['total_sheets'])
+                st.metric("工作表数量", stats.get('total_sheets', 0))
             with col2:
-                st.metric("文件大小", f"{stats['file_size'] / 1024 / 1024:.2f} MB")
+                st.metric("文件大小", f"{stats.get('file_size', 0) / 1024 / 1024:.2f} MB")
             with col3:
-                st.metric("门店数量", len([s for s in stats['sheets_info'] if s['has_data']]))
+                sheets_info = stats.get('sheets_info', [])
+                store_count = len([s for s in sheets_info if s.get('has_data', False)]) if sheets_info else 0
+                st.metric("门店数量", store_count)
             
             # 显示门店列表
-            if stats['sheet_names']:
+            sheet_names = stats.get('sheet_names', [])
+            if sheet_names:
                 st.subheader("检测到的门店列表")
                 
                 # 创建门店信息DataFrame
-                store_df = pd.DataFrame(stats['sheets_info'])
-                if not store_df.empty:
-                    store_df = store_df.rename(columns={
-                        'name': '门店名称',
-                        'rows': '行数',
-                        'columns': '列数',
-                        'has_data': '有数据'
-                    })
-                    st.dataframe(store_df, use_container_width=True)
+                sheets_info = stats.get('sheets_info', [])
+                if sheets_info:
+                    store_df = pd.DataFrame(sheets_info)
+                    if not store_df.empty:
+                        store_df = store_df.rename(columns={
+                            'name': '门店名称',
+                            'rows': '行数',
+                            'columns': '列数',
+                            'has_data': '有数据'
+                        })
+                        st.dataframe(store_df, use_container_width=True)
+                else:
+                    # 如果没有详细信息，只显示名称列表
+                    st.write("检测到的门店：")
+                    for name in sheet_names:
+                        st.write(f"• {name}")
                 
                 # 上传配置
                 st.subheader("上传配置")
@@ -377,9 +387,9 @@ class ReportQueryApp:
                                 'version': '1.0'
                             }
                             
-                            if self.json_handler.update_current_report(report_info, stats['sheet_names']):
+                            if self.json_handler.update_current_report(report_info, sheet_names):
                                 st.success("报表上传成功！")
-                                st.success(f"共检测到 {len(stats['sheet_names'])} 个门店")
+                                st.success(f"共检测到 {len(sheet_names)} 个门店")
                                 st.balloons()
                             else:
                                 st.error("更新报表信息失败")
@@ -566,15 +576,15 @@ class ReportQueryApp:
             
             col1, col2 = st.columns(2)
             with col1:
-                st.info(f"**文件名**: {current_report['file_name']}")
-                st.info(f"**上传时间**: {current_report['upload_time']}")
-                st.info(f"**描述**: {current_report['description']}")
+                st.info(f"**文件名**: {current_report.get('file_name', 'N/A')}")
+                st.info(f"**上传时间**: {current_report.get('upload_time', 'N/A')}")
+                st.info(f"**描述**: {current_report.get('description', 'N/A')}")
             
             with col2:
                 st.info(f"**文件大小**: {current_report.get('file_size', 0) / 1024 / 1024:.2f} MB")
                 st.info(f"**版本**: {current_report.get('version', 'N/A')}")
                 # 兼容旧版本的存储路径字段
-                file_path = current_report.get('file_path') or current_report.get('cos_file_path')
+                file_path = current_report.get('file_path') or current_report.get('cos_file_path', 'N/A')
                 st.info(f"**存储路径**: {file_path}")
             
             # 门店列表
@@ -586,7 +596,7 @@ class ReportQueryApp:
                 store_data = []
                 for store in store_sheets:
                     store_data.append({
-                        '门店名称': store['sheet_name'],
+                        '门店名称': store.get('sheet_name', 'N/A'),
                         '查询次数': store.get('query_count', 0),
                         '最后查询': store.get('last_query_time', '从未查询')
                     })
@@ -604,11 +614,11 @@ class ReportQueryApp:
             history_data = []
             for report in report_history:
                 history_data.append({
-                    '文件名': report['file_name'],
-                    '上传时间': report['upload_time'],
+                    '文件名': report.get('file_name', 'N/A'),
+                    '上传时间': report.get('upload_time', 'N/A'),
                     '归档时间': report.get('archived_time', 'N/A'),
-                    '描述': report['description'],
-                    '状态': report['status']
+                    '描述': report.get('description', 'N/A'),
+                    '状态': report.get('status', 'N/A')
                 })
             
             df = pd.DataFrame(history_data)
@@ -637,23 +647,23 @@ class ReportQueryApp:
         if self.has_permission_handler:
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
-                st.metric("门店数量", status['stores_count'])
+                st.metric("门店数量", status.get('stores_count', 0))
             with col2:
-                st.metric("总查询次数", status['total_queries'])
+                st.metric("总查询次数", status.get('total_queries', 0))
             with col3:
-                st.metric("历史报表数", status['history_count'])
+                st.metric("历史报表数", status.get('history_count', 0))
             with col4:
-                st.metric("权限记录数", permission_stats['total_records'])
+                st.metric("权限记录数", permission_stats.get('total_records', 0))
             with col5:
                 st.metric("系统状态", "正常" if status.get('cos_connection', True) else "异常")
         else:
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("门店数量", status['stores_count'])
+                st.metric("门店数量", status.get('stores_count', 0))
             with col2:
-                st.metric("总查询次数", status['total_queries'])
+                st.metric("总查询次数", status.get('total_queries', 0))
             with col3:
-                st.metric("历史报表数", status['history_count'])
+                st.metric("历史报表数", status.get('history_count', 0))
             with col4:
                 st.metric("系统状态", "正常" if status.get('cos_connection', True) else "异常")
         
@@ -679,10 +689,10 @@ class ReportQueryApp:
                     st.warning("⚠️ 权限表未配置")
         
         with col2:
-            st.info(f"**最后更新时间**: {status['last_updated'] or '无'}")
-            st.info(f"**系统时间**: {status['system_time']}")
-            if self.has_permission_handler and permission_stats['has_permissions']:
-                st.info(f"**权限表门店数**: {permission_stats['unique_stores']}")
+            st.info(f"**最后更新时间**: {status.get('last_updated') or '无'}")
+            st.info(f"**系统时间**: {status.get('system_time', datetime.now().isoformat())}")
+            if self.has_permission_handler and permission_stats.get('has_permissions', False):
+                st.info(f"**权限表门店数**: {permission_stats.get('unique_stores', 0)}")
         
         # 权限表状态
         if self.has_permission_handler and permission_stats['has_permissions']:
@@ -696,16 +706,17 @@ class ReportQueryApp:
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        if validation_result['valid']:
+                        if validation_result.get('valid', False):
                             st.success("✅ 权限表与汇总报表同步正常")
                         else:
                             st.error("❌ 权限表与汇总报表不同步")
-                            st.error(f"无效门店: {len(validation_result['invalid_stores'])} 个")
-                            st.error(f"孤立权限: {validation_result['orphaned_permissions']} 条")
+                            invalid_stores = validation_result.get('invalid_stores', [])
+                            st.error(f"无效门店: {len(invalid_stores)} 个")
+                            st.error(f"孤立权限: {validation_result.get('orphaned_permissions', 0)} 条")
                     
                     with col2:
-                        st.info(f"**汇总报表门店数**: {validation_result['available_stores']}")
-                        st.info(f"**权限表门店数**: {validation_result['total_permission_stores']}")
+                        st.info(f"**汇总报表门店数**: {validation_result.get('available_stores', 0)}")
+                        st.info(f"**权限表门店数**: {validation_result.get('total_permission_stores', 0)}")
                 except Exception as e:
                     st.error(f"权限同步检查失败: {str(e)}")
             else:
@@ -967,8 +978,8 @@ class ReportQueryApp:
             
             # 显示系统状态
             with st.expander("📊 查看系统状态"):
-                st.write("存储类型:", system_status['storage_type'])
-                st.write("数据加载状态:", "✅ 正常" if system_status['data_loaded'] else "❌ 异常")
+                st.write("存储类型:", system_status.get('storage_type', 'Unknown'))
+                st.write("数据加载状态:", "✅ 正常" if system_status.get('data_loaded', False) else "❌ 异常")
                 if system_status.get('last_updated'):
                     st.write("最后更新:", system_status['last_updated'])
             
@@ -980,9 +991,9 @@ class ReportQueryApp:
             st.error("文件可能已被删除或移动，请联系管理员重新上传")
             
             # 显示报表信息
-            current_report = system_status['current_report']
+            current_report = system_status.get('current_report')
             if current_report:
-                st.info(f"报表文件: {current_report['file_name']}")
+                st.info(f"报表文件: {current_report.get('file_name', 'N/A')}")
                 st.info(f"上传时间: {current_report.get('upload_time', '未知')}")
             
             return
@@ -995,15 +1006,16 @@ class ReportQueryApp:
             
             # 提供更详细的诊断信息
             with st.expander("🔍 诊断信息"):
-                current_report = system_status['current_report']
+                current_report = system_status.get('current_report')
                 if current_report:
-                    st.write("当前报表:", current_report['file_name'])
-                    st.write("门店工作表数:", system_status['store_sheets_count'])
+                    st.write("当前报表:", current_report.get('file_name', 'N/A'))
+                    st.write("门店工作表数:", system_status.get('store_sheets_count', 0))
                     
-                    if system_status['store_sheets_count'] == 0:
+                    store_sheets_count = system_status.get('store_sheets_count', 0)
+                    if store_sheets_count == 0:
                         st.error("报表中没有检测到门店工作表")
                     else:
-                        st.info(f"检测到 {system_status['store_sheets_count']} 个门店，但查询接口获取失败")
+                        st.info(f"检测到 {store_sheets_count} 个门店，但查询接口获取失败")
             
             if st.button("🔄 刷新门店列表"):
                 st.rerun()
@@ -1013,9 +1025,9 @@ class ReportQueryApp:
         # 显示系统状态（正常情况）
         with st.sidebar:
             st.success("✅ 系统运行正常")
-            current_report = system_status['current_report']
+            current_report = system_status.get('current_report')
             if current_report:
-                st.info(f"📋 当前报表: {current_report['file_name']}")
+                st.info(f"📋 当前报表: {current_report.get('file_name', 'N/A')}")
                 st.info(f"🏪 可用门店: {len(available_stores)} 个")
         
         # 门店选择
@@ -1040,11 +1052,14 @@ class ReportQueryApp:
                             preview_data = self.query_handler.get_store_preview(selected_store, 5)
                             
                             if preview_data:
-                                st.info(f"总行数: {preview_data['total_rows']}, 总列数: {preview_data['total_columns']}")
+                                total_rows = preview_data.get('total_rows', 0)
+                                total_columns = preview_data.get('total_columns', 0)
+                                st.info(f"总行数: {total_rows}, 总列数: {total_columns}")
                                 
                                 # 显示预览数据
-                                if preview_data['preview_data']:
-                                    df = pd.DataFrame(preview_data['preview_data'])
+                                preview_data_list = preview_data.get('preview_data', [])
+                                if preview_data_list:
+                                    df = pd.DataFrame(preview_data_list)
                                     st.dataframe(df, use_container_width=True)
                                 else:
                                     st.warning("该门店暂无数据")
@@ -1109,22 +1124,27 @@ class ReportQueryApp:
         # 结果汇总
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("匹配数量", search_results['match_count'])
+            st.metric("匹配数量", search_results.get('match_count', 0))
         with col2:
-            st.metric("门店", search_results['sheet_name'])
+            st.metric("门店", search_results.get('sheet_name', 'N/A'))
         with col3:
-            st.metric("搜索编码", search_results['search_code'])
+            st.metric("搜索编码", search_results.get('search_code', 'N/A'))
         
         # 匹配结果详情
-        if search_results['matches']:
+        matches = search_results.get('matches', [])
+        if matches:
             st.subheader("匹配详情")
             
-            for i, match in enumerate(search_results['matches']):
-                with st.expander(f"匹配项 {i+1} - 第{match['row_index']+1}行，{match['column']}列"):
-                    st.write(f"**匹配值**: {match['matched_value']}")
+            for i, match in enumerate(matches):
+                row_index = match.get('row_index', 0)
+                column = match.get('column', 'N/A')
+                matched_value = match.get('matched_value', 'N/A')
+                
+                with st.expander(f"匹配项 {i+1} - 第{row_index+1}行，{column}列"):
+                    st.write(f"**匹配值**: {matched_value}")
                     
                     # 显示行数据
-                    row_data = match['row_data']
+                    row_data = match.get('row_data', {})
                     if row_data:
                         # 转换为DataFrame显示
                         df = pd.DataFrame([row_data])
@@ -1140,7 +1160,9 @@ class ReportQueryApp:
                 if excel_content:
                     # 生成文件名
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    filename = f"查询结果_{search_results['sheet_name']}_{search_results['search_code']}_{timestamp}.xlsx"
+                    sheet_name = search_results.get('sheet_name', 'Unknown')
+                    search_code = search_results.get('search_code', 'Unknown')
+                    filename = f"查询结果_{sheet_name}_{search_code}_{timestamp}.xlsx"
                     
                     st.download_button(
                         label="下载Excel文件",
@@ -1164,24 +1186,24 @@ class ReportQueryApp:
         # 系统状态
         status = self.query_handler.get_system_status()
         
-        st.sidebar.metric("可用门店", status['stores_count'])
-        st.sidebar.metric("总查询次数", status['total_queries'])
+        st.sidebar.metric("可用门店", status.get('stores_count', 0))
+        st.sidebar.metric("总查询次数", status.get('total_queries', 0))
         
         # 当前报表信息
         current_report = self.json_handler.get_current_report()
         if current_report:
             st.sidebar.subheader("当前报表")
-            st.sidebar.info(f"文件: {current_report['file_name']}")
-            st.sidebar.info(f"更新: {status['last_updated'] or '未知'}")
+            st.sidebar.info(f"文件: {current_report.get('file_name', 'N/A')}")
+            st.sidebar.info(f"更新: {status.get('last_updated') or '未知'}")
         
         # 权限表信息
         if self.has_permission_handler:
             try:
                 permission_stats = self.permission_handler.get_permission_statistics()
-                if permission_stats['has_permissions']:
+                if permission_stats.get('has_permissions', False):
                     st.sidebar.subheader("权限表")
-                    st.sidebar.info(f"权限记录: {permission_stats['total_records']}条")
-                    st.sidebar.info(f"涉及门店: {permission_stats['unique_stores']}个")
+                    st.sidebar.info(f"权限记录: {permission_stats.get('total_records', 0)}条")
+                    st.sidebar.info(f"涉及门店: {permission_stats.get('unique_stores', 0)}个")
                 else:
                     st.sidebar.warning("⚠️ 未配置权限表")
             except Exception as e:
@@ -1211,7 +1233,7 @@ class ReportQueryApp:
         if self.has_permission_handler:
             try:
                 permission_stats = self.permission_handler.get_permission_statistics()
-                if not permission_stats['has_permissions']:
+                if not permission_stats.get('has_permissions', False):
                     st.warning("⚠️ 系统未配置权限表，用户查询功能将受限")
             except Exception as e:
                 st.error(f"权限系统初始化失败: {str(e)}")
