@@ -253,14 +253,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 for col in df.columns:
                     st.write(f"- {col}: {df[col].dtype}")
             
-            # 步骤2：检查并显示每一行的内容（前20行）
-            processing_report['step_by_step'].append(f"步骤2: 检查前20行数据内容")
-            
-            with st.expander("🔍 步骤2: 详细行内容检查（前20行）", expanded=False):
-                for idx in range(min(20, len(df))):
-                    row = df.iloc[idx]
-                    st.write(f"**第{idx+1}行**: {dict(zip(df.columns, row.values))}")
-            
             # 步骤3：提取权限列
             # 确保使用正确的列
             store_col = df.columns[0]
@@ -278,7 +270,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             with progress_container:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                detail_text = st.empty()
             
             processed_count = 0
             seen_combinations = set()  # 用于检测重复数据
@@ -293,8 +284,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                     # 获取原始值
                     raw_store = row[store_col] if pd.notna(row[store_col]) else ""
                     raw_user = row[user_col] if pd.notna(row[user_col]) else ""
-                    
-                    detail_text.text(f"当前行: 门店='{raw_store}', 编号='{raw_user}'")
                     
                     # 转换为字符串并清理
                     store_name = str(raw_store).strip()
@@ -383,51 +372,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             
             # 显示处理结果
             st.success(f"✅ 步骤4: 数据处理完成！")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("原始数据", f"{processing_report['original_rows']} 行")
-            with col2:
-                st.metric("成功处理", f"{processed_count} 行", 
-                         delta=f"{processed_count - processing_report['original_rows']}")
-            with col3:
-                skipped_total = len(processing_report['skipped_rows']) + \
-                               len(processing_report['error_rows']) + \
-                               len(processing_report['empty_rows']) + \
-                               len(processing_report['duplicate_rows'])
-                st.metric("跳过数据", f"{skipped_total} 行")
-            
-            # 显示详细处理报告
-            with st.expander("📋 步骤4: 详细处理报告", expanded=True):
-                
-                # 成功处理的数据预览
-                if processed_count > 0:
-                    st.subheader("✅ 成功处理的数据")
-                    processed_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
-                    st.dataframe(processed_df.head(10), use_container_width=True)
-                    if len(processed_df) > 10:
-                        st.caption(f"显示前10条，共{len(processed_df)}条")
-                
-                # 各种过滤情况的详细报告
-                if processing_report['empty_rows']:
-                    st.subheader("⚪ 空行数据")
-                    st.write(f"发现 {len(processing_report['empty_rows'])} 个完全空行")
-                    empty_df = pd.DataFrame(processing_report['empty_rows'])
-                    st.dataframe(empty_df, use_container_width=True)
-                
-                if processing_report['skipped_rows']:
-                    st.subheader("⚠️ 跳过的数据")
-                    skip_df = pd.DataFrame(processing_report['skipped_rows'])
-                    st.dataframe(skip_df, use_container_width=True)
-                
-                if processing_report['duplicate_rows']:
-                    st.subheader("🔄 重复数据")
-                    dup_df = pd.DataFrame(processing_report['duplicate_rows'])
-                    st.dataframe(dup_df, use_container_width=True)
-                
-                if processing_report['error_rows']:
-                    st.subheader("❌ 处理错误的数据")
-                    error_df = pd.DataFrame(processing_report['error_rows'])
-                    st.dataframe(error_df, use_container_width=True)
             
             if processed_count == 0:
                 raise DataProcessingError("没有有效的权限数据可以保存")
@@ -444,16 +388,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 final_df.to_excel(writer, index=False, sheet_name='权限数据')
             
             excel_content = excel_buffer.getvalue()
-            
-            processing_report['step_by_step'].append(f"步骤6: Excel文件生成完成，大小 {len(excel_content)} 字节")
-            st.info(f"📊 步骤6: Excel文件生成完成，大小 {len(excel_content)} 字节")
-            
-            # 显示即将保存的数据预览
-            with st.expander("🔍 步骤6: 即将保存的Excel内容预览", expanded=False):
-                st.write("Excel文件包含以下数据:")
-                st.dataframe(final_df.head(10), use_container_width=True)
-                if len(final_df) > 10:
-                    st.caption(f"显示前10行，共{len(final_df)}行数据")
             
             # 步骤7：上传到COS
             # 更改文件扩展名为.xlsx
@@ -472,16 +406,11 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         'upload-time': current_time,
                         'record-count': str(processed_count),
                         'original-count': str(processing_report['original_rows']),
-                        'file-format': 'excel',
-                        'skipped-count': str(len(processing_report['skipped_rows']) + 
-                                              len(processing_report['error_rows']) + 
-                                              len(processing_report['empty_rows']) + 
-                                              len(processing_report['duplicate_rows']))
+                        'file-format': 'excel'
                     }
                 )
             
             # 步骤8：验证上传结果
-            processing_report['step_by_step'].append(f"步骤8: 上传完成，验证保存结果")
             st.success(f"✅ 步骤8: 上传完成！")
             
             # 立即验证保存的文件
@@ -491,331 +420,11 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 verify_df = pd.read_excel(io.BytesIO(verify_content))
                 
                 st.success(f"🔍 验证成功: COS中已保存 {len(verify_df)} 行数据 (Excel格式)")
-                processing_report['step_by_step'].append(f"步骤9: 验证完成，COS中实际保存 {len(verify_df)} 行")
-                
-                # 显示验证结果
-                with st.expander("✅ 保存验证结果", expanded=False):
-                    st.write(f"**准备保存的行数**: {len(final_df)}")
-                    st.write(f"**COS中的行数**: {len(verify_df)}")
-                    st.write(f"**数据完整性**: {'✅ 完整' if len(final_df) == len(verify_df) else '❌ 不完整'}")
-                    st.write(f"**存储格式**: Excel (.xlsx)")
-                    
-                    st.text("COS中保存的前5行:")
-                    st.dataframe(verify_df.head(5), use_container_width=True)
                             
             except Exception as e:
                 st.warning(f"⚠️ 无法验证保存结果: {str(e)}")
             
             logger.info(f"权限数据保存成功 (Excel格式): {processed_count} 条记录 (原始: {processing_report['original_rows']} 条)")
-            
-            # 显示完整的处理日志
-            with st.expander("📋 完整处理日志", expanded=False):
-                for step in processing_report['step_by_step']:
-                    st.text(step)
-            
-            # 清除相关缓存
-            clear_permissions_cache()
-            
-            return True
-        
-        return safe_cos_operation(_save_operation)
-    """保存权限数据到COS - 全面诊断版，确保数据完整性"""
-    with error_handler("保存权限数据"):
-        def _save_operation():
-            # 数据验证
-            if df is None or len(df) == 0:
-                raise DataProcessingError("权限数据为空")
-            
-            if len(df.columns) < 2:
-                raise DataProcessingError("权限数据格式错误：需要至少两列（门店名称、人员编号）")
-            
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # 创建详细的处理报告
-            processing_report = {
-                'original_rows': len(df),
-                'original_columns': len(df.columns),
-                'processed_rows': 0,
-                'skipped_rows': [],
-                'error_rows': [],
-                'duplicate_rows': [],
-                'empty_rows': [],
-                'step_by_step': []
-            }
-            
-            # 步骤1：显示原始数据统计
-            processing_report['step_by_step'].append(f"步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
-            st.info(f"📊 步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
-            
-            # 显示原始数据预览
-            with st.expander("🔍 步骤1: 原始数据预览（前10行）", expanded=True):
-                st.dataframe(df.head(10), use_container_width=True)
-                st.write(f"**列名**: {df.columns.tolist()}")
-                
-                # 显示数据类型
-                st.write("**数据类型**:")
-                for col in df.columns:
-                    st.write(f"- {col}: {df[col].dtype}")
-            
-            # 步骤2：检查并显示每一行的内容（前20行）
-            processing_report['step_by_step'].append(f"步骤2: 检查前20行数据内容")
-            
-            with st.expander("🔍 步骤2: 详细行内容检查（前20行）", expanded=False):
-                for idx in range(min(20, len(df))):
-                    row = df.iloc[idx]
-                    st.write(f"**第{idx+1}行**: {dict(zip(df.columns, row.values))}")
-            
-            # 步骤3：提取权限列
-            # 确保使用正确的列
-            store_col = df.columns[0]
-            user_col = df.columns[1]
-            
-            # 创建权限数据
-            permissions_data = []
-            permissions_data.append(['门店名称', '人员编号', '更新时间'])
-            
-            processing_report['step_by_step'].append(f"步骤3: 开始逐行处理数据")
-            st.info(f"📊 步骤3: 开始逐行处理 {len(df)} 行数据")
-            
-            # 创建进度条
-            progress_container = st.container()
-            with progress_container:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                detail_text = st.empty()
-            
-            processed_count = 0
-            seen_combinations = set()  # 用于检测重复数据
-            
-            # 逐行处理数据
-            for idx, row in df.iterrows():
-                try:
-                    progress = (idx + 1) / len(df)
-                    progress_bar.progress(progress)
-                    status_text.text(f"处理第 {idx + 1}/{len(df)} 行...")
-                    
-                    # 获取原始值
-                    raw_store = row[store_col] if pd.notna(row[store_col]) else ""
-                    raw_user = row[user_col] if pd.notna(row[user_col]) else ""
-                    
-                    detail_text.text(f"当前行: 门店='{raw_store}', 编号='{raw_user}'")
-                    
-                    # 转换为字符串并清理
-                    store_name = str(raw_store).strip()
-                    user_id = str(raw_user).strip()
-                    
-                    # 记录空行
-                    if (not store_name or store_name in ['nan', 'None']) and \
-                       (not user_id or user_id in ['nan', 'None']):
-                        processing_report['empty_rows'].append({
-                            'row': idx + 1,
-                            'store': raw_store,
-                            'user': raw_user,
-                            'reason': '门店和编号都为空'
-                        })
-                        continue
-                    
-                    # 检查门店名称
-                    if not store_name or store_name in ['nan', 'None']:
-                        processing_report['skipped_rows'].append({
-                            'row': idx + 1,
-                            'store': raw_store,
-                            'user': raw_user,
-                            'reason': '门店名称为空'
-                        })
-                        continue
-                    
-                    # 检查人员编号
-                    if not user_id or user_id in ['nan', 'None']:
-                        processing_report['skipped_rows'].append({
-                            'row': idx + 1,
-                            'store': raw_store,
-                            'user': raw_user,
-                            'reason': '人员编号为空'
-                        })
-                        continue
-                    
-                    # 清理特殊字符但保留更多有效数据
-                    store_name = store_name.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                    user_id = user_id.replace('\n', '').replace('\r', '').replace('\t', '')
-                    
-                    # 去除多余空格
-                    store_name = ' '.join(store_name.split())
-                    user_id = ' '.join(user_id.split())
-                    
-                    # 最终验证
-                    if len(store_name) == 0 or len(user_id) == 0:
-                        processing_report['skipped_rows'].append({
-                            'row': idx + 1,
-                            'store': raw_store,
-                            'user': raw_user,
-                            'reason': '清理后数据为空'
-                        })
-                        continue
-                    
-                    # 检查重复数据
-                    combination = (store_name.lower(), user_id.lower())
-                    if combination in seen_combinations:
-                        processing_report['duplicate_rows'].append({
-                            'row': idx + 1,
-                            'store': store_name,
-                            'user': user_id,
-                            'reason': '重复的门店-编号组合'
-                        })
-                        continue
-                    
-                    seen_combinations.add(combination)
-                    permissions_data.append([store_name, user_id, current_time])
-                    processed_count += 1
-                    
-                except Exception as e:
-                    processing_report['error_rows'].append({
-                        'row': idx + 1,
-                        'store': raw_store if 'raw_store' in locals() else 'N/A',
-                        'user': raw_user if 'raw_user' in locals() else 'N/A',
-                        'reason': f'处理错误: {str(e)}'
-                    })
-                    logger.warning(f"处理第{idx+1}行时出错: {str(e)}")
-                    continue
-            
-            # 清除进度显示
-            progress_container.empty()
-            
-            # 更新处理报告
-            processing_report['processed_rows'] = processed_count
-            processing_report['step_by_step'].append(f"步骤4: 数据处理完成，有效数据 {processed_count} 行")
-            
-            # 显示处理结果
-            st.success(f"✅ 步骤4: 数据处理完成！")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("原始数据", f"{processing_report['original_rows']} 行")
-            with col2:
-                st.metric("成功处理", f"{processed_count} 行", 
-                         delta=f"{processed_count - processing_report['original_rows']}")
-            with col3:
-                skipped_total = len(processing_report['skipped_rows']) + \
-                               len(processing_report['error_rows']) + \
-                               len(processing_report['empty_rows']) + \
-                               len(processing_report['duplicate_rows'])
-                st.metric("跳过数据", f"{skipped_total} 行")
-            
-            # 显示详细处理报告
-            with st.expander("📋 步骤4: 详细处理报告", expanded=True):
-                
-                # 成功处理的数据预览
-                if processed_count > 0:
-                    st.subheader("✅ 成功处理的数据")
-                    processed_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
-                    st.dataframe(processed_df.head(10), use_container_width=True)
-                    if len(processed_df) > 10:
-                        st.caption(f"显示前10条，共{len(processed_df)}条")
-                
-                # 各种过滤情况的详细报告
-                if processing_report['empty_rows']:
-                    st.subheader("⚪ 空行数据")
-                    st.write(f"发现 {len(processing_report['empty_rows'])} 个完全空行")
-                    empty_df = pd.DataFrame(processing_report['empty_rows'])
-                    st.dataframe(empty_df, use_container_width=True)
-                
-                if processing_report['skipped_rows']:
-                    st.subheader("⚠️ 跳过的数据")
-                    skip_df = pd.DataFrame(processing_report['skipped_rows'])
-                    st.dataframe(skip_df, use_container_width=True)
-                
-                if processing_report['duplicate_rows']:
-                    st.subheader("🔄 重复数据")
-                    dup_df = pd.DataFrame(processing_report['duplicate_rows'])
-                    st.dataframe(dup_df, use_container_width=True)
-                
-                if processing_report['error_rows']:
-                    st.subheader("❌ 处理错误的数据")
-                    error_df = pd.DataFrame(processing_report['error_rows'])
-                    st.dataframe(error_df, use_container_width=True)
-            
-            if processed_count == 0:
-                raise DataProcessingError("没有有效的权限数据可以保存")
-            
-            # 步骤5：准备CSV内容
-            processing_report['step_by_step'].append(f"步骤5: 准备CSV内容，共 {len(permissions_data)} 行（包含表头）")
-            st.info(f"📊 步骤5: 准备保存 {len(permissions_data)-1} 条权限记录")
-            
-            # 转换为CSV格式
-            csv_buffer = io.StringIO()
-            final_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
-            final_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-            csv_content = csv_buffer.getvalue()
-            
-            # 验证生成的CSV内容
-            csv_lines = csv_content.split('\n')
-            non_empty_lines = [line for line in csv_lines if line.strip()]
-            
-            processing_report['step_by_step'].append(f"步骤6: CSV内容生成完成，{len(non_empty_lines)} 行（包含表头）")
-            st.info(f"📊 步骤6: CSV内容准备完成，{len(non_empty_lines)} 行")
-            
-            # 显示即将保存的CSV预览
-            with st.expander("🔍 步骤6: 即将保存的CSV内容预览", expanded=False):
-                st.text("前10行内容:")
-                for i, line in enumerate(csv_lines[:10]):
-                    if line.strip():
-                        st.code(f"第{i+1}行: {line}")
-            
-            # 步骤7：上传到COS
-            processing_report['step_by_step'].append(f"步骤7: 开始上传到腾讯云COS")
-            st.info(f"📊 步骤7: 正在上传到腾讯云...")
-            
-            with st.spinner("上传中..."):
-                cos_client.put_object(
-                    Bucket=bucket_name,
-                    Body=csv_content.encode('utf-8-sig'),
-                    Key=permissions_file,
-                    ContentType='text/csv; charset=utf-8',
-                    Metadata={
-                        'upload-time': current_time,
-                        'record-count': str(processed_count),
-                        'original-count': str(processing_report['original_rows']),
-                        'csv-lines': str(len(non_empty_lines)),
-                        'skipped-count': str(len(processing_report['skipped_rows']) + 
-                                              len(processing_report['error_rows']) + 
-                                              len(processing_report['empty_rows']) + 
-                                              len(processing_report['duplicate_rows']))
-                    }
-                )
-            
-            # 步骤8：验证上传结果
-            processing_report['step_by_step'].append(f"步骤8: 上传完成，验证保存结果")
-            st.success(f"✅ 步骤8: 上传完成！")
-            
-            # 立即验证保存的文件
-            try:
-                verify_response = cos_client.get_object(Bucket=bucket_name, Key=permissions_file)
-                verify_content = verify_response['Body'].read().decode('utf-8-sig')
-                verify_lines = verify_content.split('\n')
-                verify_non_empty = [line for line in verify_lines if line.strip()]
-                
-                st.success(f"🔍 验证成功: COS中已保存 {len(verify_non_empty)} 行数据")
-                processing_report['step_by_step'].append(f"步骤9: 验证完成，COS中实际保存 {len(verify_non_empty)} 行")
-                
-                # 显示验证结果
-                with st.expander("✅ 保存验证结果", expanded=False):
-                    st.write(f"**上传的行数**: {len(non_empty_lines)}")
-                    st.write(f"**COS中的行数**: {len(verify_non_empty)}")
-                    st.write(f"**数据完整性**: {'✅ 完整' if len(non_empty_lines) == len(verify_non_empty) else '❌ 不完整'}")
-                    
-                    st.text("COS中保存的前5行:")
-                    for i, line in enumerate(verify_lines[:5]):
-                        if line.strip():
-                            st.code(f"第{i+1}行: {line}")
-                            
-            except Exception as e:
-                st.warning(f"⚠️ 无法验证保存结果: {str(e)}")
-            
-            logger.info(f"权限数据保存成功: {processed_count} 条记录 (原始: {processing_report['original_rows']} 条)")
-            
-            # 显示完整的处理日志
-            with st.expander("📋 完整处理日志", expanded=False):
-                for step in processing_report['step_by_step']:
-                    st.text(step)
             
             # 清除相关缓存
             clear_permissions_cache()
@@ -836,111 +445,6 @@ def clear_permissions_cache():
         if full_key in st.session_state:
             del st.session_state[full_key]
             logger.info(f"已清除缓存: {cache_key}")
-
-def diagnose_csv_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Dict[str, Any]:
-    """诊断COS中的CSV文件 - 原始内容分析"""
-    try:
-        # 从COS下载文件
-        response = cos_client.get_object(
-            Bucket=bucket_name,
-            Key=permissions_file
-        )
-        
-        # 读取原始内容
-        raw_content = response['Body'].read()
-        
-        # 尝试不同编码
-        encodings = ['utf-8-sig', 'utf-8', 'gbk', 'gb2312', 'latin-1']
-        decoded_content = None
-        used_encoding = None
-        
-        for encoding in encodings:
-            try:
-                decoded_content = raw_content.decode(encoding)
-                used_encoding = encoding
-                break
-            except UnicodeDecodeError:
-                continue
-        
-        if decoded_content is None:
-            return {
-                'error': '无法解码文件内容，尝试了多种编码方式',
-                'raw_size': len(raw_content)
-            }
-        
-        # 基本统计
-        lines = decoded_content.split('\n')
-        non_empty_lines = [line for line in lines if line.strip()]
-        
-        diagnosis = {
-            'encoding': used_encoding,
-            'raw_size': len(raw_content),
-            'content_length': len(decoded_content),
-            'total_lines': len(lines),
-            'non_empty_lines': len(non_empty_lines),
-            'first_10_lines': lines[:10],
-            'last_10_lines': lines[-10:] if len(lines) > 10 else [],
-            'line_17_18': {
-                'line_17': lines[16] if len(lines) > 16 else 'N/A',
-                'line_18': lines[17] if len(lines) > 17 else 'N/A',
-                'line_19': lines[18] if len(lines) > 18 else 'N/A',
-                'line_20': lines[19] if len(lines) > 19 else 'N/A'
-            },
-            'pandas_test': None
-        }
-        
-        # 测试pandas读取
-        try:
-            df_default = pd.read_csv(io.StringIO(decoded_content))
-            diagnosis['pandas_test'] = {
-                'default': {
-                    'success': True,
-                    'rows': len(df_default),
-                    'cols': len(df_default.columns),
-                    'columns': df_default.columns.tolist()
-                }
-            }
-        except Exception as e:
-            diagnosis['pandas_test'] = {
-                'default': {
-                    'success': False,
-                    'error': str(e)
-                }
-            }
-        
-        # 测试其他pandas参数
-        pandas_options = [
-            {'on_bad_lines': 'skip'},
-            {'on_bad_lines': 'warn'},
-            {'sep': ',', 'quotechar': '"'},
-            {'engine': 'python'},
-            {'encoding': used_encoding}
-        ]
-        
-        diagnosis['pandas_test']['alternatives'] = []
-        
-        for i, options in enumerate(pandas_options):
-            try:
-                df_alt = pd.read_csv(io.StringIO(decoded_content), **options)
-                diagnosis['pandas_test']['alternatives'].append({
-                    'options': options,
-                    'success': True,
-                    'rows': len(df_alt),
-                    'cols': len(df_alt.columns)
-                })
-            except Exception as e:
-                diagnosis['pandas_test']['alternatives'].append({
-                    'options': options,
-                    'success': False,
-                    'error': str(e)
-                })
-        
-        return diagnosis
-        
-    except Exception as e:
-        return {
-            'error': f'诊断过程出错: {str(e)}'
-        }
 
 def load_permissions_from_cos_enhanced(cos_client, bucket_name: str, permissions_file: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
     """从COS加载权限数据 - Excel格式增强诊断版本"""
@@ -974,139 +478,34 @@ def load_permissions_from_cos_enhanced(cos_client, bucket_name: str, permissions
                 df = pd.read_excel(io.BytesIO(raw_content))
                 logger.info(f"Excel读取成功: {len(df)} 行 × {len(df.columns)} 列")
                 
-                # 显示前几行内容用于调试
-                logger.info("Excel文件前5行内容:")
-                for i, row in df.head().iterrows():
-                    logger.info(f"  第{i+1}行: {dict(zip(df.columns, row.values))}")
-                
                 if len(df) == 0:
                     logger.info("权限表为空")
                     return None
-                
-                logger.info(f"从COS读取Excel数据: {len(df)} 行 × {len(df.columns)} 列")
-                logger.info(f"列名: {df.columns.tolist()}")
                 
                 # 确保有必要的列
                 if len(df.columns) < 2:
                     logger.error("权限表格式错误：列数不足")
                     return None
                 
-                # 创建过滤统计
-                filter_stats = {
-                    'original_count': len(df),
-                    'empty_store': 0,
-                    'empty_user': 0,
-                    'both_empty': 0,
-                    'final_count': 0
-                }
-                
                 # 只取前两列作为权限数据
                 result_df = df.iloc[:, :2].copy()
                 result_df.columns = ['门店名称', '人员编号']
                 
-                logger.info(f"提取权限列后: {len(result_df)} 行")
+                # 数据清理
+                result_df['门店名称'] = result_df['门店名称'].astype(str).str.strip()
+                result_df['人员编号'] = result_df['人员编号'].astype(str).str.strip()
                 
-                # 显示前几行数据用于调试
-                logger.info("提取后前5行数据:")
-                for i, row in result_df.head().iterrows():
-                    logger.info(f"  第{i+1}行: 门店='{row['门店名称']}', 编号='{row['人员编号']}'")
-                
-                # 优化的数据清理 - 更宽松的条件
-                def is_empty_value(val):
-                    """判断值是否为空 - 更宽松的条件"""
-                    if pd.isna(val):
-                        return True
-                    val_str = str(val).strip()
-                    return val_str in ['', 'nan', 'None', 'NaN', 'null', 'NULL']
-                
-                def clean_value(val):
-                    """清理数据值 - 保留更多有效数据"""
-                    if pd.isna(val):
-                        return ''
-                    
-                    val_str = str(val).strip()
-                    
-                    # 移除首尾空格和特殊字符
-                    val_str = val_str.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                    val_str = ' '.join(val_str.split())  # 合并多个空格
-                    
-                    # 如果清理后为这些值，则认为是空
-                    if val_str.lower() in ['nan', 'none', 'null', '']:
-                        return ''
-                    
-                    return val_str
-                
-                # 清理数据
-                result_df['门店名称'] = result_df['门店名称'].apply(clean_value)
-                result_df['人员编号'] = result_df['人员编号'].apply(clean_value)
-                
-                logger.info(f"数据清理后: {len(result_df)} 行")
-                
-                # 统计空值情况
-                empty_store_mask = result_df['门店名称'] == ''
-                empty_user_mask = result_df['人员编号'] == ''
-                both_empty_mask = empty_store_mask & empty_user_mask
-                
-                filter_stats['empty_store'] = empty_store_mask.sum()
-                filter_stats['empty_user'] = empty_user_mask.sum()
-                filter_stats['both_empty'] = both_empty_mask.sum()
-                
-                logger.info(f"空值统计: 门店空={filter_stats['empty_store']}, 编号空={filter_stats['empty_user']}, 都空={filter_stats['both_empty']}")
-                
-                # 只过滤两个字段都为空的行（更宽松的过滤）
-                result_df = result_df[~both_empty_mask]
-                logger.info(f"过滤完全空行后: {len(result_df)} 行")
-                
-                # 如果门店名称为空但人员编号不为空，保留并标记
-                store_empty_but_user_exists = result_df['门店名称'] == ''
-                if store_empty_but_user_exists.any():
-                    logger.warning(f"发现 {store_empty_but_user_exists.sum()} 行门店名称为空但人员编号不为空的数据，已保留")
-                    result_df.loc[store_empty_but_user_exists, '门店名称'] = '未知门店'
-                
-                # 如果人员编号为空但门店名称不为空，保留并标记
-                user_empty_but_store_exists = result_df['人员编号'] == ''
-                if user_empty_but_store_exists.any():
-                    logger.warning(f"发现 {user_empty_but_store_exists.sum()} 行人员编号为空但门店名称不为空的数据，已保留")
-                    result_df.loc[user_empty_but_store_exists, '人员编号'] = '未知编号'
-                
-                # 移除重复数据（保留第一次出现的）
-                original_len = len(result_df)
-                result_df = result_df.drop_duplicates(subset=['门店名称', '人员编号'], keep='first')
-                duplicates_removed = original_len - len(result_df)
-                if duplicates_removed > 0:
-                    logger.info(f"移除重复数据: {duplicates_removed} 行")
-                
-                filter_stats['final_count'] = len(result_df)
-                
-                # 记录过滤统计
-                logger.info(f"权限数据过滤统计:")
-                logger.info(f"  原始数据: {filter_stats['original_count']} 行")
-                logger.info(f"  门店名称为空: {filter_stats['empty_store']} 行")
-                logger.info(f"  人员编号为空: {filter_stats['empty_user']} 行")
-                logger.info(f"  两者都为空: {filter_stats['both_empty']} 行")
-                logger.info(f"  重复数据: {duplicates_removed} 行")
-                logger.info(f"  最终保留: {filter_stats['final_count']} 行")
-                
-                # 将统计信息保存到session state，供管理员界面显示
-                st.session_state.permissions_filter_stats = {
-                    'original_count': filter_stats['original_count'],
-                    'empty_store': filter_stats['empty_store'],
-                    'empty_user': filter_stats['empty_user'],
-                    'both_empty': filter_stats['both_empty'],
-                    'duplicates_removed': duplicates_removed,
-                    'final_count': filter_stats['final_count'],
-                    'load_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'raw_file_size': len(raw_content),
-                    'excel_rows': len(df),
-                    'file_format': 'Excel'
-                }
+                # 移除空行和无效数据
+                result_df = result_df[
+                    (result_df['门店名称'] != '') & 
+                    (result_df['人员编号'] != '') &
+                    (result_df['门店名称'] != 'nan') &
+                    (result_df['人员编号'] != 'nan')
+                ]
                 
                 if len(result_df) == 0:
-                    logger.warning("过滤后权限数据为空")
+                    logger.warning("清理后权限数据为空")
                     return None
-                
-                # 重置索引
-                result_df = result_df.reset_index(drop=True)
                 
                 logger.info(f"权限数据加载成功 (Excel格式): {len(result_df)} 条记录")
                 
@@ -1148,6 +547,7 @@ def load_permissions_from_cos_enhanced(cos_client, bucket_name: str, permissions
                 raise e
         
         return safe_cos_operation(_load_operation)
+
 def load_permissions_from_cos(cos_client, bucket_name: str, permissions_file: str) -> Optional[pd.DataFrame]:
     """从COS加载权限数据 - 使用增强版本"""
     return load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=False)
@@ -1640,1115 +1040,548 @@ def main():
                 st.stop()
         
         cos_client, bucket_name, permissions_file = st.session_state.cos_client
-    
-    except Exception as e:
-        st.error(f"系统初始化失败: {str(e)}")
-        st.stop()
-    # 显示操作状态
-    for status in st.session_state.operation_status:
-        show_status_message(status['message'], status['type'])
-    
-    # 侧边栏
-    with st.sidebar:
-        st.title("⚙️ 系统功能")
         
-        # 系统状态
-        st.subheader("📡 系统状态")
-        if cos_client:
-            st.success("🟢 腾讯云存储已连接")
-        else:
-            st.error("🔴 腾讯云存储断开")
+        # 显示操作状态
+        for status in st.session_state.operation_status:
+            show_status_message(status['message'], status['type'])
         
-        user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
-        
-        if user_type == "管理员":
-            st.subheader("🔐 管理员登录")
-            admin_password = st.text_input("管理员密码", type="password")
+        # 侧边栏
+        with st.sidebar:
+            st.title("⚙️ 系统功能")
             
-            if st.button("验证管理员身份"):
-                if admin_password == ADMIN_PASSWORD:
-                    st.session_state.is_admin = True
-                    show_status_message("✅ 管理员验证成功！", "success")
-                    st.rerun()
-                else:
-                    show_status_message("❌ 密码错误！", "error")
+            # 系统状态
+            st.subheader("📡 系统状态")
+            if cos_client:
+                st.success("🟢 腾讯云存储已连接")
+            else:
+                st.error("🔴 腾讯云存储断开")
             
-            if st.session_state.is_admin:
-                st.subheader("📁 文件管理")
+            user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
+            
+            if user_type == "管理员":
+                st.subheader("🔐 管理员登录")
+                admin_password = st.text_input("管理员密码", type="password")
                 
-                # 上传权限表
-                permissions_file_upload = st.file_uploader(
-                    "上传门店权限表", 
-                    type=['xlsx', 'xls'],
-                    key=st.session_state.permissions_uploader_key,
-                    help="Excel文件，需包含门店名称和人员编号两列"
-                )
-                
-                if permissions_file_upload:
-                    try:
-                        # 计算文件哈希
-                        file_hash = hashlib.md5(permissions_file_upload.getvalue()).hexdigest()
-                        
-                        # 检查是否已处理过
-                        if ("last_permissions_hash" in st.session_state and 
-                            st.session_state.last_permissions_hash == file_hash and 
-                            st.session_state.get("permissions_upload_successful", False)):
-                            st.info("ℹ️ 该权限表已成功处理，无需重复操作。")
-                        else:
-                            st.session_state.last_permissions_hash = file_hash
-                            st.session_state.permissions_upload_successful = False
-                            
-                            with st.spinner("分析Excel文件结构..."):
-                                # 尝试读取Excel文件的所有工作表
-                                excel_file = pd.ExcelFile(permissions_file_upload)
-                                st.info(f"📄 发现 {len(excel_file.sheet_names)} 个工作表：{excel_file.sheet_names}")
-                                
-                                # 让用户选择工作表（如果有多个）
-                                if len(excel_file.sheet_names) > 1:
-                                    selected_sheet = st.selectbox(
-                                        "选择包含权限数据的工作表：", 
-                                        excel_file.sheet_names,
-                                        key="permission_sheet_selector"
-                                    )
-                                else:
-                                    selected_sheet = excel_file.sheet_names[0]
-                                
-                                # 读取选定的工作表
-                                df_raw = pd.read_excel(permissions_file_upload, sheet_name=selected_sheet)
-                                st.info(f"📊 原始数据：{len(df_raw)} 行 × {len(df_raw.columns)} 列")
-                                
-                                # 显示原始数据的前几行，帮助用户确认数据结构
-                                st.subheader("🔍 原始数据预览")
-                                st.dataframe(df_raw.head(10), use_container_width=True)
-                                
-                                # 让用户选择包含权限数据的列
-                                if len(df_raw.columns) >= 2:
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        store_column = st.selectbox(
-                                            "选择门店名称列：",
-                                            df_raw.columns.tolist(),
-                                            index=0,
-                                            key="store_column_selector"
-                                        )
-                                    with col2:
-                                        user_column = st.selectbox(
-                                            "选择人员编号列：",
-                                            df_raw.columns.tolist(),
-                                            index=1 if len(df_raw.columns) > 1 else 0,
-                                            key="user_column_selector"
-                                        )
-                                    
-                                    # 检查是否有表头行需要跳过
-                                    header_row = st.number_input(
-                                        "数据开始行（0表示第一行）：",
-                                        min_value=0,
-                                        max_value=len(df_raw)-1,
-                                        value=0,
-                                        key="header_row_selector"
-                                    )
-                                    
-                                    if st.button("🚀 开始处理权限数据", key="process_permissions"):
-                                        try:
-                                            # 重新读取Excel，跳过指定的表头行
-                                            if header_row > 0:
-                                                df_processed = pd.read_excel(
-                                                    permissions_file_upload, 
-                                                    sheet_name=selected_sheet,
-                                                    skiprows=header_row
-                                                )
-                                            else:
-                                                df_processed = df_raw.copy()
-                                            
-                                            # 重新排列列顺序，确保门店名称和人员编号在前两列
-                                            store_idx = df_processed.columns.get_loc(store_column)
-                                            user_idx = df_processed.columns.get_loc(user_column)
-                                            
-                                            # 创建新的DataFrame，门店名称和人员编号作为前两列
-                                            df = pd.DataFrame({
-                                                '门店名称': df_processed[store_column],
-                                                '人员编号': df_processed[user_column]
-                                            })
-                                            
-                                            st.info(f"🔄 处理后数据：{len(df)} 行 × {len(df.columns)} 列")
-                                            
-                                            with st.spinner("保存到腾讯云..."):
-                                                if save_permissions_to_cos(df, cos_client, bucket_name, permissions_file):
-                                                    st.session_state.permissions_upload_successful = True
-                                                    st.balloons()
-                                                    
-                                                    # 重置上传器
-                                                    st.session_state.permissions_uploader_key = f"{datetime.now().timestamp()}_permissions"
-                                                    st.rerun()
-                                                else:
-                                                    show_status_message("❌ 保存失败", "error")
-                                                    st.session_state.permissions_upload_successful = False
-                                        
-                                        except Exception as e:
-                                            show_status_message(f"❌ 数据处理失败：{str(e)}", "error")
-                                            st.session_state.permissions_upload_successful = False
-                                
-                                else:
-                                    show_status_message("❌ 数据格式错误：需要至少两列数据", "error")
-                                    st.session_state.permissions_upload_successful = False
-                    
-                    except Exception as e:
-                        show_status_message(f"❌ 文件读取失败：{str(e)}", "error")
-                        st.session_state.permissions_upload_successful = False
-                # 上传财务报表
-                reports_file_upload = st.file_uploader(
-                    "上传财务报表", 
-                    type=['xlsx', 'xls'],
-                    key=st.session_state.reports_uploader_key,
-                    help="Excel文件，每个工作表代表一个门店的报表"
-                )
-                
-                if reports_file_upload:
-                    try:
-                        # 计算文件哈希
-                        file_hash = hashlib.md5(reports_file_upload.getvalue()).hexdigest()
-                        
-                        # 检查是否已处理过
-                        if ("last_reports_hash" in st.session_state and 
-                            st.session_state.last_reports_hash == file_hash and 
-                            st.session_state.get("reports_upload_successful", False)):
-                            st.info("ℹ️ 该报表文件已成功处理，无需重复操作。")
-                        else:
-                            st.session_state.last_reports_hash = file_hash
-                            st.session_state.reports_upload_successful = False
-                            
-                            with st.spinner("处理报表文件..."):
-                                excel_file = pd.ExcelFile(reports_file_upload)
-                                reports_dict = {}
-                                
-                                for sheet in excel_file.sheet_names:
-                                    try:
-                                        df = pd.read_excel(reports_file_upload, sheet_name=sheet)
-                                        if not df.empty:
-                                            reports_dict[sheet] = df
-                                            logger.info(f"读取工作表 '{sheet}': {len(df)} 行")
-                                    except Exception as e:
-                                        logger.warning(f"跳过工作表 '{sheet}': {str(e)}")
-                                        continue
-                                
-                                if reports_dict:
-                                    with st.spinner("保存到腾讯云..."):
-                                        if save_reports_to_cos(reports_dict, cos_client, bucket_name):
-                                            show_status_message(f"✅ 报表已上传：{len(reports_dict)} 个门店", "success")
-                                            st.session_state.reports_upload_successful = True
-                                            st.balloons()
-                                            
-                                            # 重置上传器
-                                            st.session_state.reports_uploader_key = f"{datetime.now().timestamp()}_reports"
-                                            st.rerun()
-                                        else:
-                                            show_status_message("❌ 保存失败", "error")
-                                            st.session_state.reports_upload_successful = False
-                                else:
-                                    show_status_message("❌ 文件中没有有效的工作表", "error")
-                                    st.session_state.reports_upload_successful = False
-                                    
-                    except Exception as e:
-                        show_status_message(f"❌ 处理失败：{str(e)}", "error")
-                        st.session_state.reports_upload_successful = False
-                
-                # 缓存管理和诊断
-                st.subheader("🗂️ 缓存管理和诊断")
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    if st.button("清除所有缓存"):
-                        cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
-                        for key in cache_keys:
-                            del st.session_state[key]
-                        # 同时清除统计信息
-                        if hasattr(st.session_state, 'permissions_filter_stats'):
-                            del st.session_state.permissions_filter_stats
-                        show_status_message("✅ 所有缓存已清除", "success")
+                if st.button("验证管理员身份"):
+                    if admin_password == ADMIN_PASSWORD:
+                        st.session_state.is_admin = True
+                        show_status_message("✅ 管理员验证成功！", "success")
                         st.rerun()
+                    else:
+                        show_status_message("❌ 密码错误！", "error")
                 
-                with col2:
-                    if st.button("🔄 强制重新加载"):
-                        # 清除权限相关缓存
-                        clear_permissions_cache()
-                        if hasattr(st.session_state, 'permissions_filter_stats'):
-                            del st.session_state.permissions_filter_stats
-                        # 强制重新加载
-                        with st.spinner("强制重新加载权限数据..."):
-                            new_data = load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=True)
-                            if new_data is not None:
-                                show_status_message(f"✅ 重新加载完成，获得 {len(new_data)} 条记录", "success")
-                            else:
-                                show_status_message("⚠️ 重新加载完成，但没有获得数据", "warning")
-                        st.rerun()
-                
-                with col3:
-                    if st.button("🔍 权限文件诊断"):
-                        st.session_state.show_diagnosis = True
-                        st.rerun()
-                
-                # 显示诊断结果
-                if st.session_state.get('show_diagnosis', False):
-                    st.subheader("🩺 权限文件诊断报告")
+                if st.session_state.is_admin:
+                    st.subheader("📁 文件管理")
                     
-                    # 检查文件格式
-                    excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
+                    # 上传权限表
+                    permissions_file_upload = st.file_uploader(
+                        "上传门店权限表", 
+                        type=['xlsx', 'xls'],
+                        key=st.session_state.permissions_uploader_key,
+                        help="Excel文件，需包含门店名称和人员编号两列"
+                    )
                     
-                    with st.spinner("正在诊断权限文件..."):
-                        # 首先尝试Excel格式
+                    if permissions_file_upload:
                         try:
-                            response = cos_client.get_object(Bucket=bucket_name, Key=excel_permissions_file)
-                            raw_content = response['Body'].read()
+                            # 计算文件哈希
+                            file_hash = hashlib.md5(permissions_file_upload.getvalue()).hexdigest()
                             
-                            st.success(f"✅ 找到Excel格式权限文件")
-                            st.info(f"📄 文件大小: {len(raw_content)} 字节")
+                            # 检查是否已处理过
+                            if ("last_permissions_hash" in st.session_state and 
+                                st.session_state.last_permissions_hash == file_hash and 
+                                st.session_state.get("permissions_upload_successful", False)):
+                                st.info("ℹ️ 该权限表已成功处理，无需重复操作。")
+                            else:
+                                st.session_state.last_permissions_hash = file_hash
+                                st.session_state.permissions_upload_successful = False
+                                
+                                with st.spinner("分析Excel文件结构..."):
+                                    # 尝试读取Excel文件的所有工作表
+                                    excel_file = pd.ExcelFile(permissions_file_upload)
+                                    st.info(f"📄 发现 {len(excel_file.sheet_names)} 个工作表：{excel_file.sheet_names}")
+                                    
+                                    # 让用户选择工作表（如果有多个）
+                                    if len(excel_file.sheet_names) > 1:
+                                        selected_sheet = st.selectbox(
+                                            "选择包含权限数据的工作表：", 
+                                            excel_file.sheet_names,
+                                            key="permission_sheet_selector"
+                                        )
+                                    else:
+                                        selected_sheet = excel_file.sheet_names[0]
+                                    
+                                    # 读取选定的工作表
+                                    df_raw = pd.read_excel(permissions_file_upload, sheet_name=selected_sheet)
+                                    st.info(f"📊 原始数据：{len(df_raw)} 行 × {len(df_raw.columns)} 列")
+                                    
+                                    # 显示原始数据的前几行，帮助用户确认数据结构
+                                    st.subheader("🔍 原始数据预览")
+                                    st.dataframe(df_raw.head(10), use_container_width=True)
+                                    
+                                    # 让用户选择包含权限数据的列
+                                    if len(df_raw.columns) >= 2:
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            store_column = st.selectbox(
+                                                "选择门店名称列：",
+                                                df_raw.columns.tolist(),
+                                                index=0,
+                                                key="store_column_selector"
+                                            )
+                                        with col2:
+                                            user_column = st.selectbox(
+                                                "选择人员编号列：",
+                                                df_raw.columns.tolist(),
+                                                index=1 if len(df_raw.columns) > 1 else 0,
+                                                key="user_column_selector"
+                                            )
+                                        
+                                        # 检查是否有表头行需要跳过
+                                        header_row = st.number_input(
+                                            "数据开始行（0表示第一行）：",
+                                            min_value=0,
+                                            max_value=len(df_raw)-1,
+                                            value=0,
+                                            key="header_row_selector"
+                                        )
+                                        
+                                        if st.button("🚀 开始处理权限数据", key="process_permissions"):
+                                            try:
+                                                # 重新读取Excel，跳过指定的表头行
+                                                if header_row > 0:
+                                                    df_processed = pd.read_excel(
+                                                        permissions_file_upload, 
+                                                        sheet_name=selected_sheet,
+                                                        skiprows=header_row
+                                                    )
+                                                else:
+                                                    df_processed = df_raw.copy()
+                                                
+                                                # 重新排列列顺序，确保门店名称和人员编号在前两列
+                                                store_idx = df_processed.columns.get_loc(store_column)
+                                                user_idx = df_processed.columns.get_loc(user_column)
+                                                
+                                                # 创建新的DataFrame，门店名称和人员编号作为前两列
+                                                df = pd.DataFrame({
+                                                    '门店名称': df_processed[store_column],
+                                                    '人员编号': df_processed[user_column]
+                                                })
+                                                
+                                                st.info(f"🔄 处理后数据：{len(df)} 行 × {len(df.columns)} 列")
+                                                
+                                                with st.spinner("保存到腾讯云..."):
+                                                    if save_permissions_to_cos(df, cos_client, bucket_name, permissions_file):
+                                                        st.session_state.permissions_upload_successful = True
+                                                        st.balloons()
+                                                        
+                                                        # 重置上传器
+                                                        st.session_state.permissions_uploader_key = f"{datetime.now().timestamp()}_permissions"
+                                                        st.rerun()
+                                                    else:
+                                                        show_status_message("❌ 保存失败", "error")
+                                                        st.session_state.permissions_upload_successful = False
+                                            
+                                            except Exception as e:
+                                                show_status_message(f"❌ 数据处理失败：{str(e)}", "error")
+                                                st.session_state.permissions_upload_successful = False
+                                    
+                                    else:
+                                        show_status_message("❌ 数据格式错误：需要至少两列数据", "error")
+                                        st.session_state.permissions_upload_successful = False
+                        
+                        except Exception as e:
+                            show_status_message(f"❌ 文件读取失败：{str(e)}", "error")
+                            st.session_state.permissions_upload_successful = False
+                    
+                    # 上传财务报表
+                    reports_file_upload = st.file_uploader(
+                        "上传财务报表", 
+                        type=['xlsx', 'xls'],
+                        key=st.session_state.reports_uploader_key,
+                        help="Excel文件，每个工作表代表一个门店的报表"
+                    )
+                    
+                    if reports_file_upload:
+                        try:
+                            # 计算文件哈希
+                            file_hash = hashlib.md5(reports_file_upload.getvalue()).hexdigest()
                             
-                            # 读取Excel内容
-                            df = pd.read_excel(io.BytesIO(raw_content))
-                            st.success(f"📊 Excel读取成功: {len(df)} 行 × {len(df.columns)} 列")
+                            # 检查是否已处理过
+                            if ("last_reports_hash" in st.session_state and 
+                                st.session_state.last_reports_hash == file_hash and 
+                                st.session_state.get("reports_upload_successful", False)):
+                                st.info("ℹ️ 该报表文件已成功处理，无需重复操作。")
+                            else:
+                                st.session_state.last_reports_hash = file_hash
+                                st.session_state.reports_upload_successful = False
+                                
+                                with st.spinner("处理报表文件..."):
+                                    excel_file = pd.ExcelFile(reports_file_upload)
+                                    reports_dict = {}
+                                    
+                                    for sheet in excel_file.sheet_names:
+                                        try:
+                                            df = pd.read_excel(reports_file_upload, sheet_name=sheet)
+                                            if not df.empty:
+                                                reports_dict[sheet] = df
+                                                logger.info(f"读取工作表 '{sheet}': {len(df)} 行")
+                                        except Exception as e:
+                                            logger.warning(f"跳过工作表 '{sheet}': {str(e)}")
+                                            continue
+                                    
+                                    if reports_dict:
+                                        with st.spinner("保存到腾讯云..."):
+                                            if save_reports_to_cos(reports_dict, cos_client, bucket_name):
+                                                show_status_message(f"✅ 报表已上传：{len(reports_dict)} 个门店", "success")
+                                                st.session_state.reports_upload_successful = True
+                                                st.balloons()
+                                                
+                                                # 重置上传器
+                                                st.session_state.reports_uploader_key = f"{datetime.now().timestamp()}_reports"
+                                                st.rerun()
+                                            else:
+                                                show_status_message("❌ 保存失败", "error")
+                                                st.session_state.reports_upload_successful = False
+                                    else:
+                                        show_status_message("❌ 文件中没有有效的工作表", "error")
+                                        st.session_state.reports_upload_successful = False
+                                        
+                        except Exception as e:
+                            show_status_message(f"❌ 处理失败：{str(e)}", "error")
+                            st.session_state.reports_upload_successful = False
+                    
+                    # 缓存管理和诊断
+                    st.subheader("🗂️ 缓存管理")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("清除所有缓存"):
+                            cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
+                            for key in cache_keys:
+                                del st.session_state[key]
+                            show_status_message("✅ 所有缓存已清除", "success")
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("🔄 强制重新加载"):
+                            # 清除权限相关缓存
+                            clear_permissions_cache()
+                            # 强制重新加载
+                            with st.spinner("强制重新加载权限数据..."):
+                                new_data = load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=True)
+                                if new_data is not None:
+                                    show_status_message(f"✅ 重新加载完成，获得 {len(new_data)} 条记录", "success")
+                                else:
+                                    show_status_message("⚠️ 重新加载完成，但没有获得数据", "warning")
+                            st.rerun()
+            
+            else:
+                if st.session_state.logged_in:
+                    st.subheader("👤 当前登录")
+                    st.info(f"门店：{st.session_state.store_name}")
+                    st.info(f"编号：{st.session_state.user_id}")
+                    
+                    if st.button("🚪 退出登录"):
+                        st.session_state.logged_in = False
+                        st.session_state.store_name = ""
+                        st.session_state.user_id = ""
+                        show_status_message("👋 已退出登录", "success")
+                        st.rerun()
+        
+        # 清除状态消息
+        st.session_state.operation_status = []
+        
+        # 主界面
+        if user_type == "管理员" and st.session_state.is_admin:
+            st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在腾讯云，支持高效存储和缓存机制</p></div>', unsafe_allow_html=True)
+            
+            try:
+                with st.spinner("加载数据统计..."):
+                    permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
+                    store_list = get_store_list_from_cos(cos_client, bucket_name)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    perms_count = len(permissions_data) if permissions_data is not None else 0
+                    st.metric("权限表用户数", perms_count)
+                with col2:
+                    reports_count = len(store_list)
+                    st.metric("报表门店数", reports_count)
+                with col3:
+                    cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
+                    st.metric("缓存项目数", cache_count)
+                    
+                # 数据预览
+                if permissions_data is not None and len(permissions_data) > 0:
+                    st.subheader("👥 权限数据预览")
+                    st.dataframe(permissions_data.head(10), use_container_width=True)
+                    
+                    if len(permissions_data) > 10:
+                        st.caption(f"显示前10条记录，共{len(permissions_data)}条")
+                
+                if store_list:
+                    st.subheader("📊 门店列表预览")
+                    st.write(f"共有 {len(store_list)} 个门店")
+                    
+                    # 显示前10个门店
+                    display_stores = store_list[:10]
+                    for i in range(0, len(display_stores), 5):
+                        cols = st.columns(5)
+                        for j, store in enumerate(display_stores[i:i+5]):
+                            with cols[j]:
+                                st.info(f"🏪 {store}")
+                    
+                    if len(store_list) > 10:
+                        st.caption(f"...以及其他 {len(store_list) - 10} 个门店")
+                        
+            except Exception as e:
+                show_status_message(f"❌ 数据加载失败：{str(e)}", "error")
+
+        elif user_type == "管理员" and not st.session_state.is_admin:
+            st.info("👈 请在左侧边栏输入管理员密码")
+
+        else:
+            if not st.session_state.logged_in:
+                st.subheader("🔐 用户登录")
+                
+                try:
+                    with st.spinner("加载权限数据..."):
+                        permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
+                    
+                    if permissions_data is None:
+                        st.warning("⚠️ 系统维护中，请联系管理员")
+                    else:
+                        stores = sorted(permissions_data[permissions_data.columns[0]].unique().tolist())
+                        
+                        with st.form("login_form"):
+                            selected_store = st.selectbox("选择门店", stores)
+                            user_id = st.text_input("人员编号")
+                            submit = st.form_submit_button("🚀 登录")
                             
-                            # 显示Excel内容预览
+                            if submit and selected_store and user_id:
+                                if verify_user_permission(selected_store, user_id, permissions_data):
+                                    st.session_state.logged_in = True
+                                    st.session_state.store_name = selected_store
+                                    st.session_state.user_id = user_id
+                                    show_status_message("✅ 登录成功！", "success")
+                                    st.balloons()
+                                    st.rerun()
+                                else:
+                                    show_status_message("❌ 门店或编号错误！", "error")
+                                    
+                except Exception as e:
+                    show_status_message(f"❌ 权限验证失败：{str(e)}", "error")
+            
+            else:
+                # 已登录 - 显示报表
+                st.markdown(f'<div class="store-info"><h3>🏪 {st.session_state.store_name}</h3><p>操作员：{st.session_state.user_id}</p></div>', unsafe_allow_html=True)
+                
+                try:
+                    with st.spinner("加载门店列表..."):
+                        store_list = get_store_list_from_cos(cos_client, bucket_name)
+                        matching_stores = find_matching_stores(st.session_state.store_name, store_list)
+                    
+                    if matching_stores:
+                        if len(matching_stores) > 1:
+                            selected_store = st.selectbox("选择报表", matching_stores)
+                        else:
+                            selected_store = matching_stores[0]
+                        
+                        # 按需加载选定门店的报表数据
+                        with st.spinner(f"加载 {selected_store} 的报表数据..."):
+                            df = get_single_report_from_cos(cos_client, bucket_name, selected_store)
+                        
+                        if df is not None:
+                            # 应收-未收额看板
+                            st.subheader("💰 应收-未收额")
+                            
+                            try:
+                                analysis_results = analyze_receivable_data(df)
+                                
+                                if '应收-未收额' in analysis_results:
+                                    data = analysis_results['应收-未收额']
+                                    amount = data['amount']
+                                    
+                                    col1, col2, col3 = st.columns([1, 2, 1])
+                                    with col2:
+                                        if amount > 0:
+                                            st.markdown(f'''
+                                                <div class="receivable-positive">
+                                                    <h1 style="margin: 0; font-size: 3rem;">💳 ¥{amount:,.2f}</h1>
+                                                    <h3 style="margin: 0.5rem 0;">门店应付款</h3>
+                                                    <p style="margin: 0; font-size: 0.9rem;">数据来源: {data['row_name']} (第{data['actual_row_number']}行)</p>
+                                                </div>
+                                            ''', unsafe_allow_html=True)
+                                        
+                                        elif amount < 0:
+                                            st.markdown(f'''
+                                                <div class="receivable-negative">
+                                                    <h1 style="margin: 0; font-size: 3rem;">💚 ¥{abs(amount):,.2f}</h1>
+                                                    <h3 style="margin: 0.5rem 0;">总部应退款</h3>
+                                                    <p style="margin: 0; font-size: 0.9rem;">数据来源: {data['row_name']} (第{data['actual_row_number']}行)</p>
+                                                </div>
+                                            ''', unsafe_allow_html=True)
+                                        
+                                        else:
+                                            st.markdown('''
+                                                <div style="background: #e8f5e8; color: #2e7d32; padding: 2rem; border-radius: 15px; text-align: center;">
+                                                    <h1 style="margin: 0; font-size: 3rem;">⚖️ ¥0.00</h1>
+                                                    <h3 style="margin: 0.5rem 0;">收支平衡</h3>
+                                                    <p style="margin: 0;">应收未收额为零，账目平衡</p>
+                                                </div>
+                                            ''', unsafe_allow_html=True)
+                                
+                                else:
+                                    st.warning("⚠️ 未找到应收-未收额数据")
+                                    
+                                    with st.expander("🔍 查看详情", expanded=False):
+                                        debug_info = analysis_results.get('debug_info', {})
+                                        
+                                        st.markdown("### 📋 数据查找说明")
+                                        st.write(f"- **报表总行数：** {debug_info.get('total_rows', 0)} 行")
+                                        
+                                        if debug_info.get('checked_row_69'):
+                                            st.write(f"- **第69行内容：** {debug_info.get('row_69_content', 'N/A')}")
+                                        else:
+                                            st.write("- **第69行：** 报表行数不足69行")
+                                        
+                                        st.markdown("""
+                                        ### 💡 可能的原因
+                                        1. 第69行不包含"应收-未收额"相关关键词
+                                        2. 第69行的数值为空或格式不正确
+                                        3. 报表格式与预期不符
+                                        
+                                        ### 🛠️ 建议
+                                        - 请检查Excel报表第69行是否包含"应收-未收额"
+                                        - 确认该行有对应的金额数据
+                                        - 如需调整查找位置，请联系技术支持
+                                        """)
+                            
+                            except Exception as e:
+                                show_status_message(f"❌ 分析数据时出错：{str(e)}", "error")
+                            
+                            st.divider()
+                            
+                            # 完整报表数据
+                            st.subheader("📋 完整报表数据")
+                            
+                            search_term = st.text_input("🔍 搜索报表内容")
+                            
+                            try:
+                                if search_term:
+                                    search_df = df.copy()
+                                    for col in search_df.columns:
+                                        search_df[col] = search_df[col].astype(str).fillna('')
+                                    
+                                    mask = search_df.apply(
+                                        lambda x: x.str.contains(search_term, case=False, na=False, regex=False)
+                                    ).any(axis=1)
+                                    filtered_df = df[mask]
+                                    st.info(f"找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
+                                else:
+                                    filtered_df = df
+                                
+                                st.info(f"📊 数据统计：共 {len(filtered_df)} 条记录，{len(df.columns)} 列")
+                                
+                                if len(filtered_df) > 0:
+                                    display_df = filtered_df.copy()
+                                    
+                                    # 确保列名唯一
+                                    unique_columns = []
+                                    for i, col in enumerate(display_df.columns):
+                                        col_name = str(col)
+                                        if col_name in unique_columns:
+                                            col_name = f"{col_name}_{i}"
+                                        unique_columns.append(col_name)
+                                    display_df.columns = unique_columns
+                                    
+                                    # 清理数据内容
+                                    for col in display_df.columns:
+                                        display_df[col] = display_df[col].astype(str).fillna('')
+                                    
+                                    st.dataframe(display_df, use_container_width=True, height=400)
+                                
+                                else:
+                                    st.warning("没有找到符合条件的数据")
+                                    
+                            except Exception as e:
+                                show_status_message(f"❌ 数据处理时出错：{str(e)}", "error")
+                            
+                            # 下载功能
+                            st.subheader("📥 数据下载")
+                            
                             col1, col2 = st.columns(2)
                             with col1:
-                                st.markdown("**Excel文件信息:**")
-                                st.write(f"• 行数: {len(df)}")
-                                st.write(f"• 列数: {len(df.columns)}")
-                                st.write(f"• 列名: {df.columns.tolist()}")
-                            
-                            with col2:
-                                st.markdown("**数据预览（前5行）:**")
-                                st.dataframe(df.head(5), use_container_width=True)
-                            
-                            # 检查数据质量
-                            st.markdown("#### 📋 数据质量检查")
-                            empty_rows = df.isnull().all(axis=1).sum()
-                            duplicate_rows = df.duplicated().sum()
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("总行数", len(df))
-                            with col2:
-                                st.metric("空行数", empty_rows)
-                            with col3:
-                                st.metric("重复行数", duplicate_rows)
-                            
-                        except CosServiceError as e:
-                            if e.get_error_code() == 'NoSuchKey':
-                                st.warning("⚠️ 未找到Excel格式权限文件，检查CSV格式...")
-                                
-                                # 尝试CSV格式
                                 try:
-                                    diagnosis = diagnose_csv_from_cos(cos_client, bucket_name, permissions_file)
+                                    buffer = io.BytesIO()
+                                    download_df = df.copy()
                                     
-                                    if 'error' in diagnosis:
-                                        st.error(f"❌ CSV诊断失败: {diagnosis['error']}")
-                                    else:
-                                        st.info("📄 找到旧的CSV格式文件")
-                                        st.write(f"**文件信息**: {diagnosis['total_lines']} 行, {diagnosis['raw_size']} 字节")
-                                        
-                                        if diagnosis['pandas_test'] and diagnosis['pandas_test']['default']['success']:
-                                            pandas_result = diagnosis['pandas_test']['default']
-                                            st.success(f"📊 CSV读取: {pandas_result['rows']} 行 × {pandas_result['cols']} 列")
-                                        else:
-                                            st.error("❌ CSV读取失败，建议重新上传")
-                                        
-                                        st.info("💡 建议：重新上传权限表以使用新的Excel格式存储")
-                                
-                                except Exception as csv_e:
-                                    st.error(f"❌ 权限文件诊断失败: {str(csv_e)}")
-                            else:
-                                st.error(f"❌ COS访问错误: {e.get_error_msg()}")
-                    
-                    if st.button("关闭诊断报告"):
-                        st.session_state.show_diagnosis = False
-                        st.rerun()
-        
-        else:
-            if st.session_state.logged_in:
-                st.subheader("👤 当前登录")
-                st.info(f"门店：{st.session_state.store_name}")
-                st.info(f"编号：{st.session_state.user_id}")
-                
-                if st.button("🚪 退出登录"):
-                    st.session_state.logged_in = False
-                    st.session_state.store_name = ""
-                    st.session_state.user_id = ""
-                    show_status_message("👋 已退出登录", "success")
-                    st.rerun()
-    
-    # 清除状态消息
-    st.session_state.operation_status = []
-    # 主界面
-    if user_type == "管理员" and st.session_state.is_admin:
-        st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在腾讯云，支持高效存储和缓存机制</p></div>', unsafe_allow_html=True)
-        
-        try:
-            with st.spinner("加载数据统计..."):
-                permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
-                store_list = get_store_list_from_cos(cos_client, bucket_name)
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                perms_count = len(permissions_data) if permissions_data is not None else 0
-                st.metric("权限表用户数", perms_count)
-            with col2:
-                reports_count = len(store_list)
-                st.metric("报表门店数", reports_count)
-            with col3:
-                cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
-                st.metric("缓存项目数", cache_count)
-                
-            # 数据预览
-            if permissions_data is not None and len(permissions_data) > 0:
-                st.subheader("👥 权限数据预览")
-                
-                # 显示过滤统计（如果有的话）
-                if hasattr(st.session_state, 'permissions_filter_stats'):
-                    stats = st.session_state.permissions_filter_stats
-                    
-                    # 创建统计显示
-                    st.markdown("#### 📊 数据处理统计")
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.metric(
-                            "原始数据", 
-                            f"{stats['original_count']} 行"
-                        )
-                    with col2:
-                        st.metric(
-                            "最终保留", 
-                            f"{stats['final_count']} 行",
-                            delta=f"{stats['final_count'] - stats['original_count']}"
-                        )
-                    with col3:
-                        filtered_total = stats['both_empty'] + stats.get('duplicates_removed', 0)
-                        st.metric(
-                            "过滤数据", 
-                            f"{filtered_total} 行"
-                        )
-                    with col4:
-                        retention_rate = (stats['final_count'] / stats['original_count'] * 100) if stats['original_count'] > 0 else 0
-                        st.metric(
-                            "保留率", 
-                            f"{retention_rate:.1f}%"
-                        )
-                    
-                    # 详细过滤信息
-                    with st.expander("🔍 详细过滤统计", expanded=False):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write("**过滤原因统计：**")
-                            st.write(f"• 门店名称为空：{stats['empty_store']} 行")
-                            st.write(f"• 人员编号为空：{stats['empty_user']} 行")
-                            st.write(f"• 两者都为空：{stats['both_empty']} 行")
-                            st.write(f"• 重复数据：{stats.get('duplicates_removed', 0)} 行")
+                                    # 确保列名唯一
+                                    unique_cols = []
+                                    for i, col in enumerate(download_df.columns):
+                                        col_name = str(col)
+                                        if col_name in unique_cols:
+                                            col_name = f"{col_name}_{i}"
+                                        unique_cols.append(col_name)
+                                    download_df.columns = unique_cols
+                                    
+                                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                        download_df.to_excel(writer, index=False)
+                                    
+                                    st.download_button(
+                                        "📥 下载完整报表 (Excel)",
+                                        buffer.getvalue(),
+                                        f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                                except Exception as e:
+                                    show_status_message(f"Excel下载准备失败：{str(e)}", "error")
                             
-                            # 添加原始文件统计
-                            if 'raw_file_size' in stats:
-                                st.write("**文件读取统计：**")
-                                st.write(f"• 文件格式：{stats.get('file_format', 'Excel')} 格式")
-                                st.write(f"• 原始文件大小：{stats['raw_file_size']} 字节")
-                                st.write(f"• Excel读取行数：{stats.get('excel_rows', 'N/A')} 行")
-                                
-                                # 计算读取情况
-                                if stats.get('excel_rows'):
-                                    if stats['excel_rows'] == stats['original_count']:
-                                        st.success("✅ Excel文件读取完整")
-                                    else:
-                                        read_diff = abs(stats['excel_rows'] - stats['original_count'])
-                                        st.info(f"ℹ️ Excel读取与处理数据差异：{read_diff} 行")
-                            elif 'raw_file_lines' in stats:
-                                # 兼容旧的CSV格式统计
-                                st.write("**文件读取统计：**")
-                                st.write(f"• 原始文件行数：{stats['raw_file_lines']} 行")
-                                st.write(f"• pandas读取行数：{stats.get('pandas_rows', 'N/A')} 行")
-                                
-                                # 计算读取损失
-                                if stats.get('pandas_rows') and stats['raw_file_lines'] > 1:
-                                    read_loss = stats['raw_file_lines'] - 1 - stats['pandas_rows']  # 减1是因为表头
-                                    if read_loss > 0:
-                                        st.error(f"⚠️ CSV文件读取阶段丢失：{read_loss} 行")
-                                    else:
-                                        st.success("✅ CSV文件读取完整")
+                            with col2:
+                                try:
+                                    csv_df = df.copy()
+                                    unique_cols = []
+                                    for i, col in enumerate(csv_df.columns):
+                                        col_name = str(col)
+                                        if col_name in unique_cols:
+                                            col_name = f"{col_name}_{i}"
+                                        unique_cols.append(col_name)
+                                    csv_df.columns = unique_cols
+                                    
+                                    csv = csv_df.to_csv(index=False, encoding='utf-8-sig')
+                                    st.download_button(
+                                        "📥 下载CSV格式",
+                                        csv,
+                                        f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
+                                        "text/csv"
+                                    )
+                                except Exception as e:
+                                    show_status_message(f"CSV下载准备失败：{str(e)}", "error")
                         
-                        with col2:
-                            st.write("**数据质量：**")
-                            if retention_rate >= 90:
-                                st.success("✅ 数据质量良好")
-                            elif retention_rate >= 70:
-                                st.warning("⚠️ 数据质量一般，建议检查原始文件")
-                            else:
-                                st.error("❌ 数据质量较差，请使用权限文件诊断功能")
-                            
-                            st.caption(f"统计时间：{stats.get('load_time', 'N/A')}")
-                            
-                            # 添加诊断建议
-                            if 'raw_file_size' in stats:
-                                # Excel格式建议
-                                if retention_rate < 70:
-                                    st.markdown("**🔧 建议操作：**")
-                                    st.markdown("1. 点击 '强制重新加载' 清除缓存")
-                                    st.markdown("2. 检查Excel文件是否有格式问题")
-                                    st.markdown("3. 考虑重新上传Excel文件")
-                            elif 'raw_file_lines' in stats and stats.get('pandas_rows'):
-                                # 兼容旧CSV格式的建议
-                                read_loss = stats['raw_file_lines'] - 1 - stats['pandas_rows']
-                                if read_loss > 0:
-                                    st.markdown("**🔧 建议操作：**")
-                                    st.markdown("1. 数据已升级为Excel格式存储")
-                                    st.markdown("2. 重新上传权限表以使用新格式")
-                                    st.markdown("3. 新格式将避免CSV解析问题")
-                
-                st.dataframe(permissions_data.head(10), use_container_width=True)
-                
-                if len(permissions_data) > 10:
-                    st.caption(f"显示前10条记录，共{len(permissions_data)}条")
-            
-            if store_list:
-                st.subheader("📊 门店列表预览")
-                st.write(f"共有 {len(store_list)} 个门店")
-                
-                # 显示前10个门店
-                display_stores = store_list[:10]
-                for i in range(0, len(display_stores), 5):
-                    cols = st.columns(5)
-                    for j, store in enumerate(display_stores[i:i+5]):
-                        with cols[j]:
-                            st.info(f"🏪 {store}")
-                
-                if len(store_list) > 10:
-                    st.caption(f"...以及其他 {len(store_list) - 10} 个门店")
-                    
-        except Exception as e:
-            show_status_message(f"❌ 数据加载失败：{str(e)}", "error")
+                        else:
+                            st.error(f"❌ 无法加载门店 '{selected_store}' 的报表数据")
+                        
+                    else:
+                        st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
+                        
+                except Exception as e:
+                    show_status_message(f"❌ 报表加载失败：{str(e)}", "error")
+        
+        # 页面底部状态信息
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.caption(f"🕒 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        with col2:
+            cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
+            st.caption(f"💾 缓存项目: {cache_count}")
+        with col3:
+            st.caption("🔧 版本: v3.2 (Excel格式优化版)")
 
-    elif user_type == "管理员" and not st.session_state.is_admin:
-        st.info("👈 请在左侧边栏输入管理员密码")
-
-    else:
-        if not st.session_state.logged_in:
-            st.subheader("🔐 用户登录")
-            
-            try:
-                with st.spinner("加载权限数据..."):
-                    permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
-                
-                if permissions_data is None:
-                    st.warning("⚠️ 系统维护中，请联系管理员")
-                else:
-                    stores = sorted(permissions_data[permissions_data.columns[0]].unique().tolist())
-                    
-                    with st.form("login_form"):
-                        selected_store = st.selectbox("选择门店", stores)
-                        user_id = st.text_input("人员编号")
-                        submit = st.form_submit_button("🚀 登录")
-                        
-                        if submit and selected_store and user_id:
-                            if verify_user_permission(selected_store, user_id, permissions_data):
-                                st.session_state.logged_in = True
-                                st.session_state.store_name = selected_store
-                                st.session_state.user_id = user_id
-                                show_status_message("✅ 登录成功！", "success")
-                                st.balloons()
-                                st.rerun()
-                            else:
-                                show_status_message("❌ 门店或编号错误！", "error")
-                                
-            except Exception as e:
-                show_status_message(f"❌ 权限验证失败：{str(e)}", "error")
-        
-        else:
-            # 已登录 - 显示报表
-            st.markdown(f'<div class="store-info"><h3>🏪 {st.session_state.store_name}</h3><p>操作员：{st.session_state.user_id}</p></div>', unsafe_allow_html=True)
-            
-            try:
-                with st.spinner("加载门店列表..."):
-                    store_list = get_store_list_from_cos(cos_client, bucket_name)
-                    matching_stores = find_matching_stores(st.session_state.store_name, store_list)
-                
-                if matching_stores:
-                    if len(matching_stores) > 1:
-                        selected_store = st.selectbox("选择报表", matching_stores)
-                    else:
-                        selected_store = matching_stores[0]
-                    
-                    # 按需加载选定门店的报表数据
-                    with st.spinner(f"加载 {selected_store} 的报表数据..."):
-                        df = get_single_report_from_cos(cos_client, bucket_name, selected_store)
-                    
-                    if df is not None:
-                        # 应收-未收额看板
-                        st.subheader("💰 应收-未收额")
-                        
-                        try:
-                            analysis_results = analyze_receivable_data(df)
-                            
-                            if '应收-未收额' in analysis_results:
-                                data = analysis_results['应收-未收额']
-                                amount = data['amount']
-                                
-                                col1, col2, col3 = st.columns([1, 2, 1])
-                                with col2:
-                                    if amount > 0:
-                                        st.markdown(f'''
-                                            <div class="receivable-positive">
-                                                <h1 style="margin: 0; font-size: 3rem;">💳 ¥{amount:,.2f}</h1>
-                                                <h3 style="margin: 0.5rem 0;">门店应付款</h3>
-                                                <p style="margin: 0; font-size: 0.9rem;">数据来源: {data['row_name']} (第{data['actual_row_number']}行)</p>
-                                            </div>
-                                        ''', unsafe_allow_html=True)
-                                    
-                                    elif amount < 0:
-                                        st.markdown(f'''
-                                            <div class="receivable-negative">
-                                                <h1 style="margin: 0; font-size: 3rem;">💚 ¥{abs(amount):,.2f}</h1>
-                                                <h3 style="margin: 0.5rem 0;">总部应退款</h3>
-                                                <p style="margin: 0; font-size: 0.9rem;">数据来源: {data['row_name']} (第{data['actual_row_number']}行)</p>
-                                            </div>
-                                        ''', unsafe_allow_html=True)
-                                    
-                                    else:
-                                        st.markdown('''
-                                            <div style="background: #e8f5e8; color: #2e7d32; padding: 2rem; border-radius: 15px; text-align: center;">
-                                                <h1 style="margin: 0; font-size: 3rem;">⚖️ ¥0.00</h1>
-                                                <h3 style="margin: 0.5rem 0;">收支平衡</h3>
-                                                <p style="margin: 0;">应收未收额为零，账目平衡</p>
-                                            </div>
-                                        ''', unsafe_allow_html=True)
-                            
-                            else:
-                                st.warning("⚠️ 未找到应收-未收额数据")
-                                
-                                with st.expander("🔍 查看详情", expanded=False):
-                                    debug_info = analysis_results.get('debug_info', {})
-                                    
-                                    st.markdown("### 📋 数据查找说明")
-                                    st.write(f"- **报表总行数：** {debug_info.get('total_rows', 0)} 行")
-                                    
-                                    if debug_info.get('checked_row_69'):
-                                        st.write(f"- **第69行内容：** {debug_info.get('row_69_content', 'N/A')}")
-                                    else:
-                                        st.write("- **第69行：** 报表行数不足69行")
-                                    
-                                    st.markdown("""
-                                    ### 💡 可能的原因
-                                    1. 第69行不包含"应收-未收额"相关关键词
-                                    2. 第69行的数值为空或格式不正确
-                                    3. 报表格式与预期不符
-                                    
-                                    ### 🛠️ 建议
-                                    - 请检查Excel报表第69行是否包含"应收-未收额"
-                                    - 确认该行有对应的金额数据
-                                    - 如需调整查找位置，请联系技术支持
-                                    """)
-                        
-                        except Exception as e:
-                            show_status_message(f"❌ 分析数据时出错：{str(e)}", "error")
-                        
-                        st.divider()
-                        
-                        # 完整报表数据
-                        st.subheader("📋 完整报表数据")
-                        
-                        search_term = st.text_input("🔍 搜索报表内容")
-                        
-                        try:
-                            if search_term:
-                                search_df = df.copy()
-                                for col in search_df.columns:
-                                    search_df[col] = search_df[col].astype(str).fillna('')
-                                
-                                mask = search_df.apply(
-                                    lambda x: x.str.contains(search_term, case=False, na=False, regex=False)
-                                ).any(axis=1)
-                                filtered_df = df[mask]
-                                st.info(f"找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
-                            else:
-                                filtered_df = df
-                            
-                            st.info(f"📊 数据统计：共 {len(filtered_df)} 条记录，{len(df.columns)} 列")
-                            
-                            if len(filtered_df) > 0:
-                                display_df = filtered_df.copy()
-                                
-                                # 确保列名唯一
-                                unique_columns = []
-                                for i, col in enumerate(display_df.columns):
-                                    col_name = str(col)
-                                    if col_name in unique_columns:
-                                        col_name = f"{col_name}_{i}"
-                                    unique_columns.append(col_name)
-                                display_df.columns = unique_columns
-                                
-                                # 清理数据内容
-                                for col in display_df.columns:
-                                    display_df[col] = display_df[col].astype(str).fillna('')
-                                
-                                st.dataframe(display_df, use_container_width=True, height=400)
-                            
-                            else:
-                                st.warning("没有找到符合条件的数据")
-                                
-                        except Exception as e:
-                            show_status_message(f"❌ 数据处理时出错：{str(e)}", "error")
-                        
-                        # 下载功能
-                        st.subheader("📥 数据下载")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            try:
-                                buffer = io.BytesIO()
-                                download_df = df.copy()
-                                
-                                # 确保列名唯一
-                                unique_cols = []
-                                for i, col in enumerate(download_df.columns):
-                                    col_name = str(col)
-                                    if col_name in unique_cols:
-                                        col_name = f"{col_name}_{i}"
-                                    unique_cols.append(col_name)
-                                download_df.columns = unique_cols
-                                
-                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                    download_df.to_excel(writer, index=False)
-                                
-                                st.download_button(
-                                    "📥 下载完整报表 (Excel)",
-                                    buffer.getvalue(),
-                                    f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                            except Exception as e:
-                                show_status_message(f"Excel下载准备失败：{str(e)}", "error")
-                        
-                        with col2:
-                            try:
-                                csv_df = df.copy()
-                                unique_cols = []
-                                for i, col in enumerate(csv_df.columns):
-                                    col_name = str(col)
-                                    if col_name in unique_cols:
-                                        col_name = f"{col_name}_{i}"
-                                    unique_cols.append(col_name)
-                                csv_df.columns = unique_cols
-                                
-                                csv = csv_df.to_csv(index=False, encoding='utf-8-sig')
-                                st.download_button(
-                                    "📥 下载CSV格式",
-                                    csv,
-                                    f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
-                                    "text/csv"
-                                )
-                            except Exception as e:
-                                show_status_message(f"CSV下载准备失败：{str(e)}", "error")
-                    
-                    else:
-                        st.error(f"❌ 无法加载门店 '{selected_store}' 的报表数据")
-                    
-                else:
-                    st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
-                    
-            except Exception as e:
-                show_status_message(f"❌ 报表加载失败：{str(e)}", "error")
-    
-    # 页面底部状态信息
-    st.divider()
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.caption(f"🕒 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    with col2:
-        cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
-        st.caption(f"💾 缓存项目: {cache_count}")
-    with col3:
-        st.caption("🔧 版本: v3.2 (Excel格式优化版)")
-
-if __name__ == "__main__":
-    main()
-        st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在腾讯云，支持高效存储和缓存机制</p></div>', unsafe_allow_html=True)
-        
-        try:
-            with st.spinner("加载数据统计..."):
-                permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
-                store_list = get_store_list_from_cos(cos_client, bucket_name)
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                perms_count = len(permissions_data) if permissions_data is not None else 0
-                st.metric("权限表用户数", perms_count)
-            with col2:
-                reports_count = len(store_list)
-                st.metric("报表门店数", reports_count)
-            with col3:
-                cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
-                st.metric("缓存项目数", cache_count)
-                
-            # 数据预览
-            if permissions_data is not None and len(permissions_data) > 0:
-                st.subheader("👥 权限数据预览")
-                
-                # 显示过滤统计（如果有的话）
-                if hasattr(st.session_state, 'permissions_filter_stats'):
-                    stats = st.session_state.permissions_filter_stats
-                    
-                    # 创建统计显示
-                    st.markdown("#### 📊 数据处理统计")
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        st.metric(
-                            "原始数据", 
-                            f"{stats['original_count']} 行"
-                        )
-                    with col2:
-                        st.metric(
-                            "最终保留", 
-                            f"{stats['final_count']} 行",
-                            delta=f"{stats['final_count'] - stats['original_count']}"
-                        )
-                    with col3:
-                        filtered_total = stats['both_empty'] + stats.get('duplicates_removed', 0)
-                        st.metric(
-                            "过滤数据", 
-                            f"{filtered_total} 行"
-                        )
-                    with col4:
-                        retention_rate = (stats['final_count'] / stats['original_count'] * 100) if stats['original_count'] > 0 else 0
-                        st.metric(
-                            "保留率", 
-                            f"{retention_rate:.1f}%"
-                        )
-                    
-                    # 详细过滤信息
-                    with st.expander("🔍 详细过滤统计", expanded=False):
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write("**过滤原因统计：**")
-                            st.write(f"• 门店名称为空：{stats['empty_store']} 行")
-                            st.write(f"• 人员编号为空：{stats['empty_user']} 行")
-                            st.write(f"• 两者都为空：{stats['both_empty']} 行")
-                            st.write(f"• 重复数据：{stats.get('duplicates_removed', 0)} 行")
-                            
-                            # 添加原始文件统计
-                            if 'raw_file_size' in stats:
-                                st.write("**文件读取统计：**")
-                                st.write(f"• 文件格式：{stats.get('file_format', 'Excel')} 格式")
-                                st.write(f"• 原始文件大小：{stats['raw_file_size']} 字节")
-                                st.write(f"• Excel读取行数：{stats.get('excel_rows', 'N/A')} 行")
-                                
-                                # 计算读取情况
-                                if stats.get('excel_rows'):
-                                    if stats['excel_rows'] == stats['original_count']:
-                                        st.success("✅ Excel文件读取完整")
-                                    else:
-                                        read_diff = abs(stats['excel_rows'] - stats['original_count'])
-                                        st.info(f"ℹ️ Excel读取与处理数据差异：{read_diff} 行")
-                            elif 'raw_file_lines' in stats:
-                                # 兼容旧的CSV格式统计
-                                st.write("**文件读取统计：**")
-                                st.write(f"• 原始文件行数：{stats['raw_file_lines']} 行")
-                                st.write(f"• pandas读取行数：{stats.get('pandas_rows', 'N/A')} 行")
-                                
-                                # 计算读取损失
-                                if stats.get('pandas_rows') and stats['raw_file_lines'] > 1:
-                                    read_loss = stats['raw_file_lines'] - 1 - stats['pandas_rows']  # 减1是因为表头
-                                    if read_loss > 0:
-                                        st.error(f"⚠️ CSV文件读取阶段丢失：{read_loss} 行")
-                                    else:
-                                        st.success("✅ CSV文件读取完整")
-                        
-                        with col2:
-                            st.write("**数据质量：**")
-                            if retention_rate >= 90:
-                                st.success("✅ 数据质量良好")
-                            elif retention_rate >= 70:
-                                st.warning("⚠️ 数据质量一般，建议检查原始文件")
-                            else:
-                                st.error("❌ 数据质量较差，请使用CSV诊断功能")
-                            
-                            st.caption(f"统计时间：{stats.get('load_time', 'N/A')}")
-                            
-                            # 添加诊断建议
-                            if 'raw_file_size' in stats:
-                                # Excel格式建议
-                                if retention_rate < 70:
-                                    st.markdown("**🔧 建议操作：**")
-                                    st.markdown("1. 点击 '强制重新加载' 清除缓存")
-                                    st.markdown("2. 检查Excel文件是否有格式问题")
-                                    st.markdown("3. 考虑重新上传Excel文件")
-                            elif 'raw_file_lines' in stats and stats.get('pandas_rows'):
-                                # 兼容旧CSV格式的建议
-                                read_loss = stats['raw_file_lines'] - 1 - stats['pandas_rows']
-                                if read_loss > 0:
-                                    st.markdown("**🔧 建议操作：**")
-                                    st.markdown("1. 数据已升级为Excel格式存储")
-                                    st.markdown("2. 重新上传权限表以使用新格式")
-                                    st.markdown("3. 新格式将避免CSV解析问题")
-                
-                st.dataframe(permissions_data.head(10), use_container_width=True)
-                
-                if len(permissions_data) > 10:
-                    st.caption(f"显示前10条记录，共{len(permissions_data)}条")
-            
-            if store_list:
-                st.subheader("📊 门店列表预览")
-                st.write(f"共有 {len(store_list)} 个门店")
-                
-                # 显示前10个门店
-                display_stores = store_list[:10]
-                for i in range(0, len(display_stores), 5):
-                    cols = st.columns(5)
-                    for j, store in enumerate(display_stores[i:i+5]):
-                        with cols[j]:
-                            st.info(f"🏪 {store}")
-                
-                if len(store_list) > 10:
-                    st.caption(f"...以及其他 {len(store_list) - 10} 个门店")
-                        
-        except Exception as e:
-            show_status_message(f"❌ 数据加载失败：{str(e)}", "error")
-    
-    elif user_type == "管理员" and not st.session_state.is_admin:
-        st.info("👈 请在左侧边栏输入管理员密码")
-    
-    else:
-        if not st.session_state.logged_in:
-            st.subheader("🔐 用户登录")
-            
-            try:
-                with st.spinner("加载权限数据..."):
-                    permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
-                
-                if permissions_data is None:
-                    st.warning("⚠️ 系统维护中，请联系管理员")
-                else:
-                    stores = sorted(permissions_data[permissions_data.columns[0]].unique().tolist())
-                    
-                    with st.form("login_form"):
-                        selected_store = st.selectbox("选择门店", stores)
-                        user_id = st.text_input("人员编号")
-                        submit = st.form_submit_button("🚀 登录")
-                        
-                        if submit and selected_store and user_id:
-                            if verify_user_permission(selected_store, user_id, permissions_data):
-                                st.session_state.logged_in = True
-                                st.session_state.store_name = selected_store
-                                st.session_state.user_id = user_id
-                                show_status_message("✅ 登录成功！", "success")
-                                st.balloons()
-                                st.rerun()
-                            else:
-                                show_status_message("❌ 门店或编号错误！", "error")
-                                
-            except Exception as e:
-                show_status_message(f"❌ 权限验证失败：{str(e)}", "error")
-        
-        else:
-            # 已登录 - 显示报表
-            st.markdown(f'<div class="store-info"><h3>🏪 {st.session_state.store_name}</h3><p>操作员：{st.session_state.user_id}</p></div>', unsafe_allow_html=True)
-            
-            try:
-                with st.spinner("加载门店列表..."):
-                    store_list = get_store_list_from_cos(cos_client, bucket_name)
-                    matching_stores = find_matching_stores(st.session_state.store_name, store_list)
-                
-                if matching_stores:
-                    if len(matching_stores) > 1:
-                        selected_store = st.selectbox("选择报表", matching_stores)
-                    else:
-                        selected_store = matching_stores[0]
-                    
-                    # 按需加载选定门店的报表数据
-                    with st.spinner(f"加载 {selected_store} 的报表数据..."):
-                        df = get_single_report_from_cos(cos_client, bucket_name, selected_store)
-                    
-                    if df is not None:
-                        # 应收-未收额看板
-                        st.subheader("💰 应收-未收额")
-                        
-                        try:
-                            analysis_results = analyze_receivable_data(df)
-                            
-                            if '应收-未收额' in analysis_results:
-                                data = analysis_results['应收-未收额']
-                                amount = data['amount']
-                                
-                                col1, col2, col3 = st.columns([1, 2, 1])
-                                with col2:
-                                    if amount > 0:
-                                        st.markdown(f'''
-                                            <div class="receivable-positive">
-                                                <h1 style="margin: 0; font-size: 3rem;">💳 ¥{amount:,.2f}</h1>
-                                                <h3 style="margin: 0.5rem 0;">门店应付款</h3>
-                                                <p style="margin: 0; font-size: 0.9rem;">数据来源: {data['row_name']} (第{data['actual_row_number']}行)</p>
-                                            </div>
-                                        ''', unsafe_allow_html=True)
-                                    
-                                    elif amount < 0:
-                                        st.markdown(f'''
-                                            <div class="receivable-negative">
-                                                <h1 style="margin: 0; font-size: 3rem;">💚 ¥{abs(amount):,.2f}</h1>
-                                                <h3 style="margin: 0.5rem 0;">总部应退款</h3>
-                                                <p style="margin: 0; font-size: 0.9rem;">数据来源: {data['row_name']} (第{data['actual_row_number']}行)</p>
-                                            </div>
-                                        ''', unsafe_allow_html=True)
-                                    
-                                    else:
-                                        st.markdown('''
-                                            <div style="background: #e8f5e8; color: #2e7d32; padding: 2rem; border-radius: 15px; text-align: center;">
-                                                <h1 style="margin: 0; font-size: 3rem;">⚖️ ¥0.00</h1>
-                                                <h3 style="margin: 0.5rem 0;">收支平衡</h3>
-                                                <p style="margin: 0;">应收未收额为零，账目平衡</p>
-                                            </div>
-                                        ''', unsafe_allow_html=True)
-                            
-                            else:
-                                st.warning("⚠️ 未找到应收-未收额数据")
-                                
-                                with st.expander("🔍 查看详情", expanded=False):
-                                    debug_info = analysis_results.get('debug_info', {})
-                                    
-                                    st.markdown("### 📋 数据查找说明")
-                                    st.write(f"- **报表总行数：** {debug_info.get('total_rows', 0)} 行")
-                                    
-                                    if debug_info.get('checked_row_69'):
-                                        st.write(f"- **第69行内容：** {debug_info.get('row_69_content', 'N/A')}")
-                                    else:
-                                        st.write("- **第69行：** 报表行数不足69行")
-                                    
-                                    st.markdown("""
-                                    ### 💡 可能的原因
-                                    1. 第69行不包含"应收-未收额"相关关键词
-                                    2. 第69行的数值为空或格式不正确
-                                    3. 报表格式与预期不符
-                                    
-                                    ### 🛠️ 建议
-                                    - 请检查Excel报表第69行是否包含"应收-未收额"
-                                    - 确认该行有对应的金额数据
-                                    - 如需调整查找位置，请联系技术支持
-                                    """)
-                        
-                        except Exception as e:
-                            show_status_message(f"❌ 分析数据时出错：{str(e)}", "error")
-                        
-                        st.divider()
-                        
-                        # 完整报表数据
-                        st.subheader("📋 完整报表数据")
-                        
-                        search_term = st.text_input("🔍 搜索报表内容")
-                        
-                        try:
-                            if search_term:
-                                search_df = df.copy()
-                                for col in search_df.columns:
-                                    search_df[col] = search_df[col].astype(str).fillna('')
-                                
-                                mask = search_df.apply(
-                                    lambda x: x.str.contains(search_term, case=False, na=False, regex=False)
-                                ).any(axis=1)
-                                filtered_df = df[mask]
-                                st.info(f"找到 {len(filtered_df)} 条包含 '{search_term}' 的记录")
-                            else:
-                                filtered_df = df
-                            
-                            st.info(f"📊 数据统计：共 {len(filtered_df)} 条记录，{len(df.columns)} 列")
-                            
-                            if len(filtered_df) > 0:
-                                display_df = filtered_df.copy()
-                                
-                                # 确保列名唯一
-                                unique_columns = []
-                                for i, col in enumerate(display_df.columns):
-                                    col_name = str(col)
-                                    if col_name in unique_columns:
-                                        col_name = f"{col_name}_{i}"
-                                    unique_columns.append(col_name)
-                                display_df.columns = unique_columns
-                                
-                                # 清理数据内容
-                                for col in display_df.columns:
-                                    display_df[col] = display_df[col].astype(str).fillna('')
-                                
-                                st.dataframe(display_df, use_container_width=True, height=400)
-                            
-                            else:
-                                st.warning("没有找到符合条件的数据")
-                                
-                        except Exception as e:
-                            show_status_message(f"❌ 数据处理时出错：{str(e)}", "error")
-                        
-                        # 下载功能
-                        st.subheader("📥 数据下载")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            try:
-                                buffer = io.BytesIO()
-                                download_df = df.copy()
-                                
-                                # 确保列名唯一
-                                unique_cols = []
-                                for i, col in enumerate(download_df.columns):
-                                    col_name = str(col)
-                                    if col_name in unique_cols:
-                                        col_name = f"{col_name}_{i}"
-                                    unique_cols.append(col_name)
-                                download_df.columns = unique_cols
-                                
-                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                    download_df.to_excel(writer, index=False)
-                                
-                                st.download_button(
-                                    "📥 下载完整报表 (Excel)",
-                                    buffer.getvalue(),
-                                    f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                            except Exception as e:
-                                show_status_message(f"Excel下载准备失败：{str(e)}", "error")
-                        
-                        with col2:
-                            try:
-                                csv_df = df.copy()
-                                unique_cols = []
-                                for i, col in enumerate(csv_df.columns):
-                                    col_name = str(col)
-                                    if col_name in unique_cols:
-                                        col_name = f"{col_name}_{i}"
-                                    unique_cols.append(col_name)
-                                csv_df.columns = unique_cols
-                                
-                                csv = csv_df.to_csv(index=False, encoding='utf-8-sig')
-                                st.download_button(
-                                    "📥 下载CSV格式",
-                                    csv,
-                                    f"{st.session_state.store_name}_报表_{datetime.now().strftime('%Y%m%d')}.csv",
-                                    "text/csv"
-                                )
-                            except Exception as e:
-                                show_status_message(f"CSV下载准备失败：{str(e)}", "error")
-                    
-                    else:
-                        st.error(f"❌ 无法加载门店 '{selected_store}' 的报表数据")
-                    
-                else:
-                    st.error(f"❌ 未找到门店 '{st.session_state.store_name}' 的报表")
-                    
-            except Exception as e:
-                show_status_message(f"❌ 报表加载失败：{str(e)}", "error")
-    
-    # 页面底部状态信息
-    st.divider()
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.caption(f"🕒 当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    with col2:
-        cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
-        st.caption(f"💾 缓存项目: {cache_count}")
-    with col3:
-        st.caption("🔧 版本: v3.2 (腾讯云优化版)")
+    except Exception as e:
+        st.error(f"系统运行时出错: {str(e)}")
+        logger.error(f"Main function error: {str(e)}")
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
