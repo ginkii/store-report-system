@@ -1,143 +1,47 @@
 import os
 import streamlit as st
-from typing import Dict, Any
 
-def get_admin_password() -> str:
-    """获取管理员密码"""
-    try:
-        # 优先从streamlit secrets获取
-        return st.secrets.get('ADMIN_PASSWORD', 'admin123')
-    except (AttributeError, FileNotFoundError):
-        # 降级到环境变量
-        return os.getenv('ADMIN_PASSWORD', 'admin123')
+def get_secret(key, default=None):
+    """从 Streamlit secrets 或环境变量中获取配置"""
+    # 优先从 Streamlit secrets 读取
+    if hasattr(st, 'secrets') and key in st.secrets:
+        return st.secrets[key]
+    # 回退到环境变量
+    return os.getenv(key, default)
 
-def get_cos_config() -> Dict[str, str]:
-    """获取腾讯云COS配置"""
-    try:
-        # 优先从streamlit secrets获取
-        cos_secrets = st.secrets.get('tencent_cos', {})
-        return {
-            'region': cos_secrets.get('region', 'ap-shanghai'),
-            'secret_id': cos_secrets.get('secret_id', ''),
-            'secret_key': cos_secrets.get('secret_key', ''),
-            'bucket': cos_secrets.get('bucket_name', ''),
-            'domain': cos_secrets.get('domain', ''),
-        }
-    except (AttributeError, FileNotFoundError):
-        # 降级到环境变量
-        return {
-            'region': os.getenv('COS_REGION', 'ap-shanghai'),
-            'secret_id': os.getenv('COS_SECRET_ID', ''),
-            'secret_key': os.getenv('COS_SECRET_KEY', ''),
-            'bucket': os.getenv('COS_BUCKET', ''),
-            'domain': os.getenv('COS_DOMAIN', ''),
-        }
+# 腾讯云COS配置
+COS_CONFIG = {
+    'SecretId': get_secret('COS_SECRET_ID', 'your-secret-id'),
+    'SecretKey': get_secret('COS_SECRET_KEY', 'your-secret-key'),
+    'Region': get_secret('COS_REGION', 'ap-shanghai'),
+    'Bucket': get_secret('COS_BUCKET', 'your-bucket-name')
+}
 
-def get_app_config() -> Dict[str, Any]:
-    """获取应用配置"""
-    try:
-        # 优先从streamlit secrets获取
-        app_secrets = st.secrets.get('app', {})
-        return {
-            'title': '门店报表查询系统',
-            'data_file': app_secrets.get('data_file', 'data.json'),
-            'upload_folder': app_secrets.get('upload_folder', 'reports'),
-            'max_file_size': app_secrets.get('max_file_size', 50 * 1024 * 1024),  # 50MB
-            'allowed_extensions': ['.xlsx', '.xls'],
-            'session_timeout': app_secrets.get('session_timeout', 3600),  # 1小时
-        }
-    except (AttributeError, FileNotFoundError):
-        # 降级到默认配置
-        return {
-            'title': '门店报表查询系统',
-            'data_file': 'data.json',
-            'upload_folder': 'reports',
-            'max_file_size': 50 * 1024 * 1024,  # 50MB
-            'allowed_extensions': ['.xlsx', '.xls'],
-            'session_timeout': 3600,  # 1小时
-        }
+# 应用配置
+APP_CONFIG = {
+    'max_file_size': int(get_secret('MAX_FILE_SIZE', '52428800')),
+    'session_timeout': int(get_secret('SESSION_TIMEOUT', '3600')),
+    'upload_folder': get_secret('UPLOAD_FOLDER', 'reports'),
+    'data_file': get_secret('DATA_FILE', 'data.json'),
+    'allowed_extensions': ['xlsx', 'xls']
+}
 
-def get_streamlit_config() -> Dict[str, str]:
-    """获取Streamlit页面配置"""
-    try:
-        # 优先从streamlit secrets获取
-        streamlit_secrets = st.secrets.get('streamlit', {})
-        return {
-            'page_title': streamlit_secrets.get('page_title', '门店报表查询系统'),
-            'page_icon': streamlit_secrets.get('page_icon', '📊'),
-            'layout': streamlit_secrets.get('layout', 'wide'),
-            'initial_sidebar_state': streamlit_secrets.get('initial_sidebar_state', 'expanded'),
-        }
-    except (AttributeError, FileNotFoundError):
-        # 降级到默认配置
-        return {
-            'page_title': '门店报表查询系统',
-            'page_icon': '📊',
-            'layout': 'wide',
-            'initial_sidebar_state': 'expanded',
-        }
+# Streamlit配置
+STREAMLIT_CONFIG = {
+    'page_title': get_secret('PAGE_TITLE', '门店报表查询系统'),
+    'page_icon': get_secret('PAGE_ICON', '📊'),
+    'layout': get_secret('LAYOUT', 'wide'),
+    'initial_sidebar_state': get_secret('INITIAL_SIDEBAR_STATE', 'expanded')
+}
 
-# 导出配置变量（保持向后兼容）
-try:
-    ADMIN_PASSWORD = get_admin_password()
-    COS_CONFIG = get_cos_config()
-    APP_CONFIG = get_app_config()
-    STREAMLIT_CONFIG = get_streamlit_config()
-except Exception as e:
-    # 如果在导入时出错，使用默认配置
-    print(f"配置加载警告: {e}")
-    ADMIN_PASSWORD = 'admin123'
-    COS_CONFIG = {
-        'region': 'ap-shanghai',
-        'secret_id': '',
-        'secret_key': '',
-        'bucket': '',
-        'domain': '',
-    }
-    APP_CONFIG = {
-        'title': '门店报表查询系统',
-        'data_file': 'data.json',
-        'upload_folder': 'reports',
-        'max_file_size': 50 * 1024 * 1024,
-        'allowed_extensions': ['.xlsx', '.xls'],
-        'session_timeout': 3600,
-    }
-    STREAMLIT_CONFIG = {
-        'page_title': '门店报表查询系统',
-        'page_icon': '📊',
-        'layout': 'wide',
-        'initial_sidebar_state': 'expanded',
-    }
+# 管理员密码
+ADMIN_PASSWORD = get_secret('ADMIN_PASSWORD', 'admin123')
 
-def validate_config() -> bool:
+def validate_config():
     """验证配置是否完整"""
-    cos_config = get_cos_config()
-    required_keys = ['secret_id', 'secret_key', 'bucket', 'region']
-    
+    required_keys = ['SecretId', 'SecretKey', 'Region', 'Bucket']
     for key in required_keys:
-        if not cos_config.get(key):
-            print(f"警告: COS配置缺失 {key}")
+        if not COS_CONFIG.get(key) or COS_CONFIG[key] in ['your-secret-id', 'your-secret-key', 'your-bucket-name']:
+            print(f"配置项 {key} 未正确设置")
             return False
     return True
-
-def get_config_info() -> Dict[str, Any]:
-    """获取配置信息（用于调试）"""
-    return {
-        'config_source': 'streamlit_secrets' if hasattr(st, 'secrets') else 'environment',
-        'admin_password_set': bool(get_admin_password()),
-        'cos_config_complete': validate_config(),
-        'app_config': get_app_config(),
-    }
-
-def reload_config():
-    """重新加载配置（用于配置更新后刷新）"""
-    global ADMIN_PASSWORD, COS_CONFIG, APP_CONFIG, STREAMLIT_CONFIG
-    try:
-        ADMIN_PASSWORD = get_admin_password()
-        COS_CONFIG = get_cos_config()
-        APP_CONFIG = get_app_config()
-        STREAMLIT_CONFIG = get_streamlit_config()
-        return True
-    except Exception as e:
-        print(f"重新加载配置失败: {e}")
-        return False
