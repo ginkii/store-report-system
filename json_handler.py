@@ -277,6 +277,63 @@ class JSONHandler:
             st.error(f"更新系统信息失败: {str(e)}")
             return False
     
+    def get_system_status(self) -> Dict[str, Any]:
+        """获取系统状态（包括数据加载状态、文件可访问性等）"""
+        try:
+            data = self._load_data()
+            current_report = data.get("current_report")
+            store_sheets = data.get("store_sheets", [])
+            
+            # 检查数据是否加载成功
+            data_loaded = bool(data)
+            
+            # 检查是否有当前报表
+            has_current_report = current_report is not None
+            
+            # 检查文件是否可访问（这里简化处理，实际可能需要调用storage_handler）
+            file_accessible = has_current_report
+            if has_current_report:
+                # 检查文件路径是否存在
+                file_path = current_report.get('file_path') or current_report.get('cos_file_path')
+                file_accessible = bool(file_path)
+            
+            # 检查存储连接状态（这里简化为文件系统可用性）
+            storage_connection = os.path.exists(self.data_file)
+            
+            return {
+                "data_loaded": data_loaded,
+                "has_current_report": has_current_report,
+                "file_accessible": file_accessible,
+                "cos_connection": storage_connection,  # 保持兼容性
+                "storage_connection": storage_connection,
+                "current_report": current_report,
+                "store_sheets_count": len(store_sheets),
+                "stores_count": len(store_sheets),
+                "total_queries": sum(sheet.get("query_count", 0) for sheet in store_sheets),
+                "history_count": len(data.get("report_history", [])),
+                "last_updated": data.get("system_info", {}).get("last_updated"),
+                "system_time": datetime.now().isoformat(),
+                "storage_type": "LOCAL"  # 默认本地存储
+            }
+            
+        except Exception as e:
+            st.error(f"获取系统状态失败: {str(e)}")
+            return {
+                "data_loaded": False,
+                "has_current_report": False,
+                "file_accessible": False,
+                "cos_connection": False,
+                "storage_connection": False,
+                "current_report": None,
+                "store_sheets_count": 0,
+                "stores_count": 0,
+                "total_queries": 0,
+                "history_count": 0,
+                "last_updated": None,
+                "system_time": datetime.now().isoformat(),
+                "storage_type": "LOCAL"
+            }
+    
     def clear_all_data(self) -> bool:
         """清空所有数据"""
         try:
@@ -334,7 +391,7 @@ class JSONHandler:
             st.error(f"获取统计信息失败: {str(e)}")
             return {}
     
-    def backup_data(self) -> Optional[str]:
+    def backup_data(self) -> bool:
         """备份数据"""
         try:
             data = self._load_data()
@@ -345,14 +402,49 @@ class JSONHandler:
             with open(backup_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             
-            return backup_path
+            # 更新系统信息记录备份
+            self.update_system_info({"last_backup": datetime.now().isoformat()})
+            
+            return True
             
         except Exception as e:
             st.error(f"备份数据失败: {str(e)}")
-            return None
+            return False
+    
+    def restore_from_backup(self) -> bool:
+        """从最新备份恢复数据"""
+        try:
+            # 查找最新的备份文件
+            backup_files = []
+            for filename in os.listdir(self.temp_dir):
+                if filename.startswith("data_backup_") and filename.endswith(".json"):
+                    backup_path = os.path.join(self.temp_dir, filename)
+                    backup_files.append((backup_path, os.path.getmtime(backup_path)))
+            
+            if not backup_files:
+                st.error("未找到备份文件")
+                return False
+            
+            # 按修改时间排序，获取最新的备份
+            backup_files.sort(key=lambda x: x[1], reverse=True)
+            latest_backup = backup_files[0][0]
+            
+            # 恢复数据
+            with open(latest_backup, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if self._save_data(data):
+                st.success(f"已从备份恢复数据: {os.path.basename(latest_backup)}")
+                return True
+            else:
+                return False
+            
+        except Exception as e:
+            st.error(f"恢复数据失败: {str(e)}")
+            return False
     
     def restore_data(self, backup_path: str) -> bool:
-        """恢复数据"""
+        """从指定备份恢复数据"""
         try:
             if not os.path.exists(backup_path):
                 st.error("备份文件不存在")
