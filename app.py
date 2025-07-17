@@ -214,6 +214,22 @@ def safe_cos_operation(operation_func, *args, **kwargs):
     """安全的COS操作"""
     return retry_operation(operation_func, *args, **kwargs)
 
+def safe_format_number(value, default_value=0):
+    """安全的数字格式化函数"""
+    try:
+        if isinstance(value, str):
+            # 尝试转换字符串为数字
+            if value.isdigit():
+                return int(value)
+            else:
+                return float(value)
+        elif isinstance(value, (int, float)):
+            return value
+        else:
+            return default_value
+    except (ValueError, TypeError):
+        return default_value
+
 def unified_excel_reader(cos_client, bucket_name: str, file_key: str, file_type: str = "unknown") -> Optional[pd.DataFrame]:
     """统一的Excel文件读取器 - 用于权限表和报表文件"""
     try:
@@ -222,9 +238,12 @@ def unified_excel_reader(cos_client, bucket_name: str, file_key: str, file_type:
         # 1. 获取文件元数据
         try:
             head_response = cos_client.head_object(Bucket=bucket_name, Key=file_key)
-            file_size = head_response.get('Content-Length', 0)
+            file_size_raw = head_response.get('Content-Length', 0)
             content_type = head_response.get('Content-Type', '')
             last_modified = head_response.get('Last-Modified', '')
+            
+            # 安全格式化文件大小
+            file_size = safe_format_number(file_size_raw, 0)
             
             logger.info(f"文件元数据 - 大小: {file_size} 字节, 类型: {content_type}, 修改时间: {last_modified}")
             
@@ -244,12 +263,13 @@ def unified_excel_reader(cos_client, bucket_name: str, file_key: str, file_type:
             response = cos_client.get_object(Bucket=bucket_name, Key=file_key)
             raw_content = response['Body'].read()
             
-            logger.info(f"下载完成 - 实际大小: {len(raw_content)} 字节")
+            actual_size = len(raw_content)
+            logger.info(f"下载完成 - 实际大小: {actual_size} 字节")
             
             # 验证下载大小
-            if len(raw_content) != file_size:
-                logger.warning(f"文件大小不匹配! 预期: {file_size}, 实际: {len(raw_content)}")
-                st.warning(f"⚠️ 文件大小不匹配! 预期: {file_size:,}, 实际: {len(raw_content):,}")
+            if actual_size != file_size:
+                logger.warning(f"文件大小不匹配! 预期: {file_size}, 实际: {actual_size}")
+                st.warning(f"⚠️ 文件大小不匹配! 预期: {file_size:,}, 实际: {actual_size:,}")
             
             # 检查文件头部（Excel文件应该以PK开头）
             if len(raw_content) >= 2:
@@ -345,7 +365,7 @@ def load_permissions_from_cos_enhanced_v2(cos_client, bucket_name: str, permissi
     
     with error_handler("加载权限数据"):
         def _load_operation():
-            # 确定文件名
+            # 确定文件名 - 智能路径处理
             if permissions_file.endswith('.csv'):
                 excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
             elif permissions_file.endswith('.xlsx'):
@@ -353,24 +373,70 @@ def load_permissions_from_cos_enhanced_v2(cos_client, bucket_name: str, permissi
             else:
                 excel_permissions_file = permissions_file + '.xlsx'
             
+            # 检查是否已经包含路径，如果没有则可能需要添加
+            if '/' not in excel_permissions_file:
+                # 尝试常见的路径前缀
+                possible_paths = [
+                    excel_permissions_file,  # 原始文件名
+                    f"permissions/{excel_permissions_file}",  # permissions文件夹
+                    f"user/{excel_permissions_file}",  # user文件夹
+                    f"auth/{excel_permissions_file}"  # auth文件夹
+                ]
+            else:
+                possible_paths = [excel_permissions_file]
+            
             st.write(f"📁 配置文件名: `{permissions_file}`")
-            st.write(f"📁 实际查找文件: `{excel_permissions_file}`")
+            st.write(f"📁 转换后文件名: `{excel_permissions_file}`")
+            
+            # 尝试查找文件
+            df = None
+            found_file = None
+            
+            for file_path in possible_paths:
+                st.write(f"🔍 尝试查找: `{file_path}`")
+                try:
+                    # 先检查文件是否存在
+                    cos_client.head_object(Bucket=bucket_name, Key=file_path)
+                    found_file = file_path
+                    st.success(f"✅ 找到文件: `{file_path}`")
+                    break
+                except Exception as e:
+                    st.write(f"❌ 文件不存在: `{file_path}` - {str(e)}")
+                    continue
+            
+            if found_file is None:
+                st.error("❌ 未找到权限文件，请检查配置或上传文件")
+                return None
             
             # 使用统一的Excel读取器
-            df = unified_excel_reader(cos_client, bucket_name, excel_permissions_file, "权限表")
+            df = unified_excel_reader(cos_client, bucket_name, found_file, "权限表")
             
             if df is None:
                 st.warning("⚠️ Excel格式读取失败，尝试CSV格式...")
                 
                 # 尝试CSV格式回退
                 csv_file = permissions_file if permissions_file.endswith('.csv') else permissions_file.replace('.xlsx', '.csv')
-                try:
-                    response = cos_client.get_object(Bucket=bucket_name, Key=csv_file)
-                    csv_content = response['Body'].read().decode('utf-8-sig')
-                    df = pd.read_csv(io.StringIO(csv_content))
-                    st.success(f"✅ CSV格式读取成功: {len(df)} 行")
-                except Exception as e:
-                    st.error(f"❌ CSV格式也失败: {str(e)}")
+                
+                # 对CSV文件也尝试不同路径
+                if '/' not in csv_file:
+                    csv_paths = [csv_file, f"permissions/{csv_file}"]
+                else:
+                    csv_paths = [csv_file]
+                
+                for csv_path in csv_paths:
+                    try:
+                        st.write(f"🔍 尝试CSV格式: `{csv_path}`")
+                        response = cos_client.get_object(Bucket=bucket_name, Key=csv_path)
+                        csv_content = response['Body'].read().decode('utf-8-sig')
+                        df = pd.read_csv(io.StringIO(csv_content))
+                        st.success(f"✅ CSV格式读取成功: {len(df)} 行")
+                        break
+                    except Exception as e:
+                        st.write(f"❌ CSV文件不存在: `{csv_path}` - {str(e)}")
+                        continue
+                
+                if df is None:
+                    st.error("❌ Excel和CSV格式都失败")
                     return None
             
             if df is None or len(df) == 0:
@@ -454,7 +520,8 @@ def get_single_report_from_cos_v2(cos_client, bucket_name: str, store_name: str)
                 for obj in response['Contents']:
                     key = obj['Key']
                     file_time = obj['LastModified']
-                    file_size = obj['Size']
+                    file_size_raw = obj['Size']
+                    file_size = safe_format_number(file_size_raw, 0)
                     
                     st.write(f"- {key} ({file_size:,} 字节, {file_time})")
                     
@@ -494,19 +561,39 @@ def compare_file_properties(cos_client, bucket_name: str, permissions_file: str,
     st.subheader("🔍 文件属性对比")
     
     try:
-        # 权限表文件
-        excel_permissions_file = permissions_file.replace('.csv', '.xlsx') if permissions_file.endswith('.csv') else permissions_file
+        # 权限表文件 - 智能路径处理
+        if permissions_file.endswith('.csv'):
+            excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
+        elif permissions_file.endswith('.xlsx'):
+            excel_permissions_file = permissions_file
+        else:
+            excel_permissions_file = permissions_file + '.xlsx'
         
-        try:
-            perm_head = cos_client.head_object(Bucket=bucket_name, Key=excel_permissions_file)
-            perm_info = {
-                'file': excel_permissions_file,
-                'size': perm_head.get('Content-Length', 0),
-                'type': perm_head.get('Content-Type', ''),
-                'modified': perm_head.get('Last-Modified', '')
-            }
-        except Exception as e:
-            perm_info = {'error': str(e)}
+        # 如果没有路径前缀，尝试添加
+        if '/' not in excel_permissions_file:
+            possible_paths = [excel_permissions_file, f"permissions/{excel_permissions_file}"]
+        else:
+            possible_paths = [excel_permissions_file]
+        
+        # 查找权限文件
+        perm_info = None
+        for file_path in possible_paths:
+            try:
+                perm_head = cos_client.head_object(Bucket=bucket_name, Key=file_path)
+                perm_size_raw = perm_head.get('Content-Length', 0)
+                perm_size = safe_format_number(perm_size_raw, 0)
+                perm_info = {
+                    'file': file_path,
+                    'size': perm_size,
+                    'type': perm_head.get('Content-Type', ''),
+                    'modified': perm_head.get('Last-Modified', '')
+                }
+                break
+            except Exception:
+                continue
+        
+        if perm_info is None:
+            perm_info = {'error': 'Permission file not found in any expected location'}
         
         # 报表文件
         safe_store_name = store_name.replace(' ', '_')
@@ -520,9 +607,11 @@ def compare_file_properties(cos_client, bucket_name: str, permissions_file: str,
             if 'Contents' in list_response and len(list_response['Contents']) > 0:
                 report_key = list_response['Contents'][0]['Key']
                 report_head = cos_client.head_object(Bucket=bucket_name, Key=report_key)
+                report_size_raw = report_head.get('Content-Length', 0)
+                report_size = safe_format_number(report_size_raw, 0)
                 report_info = {
                     'file': report_key,
-                    'size': report_head.get('Content-Length', 0),
+                    'size': report_size,
                     'type': report_head.get('Content-Type', ''),
                     'modified': report_head.get('Last-Modified', '')
                 }
@@ -746,8 +835,17 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             excel_content = excel_buffer.getvalue()
             
             # 步骤7：上传到COS
-            # 更改文件扩展名为.xlsx
-            excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
+            # 确保文件路径正确
+            if permissions_file.endswith('.csv'):
+                excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
+            elif permissions_file.endswith('.xlsx'):
+                excel_permissions_file = permissions_file
+            else:
+                excel_permissions_file = permissions_file + '.xlsx'
+            
+            # 如果没有路径前缀，添加permissions/
+            if '/' not in excel_permissions_file:
+                excel_permissions_file = f"permissions/{excel_permissions_file}"
             
             processing_report['step_by_step'].append(f"步骤7: 开始上传到腾讯云COS (Excel格式)")
             st.info(f"📊 步骤7: 正在上传到腾讯云... (文件: {excel_permissions_file})")
@@ -1790,7 +1888,7 @@ def main():
             cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
             st.caption(f"💾 缓存项目: {cache_count}")
         with col3:
-            st.caption("🔧 版本: v3.3 (统一Excel读取诊断版)")
+            st.caption("🔧 版本: v3.4 (修复格式化错误版)")
 
     except Exception as e:
         st.error(f"系统运行时出错: {str(e)}")
