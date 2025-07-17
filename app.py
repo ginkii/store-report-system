@@ -1019,6 +1019,7 @@ def init_session_state():
             st.session_state[key] = default_value
 
 # 主程序开始
+# 主程序开始 - 修改后的版本
 def main():
     try:
         # 初始化会话状态
@@ -1056,6 +1057,36 @@ def main():
             else:
                 st.error("🔴 腾讯云存储断开")
             
+            # 调试选项
+            st.subheader("🔧 调试选项")
+            debug_mode = st.checkbox("启用详细调试", value=False)
+            
+            if debug_mode:
+                st.session_state.debug_mode = True
+                
+                if st.button("🔍 对比文件属性"):
+                    if st.session_state.logged_in:
+                        compare_file_properties(cos_client, bucket_name, permissions_file, st.session_state.store_name)
+                
+                if st.button("🔄 强制重新加载权限表"):
+                    clear_permissions_cache()
+                    with st.spinner("重新加载权限表..."):
+                        new_data = load_permissions_from_cos_enhanced_v2(cos_client, bucket_name, permissions_file, force_reload=True)
+                        if new_data is not None:
+                            st.success(f"✅ 权限表重新加载成功: {len(new_data)} 条")
+                        else:
+                            st.error("❌ 权限表重新加载失败")
+                
+                if st.button("🗑️ 清除所有缓存"):
+                    cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
+                    for key in cache_keys:
+                        del st.session_state[key]
+                    st.success("✅ 所有缓存已清除")
+                    st.rerun()
+            else:
+                st.session_state.debug_mode = False
+            
+            # 用户类型选择
             user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
             
             if user_type == "管理员":
@@ -1158,10 +1189,6 @@ def main():
                                                     df_processed = df_raw.copy()
                                                 
                                                 # 重新排列列顺序，确保门店名称和人员编号在前两列
-                                                store_idx = df_processed.columns.get_loc(store_column)
-                                                user_idx = df_processed.columns.get_loc(user_column)
-                                                
-                                                # 创建新的DataFrame，门店名称和人员编号作为前两列
                                                 df = pd.DataFrame({
                                                     '门店名称': df_processed[store_column],
                                                     '人员编号': df_processed[user_column]
@@ -1250,30 +1277,14 @@ def main():
                             show_status_message(f"❌ 处理失败：{str(e)}", "error")
                             st.session_state.reports_upload_successful = False
                     
-                    # 缓存管理和诊断
+                    # 缓存管理
                     st.subheader("🗂️ 缓存管理")
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if st.button("清除所有缓存"):
-                            cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
-                            for key in cache_keys:
-                                del st.session_state[key]
-                            show_status_message("✅ 所有缓存已清除", "success")
-                            st.rerun()
-                    
-                    with col2:
-                        if st.button("🔄 强制重新加载"):
-                            # 清除权限相关缓存
-                            clear_permissions_cache()
-                            # 强制重新加载
-                            with st.spinner("强制重新加载权限数据..."):
-                                new_data = load_permissions_from_cos_enhanced(cos_client, bucket_name, permissions_file, force_reload=True)
-                                if new_data is not None:
-                                    show_status_message(f"✅ 重新加载完成，获得 {len(new_data)} 条记录", "success")
-                                else:
-                                    show_status_message("⚠️ 重新加载完成，但没有获得数据", "warning")
-                            st.rerun()
+                    if st.button("清除所有缓存"):
+                        cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
+                        for key in cache_keys:
+                            del st.session_state[key]
+                        show_status_message("✅ 所有缓存已清除", "success")
+                        st.rerun()
             
             else:
                 if st.session_state.logged_in:
@@ -1297,7 +1308,13 @@ def main():
             
             try:
                 with st.spinner("加载数据统计..."):
-                    permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
+                    # 使用新的读取逻辑
+                    if debug_mode:
+                        st.subheader("🔍 权限表加载诊断")
+                        permissions_data = load_permissions_from_cos_enhanced_v2(cos_client, bucket_name, permissions_file, force_reload=False)
+                    else:
+                        permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
+                    
                     store_list = get_store_list_from_cos(cos_client, bucket_name)
                 
                 col1, col2, col3 = st.columns(3)
@@ -1346,7 +1363,12 @@ def main():
                 
                 try:
                     with st.spinner("加载权限数据..."):
-                        permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
+                        # 使用新的读取逻辑
+                        if debug_mode:
+                            st.subheader("🔍 权限表加载诊断")
+                            permissions_data = load_permissions_from_cos_enhanced_v2(cos_client, bucket_name, permissions_file, force_reload=False)
+                        else:
+                            permissions_data = load_permissions_from_cos(cos_client, bucket_name, permissions_file)
                     
                     if permissions_data is None:
                         st.warning("⚠️ 系统维护中，请联系管理员")
@@ -1387,9 +1409,13 @@ def main():
                         else:
                             selected_store = matching_stores[0]
                         
-                        # 按需加载选定门店的报表数据
-                        with st.spinner(f"加载 {selected_store} 的报表数据..."):
-                            df = get_single_report_from_cos(cos_client, bucket_name, selected_store)
+                        # 使用新的报表读取逻辑
+                        if debug_mode:
+                            st.subheader("🔍 报表加载诊断")
+                            df = get_single_report_from_cos_v2(cos_client, bucket_name, selected_store)
+                        else:
+                            with st.spinner(f"加载 {selected_store} 的报表数据..."):
+                                df = get_single_report_from_cos(cos_client, bucket_name, selected_store)
                         
                         if df is not None:
                             # 应收-未收额看板
@@ -1434,28 +1460,29 @@ def main():
                                 else:
                                     st.warning("⚠️ 未找到应收-未收额数据")
                                     
-                                    with st.expander("🔍 查看详情", expanded=False):
-                                        debug_info = analysis_results.get('debug_info', {})
-                                        
-                                        st.markdown("### 📋 数据查找说明")
-                                        st.write(f"- **报表总行数：** {debug_info.get('total_rows', 0)} 行")
-                                        
-                                        if debug_info.get('checked_row_69'):
-                                            st.write(f"- **第69行内容：** {debug_info.get('row_69_content', 'N/A')}")
-                                        else:
-                                            st.write("- **第69行：** 报表行数不足69行")
-                                        
-                                        st.markdown("""
-                                        ### 💡 可能的原因
-                                        1. 第69行不包含"应收-未收额"相关关键词
-                                        2. 第69行的数值为空或格式不正确
-                                        3. 报表格式与预期不符
-                                        
-                                        ### 🛠️ 建议
-                                        - 请检查Excel报表第69行是否包含"应收-未收额"
-                                        - 确认该行有对应的金额数据
-                                        - 如需调整查找位置，请联系技术支持
-                                        """)
+                                    if debug_mode:
+                                        with st.expander("🔍 查看详情", expanded=False):
+                                            debug_info = analysis_results.get('debug_info', {})
+                                            
+                                            st.markdown("### 📋 数据查找说明")
+                                            st.write(f"- **报表总行数：** {debug_info.get('total_rows', 0)} 行")
+                                            
+                                            if debug_info.get('checked_row_69'):
+                                                st.write(f"- **第69行内容：** {debug_info.get('row_69_content', 'N/A')}")
+                                            else:
+                                                st.write("- **第69行：** 报表行数不足69行")
+                                            
+                                            st.markdown("""
+                                            ### 💡 可能的原因
+                                            1. 第69行不包含"应收-未收额"相关关键词
+                                            2. 第69行的数值为空或格式不正确
+                                            3. 报表格式与预期不符
+                                            
+                                            ### 🛠️ 建议
+                                            - 请检查Excel报表第69行是否包含"应收-未收额"
+                                            - 确认该行有对应的金额数据
+                                            - 如需调整查找位置，请联系技术支持
+                                            """)
                             
                             except Exception as e:
                                 show_status_message(f"❌ 分析数据时出错：{str(e)}", "error")
@@ -1576,7 +1603,7 @@ def main():
             cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
             st.caption(f"💾 缓存项目: {cache_count}")
         with col3:
-            st.caption("🔧 版本: v3.2 (Excel格式优化版)")
+            st.caption("🔧 版本: v3.3 (统一Excel读取诊断版)")
 
     except Exception as e:
         st.error(f"系统运行时出错: {str(e)}")
