@@ -840,6 +840,19 @@ if 'reports_uploader_key' not in st.session_state:
     st.session_state.reports_uploader_key = 'initial_reports_uploader_key'
 if 'permissions_uploader_key' not in st.session_state:
     st.session_state.permissions_uploader_key = 'initial_permissions_uploader_key'
+# 文件处理状态管理
+if 'last_reports_hash' not in st.session_state:
+    st.session_state.last_reports_hash = None
+if 'reports_upload_successful' not in st.session_state:
+    st.session_state.reports_upload_successful = False
+if 'reports_upload_in_progress' not in st.session_state:
+    st.session_state.reports_upload_in_progress = False
+if 'last_permissions_hash' not in st.session_state:
+    st.session_state.last_permissions_hash = None
+if 'permissions_upload_successful' not in st.session_state:
+    st.session_state.permissions_upload_successful = False
+if 'permissions_upload_in_progress' not in st.session_state:
+    st.session_state.permissions_upload_in_progress = False
 
 # 主标题
 st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
@@ -939,36 +952,57 @@ with st.sidebar:
                     # 计算文件哈希
                     file_hash = hashlib.md5(permissions_file_upload.getvalue()).hexdigest()
                     
-                    # 检查是否已处理过
-                    if "last_permissions_hash" in st.session_state and \
-                       st.session_state.last_permissions_hash == file_hash and \
+                    # --- 增加更严格的条件判断 ---
+                    # 情况1: 文件已成功处理并上传
+                    if st.session_state.last_permissions_hash == file_hash and \
                        st.session_state.get("permissions_upload_successful", False):
                         st.info("ℹ️ 该权限表已成功处理，无需重复操作。")
+                    # 情况2: 上传操作已经在进行中（防止st.rerun带来的二次触发）
+                    elif st.session_state.permissions_upload_in_progress:
+                        logger.info("一个权限表上传操作已在进行中，跳过本次重复触发。")
+                        st.info("🔄 权限表正在处理中，请稍候...")
+                    # 情况3: 新文件或上次处理失败的文件，需要开始处理
                     else:
-                        st.session_state.last_permissions_hash = file_hash
+                        # 标记为正在处理中，防止后续的立即重运行再次进入此逻辑
+                        st.session_state.permissions_upload_in_progress = True
+                        # 重置本次上传的成功状态
                         st.session_state.permissions_upload_successful = False
                         
                         with st.spinner("处理权限表文件..."):
-                            df = pd.read_excel(permissions_file_upload)
-                            if len(df.columns) >= 2:
-                                with st.spinner("保存到腾讯云..."):
-                                    if save_permissions_to_cos(df, cos_client, bucket_name, permissions_file):
-                                        show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
-                                        st.session_state.permissions_upload_successful = True
-                                        st.balloons()
-                                        
-                                        # 重置上传器
-                                        st.session_state.permissions_uploader_key = str(datetime.now()) + "_permissions_uploader"
-                                        st.rerun()
-                                    else:
-                                        show_status_message("❌ 保存失败", "error")
-                                        st.session_state.permissions_upload_successful = False
-                            else:
-                                show_status_message("❌ 格式错误：需要至少两列（门店名称、人员编号）", "error")
+                            try:
+                                df = pd.read_excel(permissions_file_upload)
+                                if len(df.columns) >= 2:
+                                    with st.spinner("保存到腾讯云..."):
+                                        if save_permissions_to_cos(df, cos_client, bucket_name, permissions_file):
+                                            show_status_message(f"✅ 权限表已上传：{len(df)} 个用户", "success")
+                                            st.session_state.permissions_upload_successful = True
+                                            st.session_state.last_permissions_hash = file_hash
+                                            st.balloons()
+                                            
+                                            # --- 关键的重置标志和uploader，并触发重新运行 ---
+                                            st.session_state.permissions_upload_in_progress = False
+                                            st.session_state.permissions_uploader_key = str(datetime.now()) + "_permissions_uploader"
+                                            st.rerun()
+                                            # --- 关键的重置标志和uploader，并触发重新运行 ---
+                                        else:
+                                            show_status_message("❌ 保存失败", "error")
+                                            st.session_state.permissions_upload_successful = False
+                                            st.session_state.permissions_upload_in_progress = False
+                                else:
+                                    show_status_message("❌ 格式错误：需要至少两列（门店名称、人员编号）", "error")
+                                    st.session_state.permissions_upload_successful = False
+                                    st.session_state.permissions_upload_in_progress = False
+                            except Exception as process_error:
+                                show_status_message(f"❌ 处理失败：{str(process_error)}", "error")
+                                logger.error("权限表处理失败", exc_info=True)
                                 st.session_state.permissions_upload_successful = False
+                                st.session_state.permissions_upload_in_progress = False
+                                
                 except Exception as e:
-                    show_status_message(f"❌ 处理失败：{str(e)}", "error")
+                    show_status_message(f"❌ 权限表读取失败：{str(e)}", "error")
+                    logger.error("权限表读取失败", exc_info=True)
                     st.session_state.permissions_upload_successful = False
+                    st.session_state.permissions_upload_in_progress = False
             
             # 上传财务报表
             reports_file_upload = st.file_uploader(
