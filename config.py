@@ -6,10 +6,10 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')  # 建议使用环境�
 
 # 腾讯云COS配置
 COS_CONFIG = {
-    'region': os.getenv('COS_REGION', 'ap-beijing'),  # 根据实际情况修改
-    'secret_id': os.getenv('COS_SECRET_ID', ''),
-    'secret_key': os.getenv('COS_SECRET_KEY', ''),
-    'bucket': os.getenv('COS_BUCKET', 'your-bucket-name'),
+    'region': 'ap-shanghai',  # 上海地区
+    'secret_id': 'AKIDARaYN4YpuqcDdqrfJkFnCQSYbVDi06zf',
+    'secret_key': 'XszvmRt9C3iWHC6ymU2OXVIsGRPBk8LN',
+    'bucket': 'store-reports-data-1369683907',
     'domain': os.getenv('COS_DOMAIN', ''),  # 可选，自定义域名
 }
 
@@ -33,7 +33,7 @@ STREAMLIT_CONFIG = {
 
 def validate_config() -> bool:
     """验证配置是否完整"""
-    required_keys = ['secret_id', 'secret_key', 'bucket']
+    required_keys = ['secret_id', 'secret_key', 'bucket', 'region']
     for key in required_keys:
         if not COS_CONFIG.get(key):
             print(f"警告: COS配置缺失 {key}")
