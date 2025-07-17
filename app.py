@@ -230,6 +230,224 @@ def safe_format_number(value, default_value=0):
     except (ValueError, TypeError):
         return default_value
 
+def create_excel_buffer(data, sheet_name="数据", file_type="general"):
+    """统一的Excel文件创建函数"""
+    try:
+        if isinstance(data, pd.DataFrame):
+            df = data
+        elif isinstance(data, list) and len(data) > 0:
+            # 如果是列表数据，转换为DataFrame
+            if isinstance(data[0], list):
+                # 第一行作为表头
+                df = pd.DataFrame(data[1:], columns=data[0])
+            else:
+                df = pd.DataFrame(data)
+        else:
+            raise ValueError("数据格式不支持")
+        
+        # 创建Excel缓冲区
+        excel_buffer = io.BytesIO()
+        
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            # 工作表名限制31字符
+            safe_sheet_name = sheet_name[:31] if len(sheet_name) <= 31 else sheet_name[:28] + "..."
+            df.to_excel(writer, index=False, sheet_name=safe_sheet_name)
+        
+        excel_content = excel_buffer.getvalue()
+        
+        logger.info(f"Excel文件创建成功: {len(df)} 行 × {len(df.columns)} 列, 大小: {len(excel_content)} 字节")
+        
+        return excel_content, len(df), len(df.columns)
+        
+    except Exception as e:
+        logger.error(f"Excel文件创建失败: {str(e)}")
+        raise DataProcessingError(f"Excel文件创建失败: {str(e)}")
+
+def _upload_cos_file_with_integrity_check(cos_client, bucket_name, file_key, excel_content, content_type, metadata):
+    """
+    辅助函数：上传文件到COS并验证完整性。
+    如果验证失败，则抛出IOError。
+    """
+    # 上传文件
+    cos_client.put_object(
+        Bucket=bucket_name,
+        Body=excel_content,
+        Key=file_key,
+        ContentType=content_type,
+        Metadata=metadata
+    )
+    
+    # 立即验证上传结果
+    head_response = cos_client.head_object(Bucket=bucket_name, Key=file_key)
+    uploaded_size = safe_format_number(head_response.get('Content-Length', 0), 0)
+    
+    if uploaded_size != len(excel_content):
+        raise IOError(f"上传文件大小不匹配! 预期: {len(excel_content)}, 实际: {uploaded_size}. 请重试上传。")
+    
+    # 进一步验证：下载前几个字节检查文件头部
+    verify_response = cos_client.get_object(Bucket=bucket_name, Key=file_key, Range='bytes=0-1023')
+    verify_content = verify_response['Body'].read()
+    
+    if verify_content[:2] != b'PK':
+        raise IOError("上传文件头部验证失败，文件可能损坏。")
+    
+    return True
+
+def unified_upload_to_cos(cos_client, bucket_name: str, file_key: str, excel_content: bytes, 
+                         metadata: Dict[str, str], file_type: str = "file") -> bool:
+    """统一的COS上传函数 - 使用重试机制确保完整上传"""
+    try:
+        logger.info(f"开始上传 {file_type}: {file_key}, 大小: {len(excel_content)} 字节")
+        
+        # 显示上传信息
+        st.info(f"📤 正在上传 {file_type}: {file_key}")
+        st.write(f"- 文件大小: {len(excel_content):,} 字节")
+        
+        # 使用retry_operation确保完整上传
+        with st.spinner("上传中..."):
+            upload_success = retry_operation(
+                func=_upload_cos_file_with_integrity_check,
+                cos_client, bucket_name, file_key, excel_content, 
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                metadata,
+                max_retries=MAX_RETRIES,
+                delay=RETRY_DELAY
+            )
+        
+        if upload_success:
+            st.success(f"✅ 上传验证成功: {len(excel_content):,} 字节")
+            logger.info(f"上传成功: {file_key}")
+            return True
+        else:
+            st.error(f"❌ 文件 '{file_key}' 上传失败或不完整，经过 {MAX_RETRIES} 次重试仍无法成功。")
+            logger.error(f"文件 '{file_key}' 经过 {MAX_RETRIES} 次重试仍无法上传完整")
+            return False
+        
+    except Exception as e:
+        logger.error(f"上传失败: {str(e)}")
+        st.error(f"❌ 上传失败: {str(e)}")
+        return False
+
+def _fetch_cos_file_content_with_integrity_check(cos_client, bucket_name, key, expected_size):
+    """
+    辅助函数：从COS获取文件内容，并检查下载内容的完整性。
+    如果大小不匹配，则抛出IOError。
+    """
+    file_response = cos_client.get_object(Bucket=bucket_name, Key=key)
+    excel_content = file_response['Body'].read()
+    
+    actual_size = len(excel_content)
+    if actual_size != expected_size:
+        raise IOError(f"下载文件大小不匹配! 预期: {expected_size}, 实际: {actual_size}. 请重试下载。")
+    
+    return excel_content
+
+def unified_download_from_cos(cos_client, bucket_name: str, file_key: str, file_type: str = "file") -> Optional[bytes]:
+    """统一的COS下载函数 - 使用重试机制确保完整下载"""
+    try:
+        logger.info(f"开始下载 {file_type}: {file_key}")
+        
+        # 1. 获取文件元数据
+        head_response = cos_client.head_object(Bucket=bucket_name, Key=file_key)
+        expected_size = safe_format_number(head_response.get('Content-Length', 0), 0)
+        content_type = head_response.get('Content-Type', '')
+        last_modified = head_response.get('Last-Modified', '')
+        
+        st.info(f"📥 准备下载 {file_type}: {file_key}")
+        st.write(f"- 预期大小: {expected_size:,} 字节")
+        st.write(f"- Content-Type: {content_type}")
+        st.write(f"- 最后修改: {last_modified}")
+        
+        # 2. 使用retry_operation确保完整下载
+        with st.spinner("下载中..."):
+            excel_content = retry_operation(
+                func=_fetch_cos_file_content_with_integrity_check,
+                cos_client, bucket_name, file_key, expected_size,
+                max_retries=MAX_RETRIES,
+                delay=RETRY_DELAY
+            )
+        
+        if excel_content is None:
+            st.error(f"❌ 文件 '{file_key}' 下载失败或不完整，请检查网络或COS文件。")
+            logger.error(f"文件 '{file_key}' 经过 {MAX_RETRIES} 次重试仍无法获取完整内容。")
+            return None
+        
+        # 3. 验证下载结果
+        actual_size = len(excel_content)
+        st.success(f"✅ 下载完成: {actual_size:,} 字节")
+        
+        # 验证文件头部
+        if len(excel_content) >= 2 and excel_content[:2] == b'PK':
+            st.success("✅ 文件格式验证通过")
+            logger.info(f"下载成功: {file_key}, 大小: {actual_size} 字节")
+            return excel_content
+        else:
+            st.error("❌ 文件格式验证失败")
+            logger.warning(f"文件头部验证失败: {excel_content[:4].hex() if len(excel_content) >= 4 else 'N/A'}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"下载失败: {str(e)}")
+        st.error(f"❌ 下载失败: {str(e)}")
+        return None
+
+def unified_excel_parser(excel_content: bytes, file_type: str = "file") -> Optional[pd.DataFrame]:
+    """统一的Excel解析函数"""
+    try:
+        st.info(f"🔍 解析Excel文件...")
+        
+        # 创建字节流
+        excel_buffer = io.BytesIO(excel_content)
+        excel_buffer.seek(0)
+        
+        # 解析Excel
+        df = pd.read_excel(excel_buffer, engine='openpyxl')
+        
+        st.success(f"✅ Excel解析成功: {len(df)} 行 × {len(df.columns)} 列")
+        
+        # 显示列名
+        st.write(f"**列名**: {df.columns.tolist()}")
+        
+        # 显示数据预览
+        if len(df) > 0:
+            with st.expander("📊 数据预览（前5行）", expanded=False):
+                st.dataframe(df.head(), use_container_width=True)
+        
+        logger.info(f"Excel解析成功: {len(df)} 行 × {len(df.columns)} 列")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Excel解析失败: {str(e)}")
+        st.error(f"❌ Excel解析失败: {str(e)}")
+        
+        # 提供详细错误信息
+        error_type = type(e).__name__
+        st.write(f"**错误类型**: {error_type}")
+        st.write(f"**错误详情**: {str(e)}")
+        
+        return None
+
+def unified_file_processor(cos_client, bucket_name: str, file_key: str, file_type: str = "file") -> Optional[pd.DataFrame]:
+    """统一的文件处理函数 - 下载和解析"""
+    try:
+        st.subheader(f"🔍 {file_type} 处理流程")
+        
+        # 1. 下载文件
+        excel_content = unified_download_from_cos(cos_client, bucket_name, file_key, file_type)
+        
+        if excel_content is None:
+            return None
+        
+        # 2. 解析Excel
+        df = unified_excel_parser(excel_content, file_type)
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"文件处理失败: {str(e)}")
+        st.error(f"❌ {file_type} 处理失败: {str(e)}")
+        return None
+
 def unified_excel_reader(cos_client, bucket_name: str, file_key: str, file_type: str = "unknown") -> Optional[pd.DataFrame]:
     """统一的Excel文件读取器 - 用于权限表和报表文件"""
     try:
@@ -350,9 +568,9 @@ def unified_excel_reader(cos_client, bucket_name: str, file_key: str, file_type:
         return None
 
 def load_permissions_from_cos_enhanced_v2(cos_client, bucket_name: str, permissions_file: str, force_reload: bool = False) -> Optional[pd.DataFrame]:
-    """权限表读取器 - 使用统一的Excel读取逻辑"""
+    """权限表读取器 - 使用统一的文件处理机制"""
     
-    # 临时禁用缓存选项
+    # 缓存处理
     if not force_reload:
         cache_key = get_cache_key("permissions", "load")
         cached_data = get_cache(cache_key)
@@ -408,8 +626,8 @@ def load_permissions_from_cos_enhanced_v2(cos_client, bucket_name: str, permissi
                 st.error("❌ 未找到权限文件，请检查配置或上传文件")
                 return None
             
-            # 使用统一的Excel读取器
-            df = unified_excel_reader(cos_client, bucket_name, found_file, "权限表")
+            # 使用统一的文件处理函数
+            df = unified_file_processor(cos_client, bucket_name, found_file, "权限表")
             
             if df is None:
                 st.warning("⚠️ Excel格式读取失败，尝试CSV格式...")
@@ -480,6 +698,7 @@ def load_permissions_from_cos_enhanced_v2(cos_client, bucket_name: str, permissi
             
             # 设置缓存
             if not force_reload:
+                cache_key = get_cache_key("permissions", "load")
                 set_cache(cache_key, result_df)
             
             return result_df
@@ -660,7 +879,7 @@ def compare_file_properties(cos_client, bucket_name: str, permissions_file: str,
         st.error(f"❌ 文件属性对比失败: {str(e)}")
 
 def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, permissions_file: str) -> bool:
-    """保存权限数据到COS - Excel格式，确保数据完整性"""
+    """保存权限数据到COS - 使用统一的文件处理机制"""
     with error_handler("保存权限数据"):
         def _save_operation():
             # 数据验证
@@ -685,7 +904,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             }
             
             # 步骤1：显示原始数据统计
-            processing_report['step_by_step'].append(f"步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
             st.info(f"📊 步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
             
             # 显示原始数据预览
@@ -698,7 +916,9 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 for col in df.columns:
                     st.write(f"- {col}: {df[col].dtype}")
             
-            # 步骤3：提取权限列
+            # 步骤2：数据处理
+            st.info(f"📊 步骤2: 开始逐行处理 {len(df)} 行数据")
+            
             # 确保使用正确的列
             store_col = df.columns[0]
             user_col = df.columns[1]
@@ -706,9 +926,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             # 创建权限数据
             permissions_data = []
             permissions_data.append(['门店名称', '人员编号', '更新时间'])
-            
-            processing_report['step_by_step'].append(f"步骤3: 开始逐行处理数据")
-            st.info(f"📊 步骤3: 开始逐行处理 {len(df)} 行数据")
             
             # 创建进度条
             progress_container = st.container()
@@ -734,7 +951,7 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                     store_name = str(raw_store).strip()
                     user_id = str(raw_user).strip()
                     
-                    # 记录空行
+                    # 数据验证和清理逻辑（保持原有逻辑）
                     if (not store_name or store_name in ['nan', 'None']) and \
                        (not user_id or user_id in ['nan', 'None']):
                         processing_report['empty_rows'].append({
@@ -745,7 +962,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         })
                         continue
                     
-                    # 检查门店名称
                     if not store_name or store_name in ['nan', 'None']:
                         processing_report['skipped_rows'].append({
                             'row': idx + 1,
@@ -755,7 +971,6 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         })
                         continue
                     
-                    # 检查人员编号
                     if not user_id or user_id in ['nan', 'None']:
                         processing_report['skipped_rows'].append({
                             'row': idx + 1,
@@ -765,7 +980,7 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         })
                         continue
                     
-                    # 清理特殊字符但保留更多有效数据
+                    # 清理特殊字符
                     store_name = store_name.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
                     user_id = user_id.replace('\n', '').replace('\r', '').replace('\t', '')
                     
@@ -813,29 +1028,26 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             
             # 更新处理报告
             processing_report['processed_rows'] = processed_count
-            processing_report['step_by_step'].append(f"步骤4: 数据处理完成，有效数据 {processed_count} 行")
             
             # 显示处理结果
-            st.success(f"✅ 步骤4: 数据处理完成！")
+            st.success(f"✅ 步骤2: 数据处理完成！有效数据 {processed_count} 行")
             
             if processed_count == 0:
                 raise DataProcessingError("没有有效的权限数据可以保存")
             
-            # 步骤5：准备Excel内容
-            processing_report['step_by_step'].append(f"步骤5: 准备Excel内容，共 {len(permissions_data)-1} 条权限记录")
-            st.info(f"📊 步骤5: 准备保存 {len(permissions_data)-1} 条权限记录 (Excel格式)")
+            # 步骤3：创建Excel文件 - 使用统一的Excel创建函数
+            st.info(f"📊 步骤3: 创建Excel文件，共 {processed_count} 条权限记录")
             
-            # 创建Excel文件
-            excel_buffer = io.BytesIO()
+            # 转换为DataFrame
             final_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
             
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                final_df.to_excel(writer, index=False, sheet_name='权限数据')
+            # 使用统一的Excel创建函数
+            excel_content, row_count, col_count = create_excel_buffer(final_df, "权限数据", "权限表")
             
-            excel_content = excel_buffer.getvalue()
+            # 步骤4：上传到COS - 使用统一的上传函数
+            st.info(f"📊 步骤4: 上传到腾讯云COS")
             
-            # 步骤7：上传到COS
-            # 确保文件路径正确
+            # 确定最终文件路径
             if permissions_file.endswith('.csv'):
                 excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
             elif permissions_file.endswith('.xlsx'):
@@ -847,43 +1059,35 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             if '/' not in excel_permissions_file:
                 excel_permissions_file = f"permissions/{excel_permissions_file}"
             
-            processing_report['step_by_step'].append(f"步骤7: 开始上传到腾讯云COS (Excel格式)")
-            st.info(f"📊 步骤7: 正在上传到腾讯云... (文件: {excel_permissions_file})")
+            # 准备元数据
+            metadata = {
+                'upload-time': current_time,
+                'record-count': str(processed_count),
+                'original-count': str(processing_report['original_rows']),
+                'file-format': 'excel',
+                'file-type': 'permissions'
+            }
             
-            with st.spinner("上传中..."):
-                cos_client.put_object(
-                    Bucket=bucket_name,
-                    Body=excel_content,
-                    Key=excel_permissions_file,
-                    ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    Metadata={
-                        'upload-time': current_time,
-                        'record-count': str(processed_count),
-                        'original-count': str(processing_report['original_rows']),
-                        'file-format': 'excel'
-                    }
-                )
+            # 使用统一的上传函数
+            upload_success = unified_upload_to_cos(
+                cos_client, 
+                bucket_name, 
+                excel_permissions_file, 
+                excel_content, 
+                metadata, 
+                "权限表"
+            )
             
-            # 步骤8：验证上传结果
-            st.success(f"✅ 步骤8: 上传完成！")
-            
-            # 立即验证保存的文件
-            try:
-                verify_response = cos_client.get_object(Bucket=bucket_name, Key=excel_permissions_file)
-                verify_content = verify_response['Body'].read()
-                verify_df = pd.read_excel(io.BytesIO(verify_content))
+            if upload_success:
+                st.success(f"✅ 步骤4: 权限表上传成功！")
+                logger.info(f"权限数据保存成功: {processed_count} 条记录")
                 
-                st.success(f"🔍 验证成功: COS中已保存 {len(verify_df)} 行数据 (Excel格式)")
-                            
-            except Exception as e:
-                st.warning(f"⚠️ 无法验证保存结果: {str(e)}")
-            
-            logger.info(f"权限数据保存成功 (Excel格式): {processed_count} 条记录 (原始: {processing_report['original_rows']} 条)")
-            
-            # 清除相关缓存
-            clear_permissions_cache()
-            
-            return True
+                # 清除相关缓存
+                clear_permissions_cache()
+                
+                return True
+            else:
+                raise DataProcessingError("权限表上传失败")
         
         return safe_cos_operation(_save_operation)
 
@@ -1364,6 +1568,80 @@ def main():
                         else:
                             st.error("❌ 权限表重新加载失败")
                 
+                if st.button("🔄 重新上传权限表"):
+                    st.warning("⚠️ 此操作将使用统一的重试机制重新上传权限表，可能会解决文件损坏问题")
+                    
+                    # 创建确认按钮
+                    confirm_key = f"confirm_reupload_{datetime.now().timestamp()}"
+                    if st.button("✅ 确认重新上传", type="primary", key=confirm_key):
+                        # 首先尝试读取现有数据
+                        try:
+                            st.info("📖 正在读取现有权限数据...")
+                            
+                            # 尝试直接从CSV格式读取（如果存在）
+                            csv_file = permissions_file.replace('.xlsx', '.csv')
+                            if '/' not in csv_file:
+                                csv_paths = [csv_file, f"permissions/{csv_file}"]
+                            else:
+                                csv_paths = [csv_file]
+                            
+                            existing_data = None
+                            for csv_path in csv_paths:
+                                try:
+                                    response = cos_client.get_object(Bucket=bucket_name, Key=csv_path)
+                                    csv_content = response['Body'].read().decode('utf-8-sig')
+                                    existing_data = pd.read_csv(io.StringIO(csv_content))
+                                    st.success(f"✅ 从CSV格式读取成功: {csv_path}")
+                                    break
+                                except Exception:
+                                    continue
+                            
+                            if existing_data is None:
+                                # 如果CSV不存在，尝试强制读取Excel（可能会失败）
+                                st.info("🔄 CSV不存在，尝试强制读取Excel...")
+                                existing_data = load_permissions_from_cos_enhanced_v2(cos_client, bucket_name, permissions_file, force_reload=True)
+                            
+                            if existing_data is not None and len(existing_data) > 0:
+                                # 使用现有数据重新上传
+                                st.info("📤 使用现有数据重新上传...")
+                                
+                                # 确保数据格式正确
+                                if len(existing_data.columns) >= 2:
+                                    # 只取前两列
+                                    upload_data = existing_data.iloc[:, :2].copy()
+                                    upload_data.columns = ['门店名称', '人员编号']
+                                    
+                                    # 清理数据
+                                    upload_data = upload_data.dropna().astype(str)
+                                    upload_data = upload_data[
+                                        (upload_data['门店名称'] != '') & 
+                                        (upload_data['人员编号'] != '') &
+                                        (upload_data['门店名称'] != 'nan') &
+                                        (upload_data['人员编号'] != 'nan')
+                                    ]
+                                    
+                                    if len(upload_data) > 0:
+                                        st.info(f"🔄 准备重新上传 {len(upload_data)} 条权限记录...")
+                                        
+                                        if save_permissions_to_cos(upload_data, cos_client, bucket_name, permissions_file):
+                                            st.success("✅ 权限表重新上传成功！文件损坏问题已解决。")
+                                            # 清除缓存
+                                            clear_permissions_cache()
+                                            st.balloons()
+                                        else:
+                                            st.error("❌ 权限表重新上传失败")
+                                    else:
+                                        st.error("❌ 数据清理后为空，无法重新上传")
+                                else:
+                                    st.error("❌ 数据格式不正确，无法重新上传")
+                            else:
+                                st.error("❌ 无法读取现有权限数据，请手动上传新的权限表")
+                                st.info("💡 建议：请在管理员面板中重新上传权限表文件")
+                                
+                        except Exception as e:
+                            st.error(f"❌ 重新上传失败: {str(e)}")
+                            st.info("💡 建议：请在管理员面板中重新上传权限表文件")
+                
                 if st.button("🗑️ 清除所有缓存"):
                     cache_keys = [key for key in st.session_state.keys() if key.startswith('cache_')]
                     for key in cache_keys:
@@ -1589,7 +1867,7 @@ def main():
         
         # 主界面
         if user_type == "管理员" and st.session_state.is_admin:
-            st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在腾讯云，支持高效存储和缓存机制</p></div>', unsafe_allow_html=True)
+            st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3><p>数据永久保存在腾讯云，支持高效存储和缓存机制</p><p>🔄 <strong>新特性</strong>: 集成了重试机制，确保文件上传下载的完整性和可靠性</p></div>', unsafe_allow_html=True)
             
             try:
                 with st.spinner("加载数据统计..."):
@@ -1888,7 +2166,7 @@ def main():
             cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
             st.caption(f"💾 缓存项目: {cache_count}")
         with col3:
-            st.caption("🔧 版本: v3.4 (修复格式化错误版)")
+            st.caption("🔧 版本: v4.1 (重试机制增强版)")
 
     except Exception as e:
         st.error(f"系统运行时出错: {str(e)}")
