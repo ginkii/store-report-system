@@ -86,13 +86,16 @@ class JSONHandler:
             report_info["status"] = "active"
             data["current_report"] = report_info
             
-            # 更新门店列表
+            # 更新门店列表（只保存基本信息）
             store_sheet_list = []
             for sheet_name in store_sheets:
                 store_sheet_list.append({
                     "sheet_name": sheet_name,
                     "query_count": 0,
-                    "last_query_time": None
+                    "last_query_time": None,
+                    "indexed": False,  # 标记是否已建立索引
+                    "cache_hits": 0,   # 缓存命中次数
+                    "last_accessed": None  # 最后访问时间
                 })
             
             data["store_sheets"] = store_sheet_list
@@ -102,6 +105,107 @@ class JSONHandler:
         except Exception as e:
             st.error(f"更新当前报表失败: {str(e)}")
             return False
+    
+    def update_sheet_index(self, sheet_name: str, index_info: Dict[str, Any]) -> bool:
+        """更新工作表索引信息"""
+        try:
+            data = self._load_data()
+            store_sheets = data.get("store_sheets", [])
+            
+            # 找到对应的工作表并更新索引信息
+            for sheet in store_sheets:
+                if sheet["sheet_name"] == sheet_name:
+                    sheet["indexed"] = True
+                    sheet["index_info"] = index_info
+                    sheet["indexed_time"] = datetime.now().isoformat()
+                    break
+            
+            data["store_sheets"] = store_sheets
+            return self._save_data(data)
+            
+        except Exception as e:
+            st.error(f"更新工作表索引失败: {str(e)}")
+            return False
+    
+    def get_sheet_index(self, sheet_name: str) -> Optional[Dict[str, Any]]:
+        """获取工作表索引信息"""
+        try:
+            data = self._load_data()
+            store_sheets = data.get("store_sheets", [])
+            
+            for sheet in store_sheets:
+                if sheet["sheet_name"] == sheet_name:
+                    return sheet.get("index_info")
+            
+            return None
+            
+        except Exception as e:
+            st.error(f"获取工作表索引失败: {str(e)}")
+            return None
+    
+    def update_sheet_access_stats(self, sheet_name: str) -> bool:
+        """更新工作表访问统计"""
+        try:
+            data = self._load_data()
+            store_sheets = data.get("store_sheets", [])
+            
+            for sheet in store_sheets:
+                if sheet["sheet_name"] == sheet_name:
+                    sheet["query_count"] = sheet.get("query_count", 0) + 1
+                    sheet["last_query_time"] = datetime.now().isoformat()
+                    sheet["last_accessed"] = datetime.now().isoformat()
+                    break
+            
+            data["store_sheets"] = store_sheets
+            return self._save_data(data)
+            
+        except Exception as e:
+            st.error(f"更新工作表访问统计失败: {str(e)}")
+            return False
+    
+    def get_most_accessed_sheets(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """获取最常访问的工作表"""
+        try:
+            data = self._load_data()
+            store_sheets = data.get("store_sheets", [])
+            
+            # 按查询次数排序
+            sorted_sheets = sorted(
+                store_sheets,
+                key=lambda x: x.get("query_count", 0),
+                reverse=True
+            )
+            
+            return sorted_sheets[:limit]
+            
+        except Exception as e:
+            st.error(f"获取最常访问工作表失败: {str(e)}")
+            return []
+    
+    def get_indexing_progress(self) -> Dict[str, Any]:
+        """获取索引进度"""
+        try:
+            data = self._load_data()
+            store_sheets = data.get("store_sheets", [])
+            
+            total_sheets = len(store_sheets)
+            indexed_sheets = sum(1 for sheet in store_sheets if sheet.get("indexed", False))
+            
+            return {
+                "total_sheets": total_sheets,
+                "indexed_sheets": indexed_sheets,
+                "progress_percentage": (indexed_sheets / total_sheets * 100) if total_sheets > 0 else 0,
+                "remaining_sheets": total_sheets - indexed_sheets
+            }
+            
+        except Exception as e:
+            st.error(f"获取索引进度失败: {str(e)}")
+            return {
+                "total_sheets": 0,
+                "indexed_sheets": 0,
+                "progress_percentage": 0,
+                "remaining_sheets": 0
+            }
     
     def get_store_sheets(self) -> List[Dict[str, Any]]:
         """获取门店工作表列表"""
