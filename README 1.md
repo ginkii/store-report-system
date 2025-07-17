@@ -2,6 +2,10 @@
 
 一个基于Streamlit的门店报表查询系统，支持汇总Excel文件上传到腾讯云COS，用户可通过门店选择和编码查询获取对应的报表数据。
 
+## 🚀 快速开始
+
+如果您想快速启动系统，请参考：[快速开始指南](QUICKSTART.md)
+
 ## 功能特点
 
 - **管理员功能**：
@@ -26,15 +30,23 @@
 ## 项目结构
 
 ```
-├── app.py              # 主应用文件
-├── config.py           # 配置文件
-├── json_handler.py     # JSON数据操作
-├── cos_handler.py      # 腾讯云COS操作
-├── excel_parser.py     # Excel文件解析
-├── query_handler.py    # 查询处理逻辑
-├── requirements.txt    # 项目依赖
-├── data.json          # 数据文件（自动生成）
-└── README.md          # 项目说明
+├── .streamlit/
+│   ├── secrets.toml        # Streamlit配置文件（需要创建）
+│   └── config.toml         # Streamlit应用配置
+├── app.py                  # 主应用文件
+├── config.py               # 配置管理（支持Streamlit secrets）
+├── json_handler.py         # JSON数据操作
+├── cos_handler.py          # 腾讯云COS操作
+├── excel_parser.py         # Excel文件解析
+├── query_handler.py        # 查询处理逻辑
+├── setup_config.py         # 配置设置脚本
+├── requirements.txt        # 项目依赖
+├── secrets.toml.example    # 配置模板
+├── .gitignore             # Git忽略文件
+├── data.json              # 数据文件（自动生成）
+├── README.md              # 项目说明
+├── DEPLOY.md              # 部署指南
+└── QUICKSTART.md          # 快速开始指南
 ```
 
 ## 环境要求
@@ -58,37 +70,75 @@ cd store-report-query
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+### 3. 配置系统
 
-在系统环境变量中设置以下配置：
+**推荐使用Streamlit Secrets管理配置（更安全）**
+
+#### 方法1：使用Streamlit Secrets（推荐）
+
+1. 创建 `.streamlit/secrets.toml` 文件：
+```toml
+# 管理员配置
+ADMIN_PASSWORD = "your_admin_password"
+
+# 腾讯云COS配置
+[tencent_cos]
+secret_id = "AKIDARaYN4YpuqcDdqrfJkFnCQSYbVDi06zf"
+secret_key = "XszvmRt9C3iWHC6ymU2OXVIsGRPBk8LN"
+region = "ap-shanghai"
+bucket_name = "store-reports-data-1369683907"
+domain = ""
+
+# 应用配置
+[app]
+max_file_size = 52428800  # 50MB
+session_timeout = 3600    # 1小时
+```
+
+### 快速配置
+
+可以使用提供的配置脚本快速设置：
+
+```bash
+# 运行配置设置脚本
+python setup_config.py
+
+# 或者手动设置
+mkdir -p .streamlit
+cp secrets.toml.example .streamlit/secrets.toml
+# 然后编辑 .streamlit/secrets.toml 文件
+```
+
+2. 将 `secrets.toml.example` 复制为 `.streamlit/secrets.toml` 并填入您的配置：
+```bash
+mkdir -p .streamlit
+cp secrets.toml.example .streamlit/secrets.toml
+# 然后编辑 .streamlit/secrets.toml 文件
+```
+
+#### 方法2：使用环境变量（备选）
 
 ```bash
 # 管理员密码
 export ADMIN_PASSWORD="your_admin_password"
 
 # 腾讯云COS配置
-export COS_REGION="ap-beijing"
-export COS_SECRET_ID="your_secret_id"
-export COS_SECRET_KEY="your_secret_key"
-export COS_BUCKET="your-bucket-name"
-export COS_DOMAIN="your-custom-domain"  # 可选
+export COS_REGION="ap-shanghai"
+export COS_SECRET_ID="AKIDARaYN4YpuqcDdqrfJkFnCQSYbVDi06zf"
+export COS_SECRET_KEY="XszvmRt9C3iWHC6ymU2OXVIsGRPBk8LN"
+export COS_BUCKET="store-reports-data-1369683907"
 ```
 
-或者直接在 `config.py` 文件中修改配置：
+#### Streamlit Cloud部署
 
-```python
-# 管理员配置
-ADMIN_PASSWORD = 'your_admin_password'
+在Streamlit Cloud部署时，可以直接在部署面板的"Secrets"选项中配置，无需创建本地文件。
 
-# 腾讯云COS配置
-COS_CONFIG = {
-    'region': 'ap-beijing',
-    'secret_id': 'your_secret_id',
-    'secret_key': 'your_secret_key',
-    'bucket': 'your-bucket-name',
-    'domain': 'your-custom-domain',  # 可选
-}
-```
+或者查看 `secrets.toml.example` 文件中的完整配置模板。
+
+**⚠️ 安全提醒**：
+- `.streamlit/secrets.toml` 文件已在 `.gitignore` 中，不会被提交到版本控制
+- 请妥善保管您的COS密钥信息
+- 建议定期更换密钥
 
 ### 4. 运行应用
 
@@ -135,9 +185,17 @@ streamlit run app.py
 ## 故障排除
 
 ### 1. COS连接失败
-- 检查COS配置是否正确
-- 验证网络连接
-- 确认COS权限设置
+- 检查 `.streamlit/secrets.toml` 文件是否存在且配置正确
+- 验证网络连接到腾讯云上海地区
+- 确认COS存储桶 `store-reports-data-1369683907` 的权限设置
+- 检查SECRET_ID和SECRET_KEY是否有效
+- 在管理员面板→系统设置中测试COS连接
+
+### 2. 配置文件问题
+- 确认 `.streamlit/secrets.toml` 文件格式正确
+- 检查TOML语法是否有误
+- 验证所有必需的配置项是否存在
+- 尝试重新从 `secrets.toml.example` 复制配置
 
 ### 2. 文件上传失败
 - 检查文件格式和大小
@@ -163,6 +221,18 @@ streamlit run app.py
 - [Pandas文档](https://pandas.pydata.org/docs/)
 
 ## 更新日志
+
+### v1.1.0
+- 🔐 重构配置管理，使用Streamlit Secrets
+- 🛡️ 增强配置安全性，敏感信息不再出现在代码中
+- 📁 添加配置模板和.gitignore文件
+- 🔄 保持向后兼容性，支持环境变量降级
+- 📖 更新文档和部署指南
+
+### v1.0.1
+- 更新腾讯云COS配置为上海地区
+- 配置信息内置到代码中，简化部署流程
+- 更新文档和示例配置
 
 ### v1.0.0
 - 基础功能实现
