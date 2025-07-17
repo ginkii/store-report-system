@@ -1,4 +1,289 @@
-import streamlit as st
+def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, permissions_file: str) -> bool:
+    """保存权限数据到COS - Excel格式，确保数据完整性"""
+    with error_handler("保存权限数据"):
+        def _save_operation():
+            # 数据验证
+            if df is None or len(df) == 0:
+                raise DataProcessingError("权限数据为空")
+            
+            if len(df.columns) < 2:
+                raise DataProcessingError("权限数据格式错误：需要至少两列（门店名称、人员编号）")
+            
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 创建详细的处理报告
+            processing_report = {
+                'original_rows': len(df),
+                'original_columns': len(df.columns),
+                'processed_rows': 0,
+                'skipped_rows': [],
+                'error_rows': [],
+                'duplicate_rows': [],
+                'empty_rows': [],
+                'step_by_step': []
+            }
+            
+            # 步骤1：显示原始数据统计
+            processing_report['step_by_step'].append(f"步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
+            st.info(f"📊 步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
+            
+            # 显示原始数据预览
+            with st.expander("🔍 步骤1: 原始数据预览（前10行）", expanded=True):
+                st.dataframe(df.head(10), use_container_width=True)
+                st.write(f"**列名**: {df.columns.tolist()}")
+                
+                # 显示数据类型
+                st.write("**数据类型**:")
+                for col in df.columns:
+                    st.write(f"- {col}: {df[col].dtype}")
+            
+            # 步骤2：检查并显示每一行的内容（前20行）
+            processing_report['step_by_step'].append(f"步骤2: 检查前20行数据内容")
+            
+            with st.expander("🔍 步骤2: 详细行内容检查（前20行）", expanded=False):
+                for idx in range(min(20, len(df))):
+                    row = df.iloc[idx]
+                    st.write(f"**第{idx+1}行**: {dict(zip(df.columns, row.values))}")
+            
+            # 步骤3：提取权限列
+            # 确保使用正确的列
+            store_col = df.columns[0]
+            user_col = df.columns[1]
+            
+            # 创建权限数据
+            permissions_data = []
+            permissions_data.append(['门店名称', '人员编号', '更新时间'])
+            
+            processing_report['step_by_step'].append(f"步骤3: 开始逐行处理数据")
+            st.info(f"📊 步骤3: 开始逐行处理 {len(df)} 行数据")
+            
+            # 创建进度条
+            progress_container = st.container()
+            with progress_container:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                detail_text = st.empty()
+            
+            processed_count = 0
+            seen_combinations = set()  # 用于检测重复数据
+            
+            # 逐行处理数据
+            for idx, row in df.iterrows():
+                try:
+                    progress = (idx + 1) / len(df)
+                    progress_bar.progress(progress)
+                    status_text.text(f"处理第 {idx + 1}/{len(df)} 行...")
+                    
+                    # 获取原始值
+                    raw_store = row[store_col] if pd.notna(row[store_col]) else ""
+                    raw_user = row[user_col] if pd.notna(row[user_col]) else ""
+                    
+                    detail_text.text(f"当前行: 门店='{raw_store}', 编号='{raw_user}'")
+                    
+                    # 转换为字符串并清理
+                    store_name = str(raw_store).strip()
+                    user_id = str(raw_user).strip()
+                    
+                    # 记录空行
+                    if (not store_name or store_name in ['nan', 'None']) and \
+                       (not user_id or user_id in ['nan', 'None']):
+                        processing_report['empty_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '门店和编号都为空'
+                        })
+                        continue
+                    
+                    # 检查门店名称
+                    if not store_name or store_name in ['nan', 'None']:
+                        processing_report['skipped_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '门店名称为空'
+                        })
+                        continue
+                    
+                    # 检查人员编号
+                    if not user_id or user_id in ['nan', 'None']:
+                        processing_report['skipped_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '人员编号为空'
+                        })
+                        continue
+                    
+                    # 清理特殊字符但保留更多有效数据
+                    store_name = store_name.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                    user_id = user_id.replace('\n', '').replace('\r', '').replace('\t', '')
+                    
+                    # 去除多余空格
+                    store_name = ' '.join(store_name.split())
+                    user_id = ' '.join(user_id.split())
+                    
+                    # 最终验证
+                    if len(store_name) == 0 or len(user_id) == 0:
+                        processing_report['skipped_rows'].append({
+                            'row': idx + 1,
+                            'store': raw_store,
+                            'user': raw_user,
+                            'reason': '清理后数据为空'
+                        })
+                        continue
+                    
+                    # 检查重复数据
+                    combination = (store_name.lower(), user_id.lower())
+                    if combination in seen_combinations:
+                        processing_report['duplicate_rows'].append({
+                            'row': idx + 1,
+                            'store': store_name,
+                            'user': user_id,
+                            'reason': '重复的门店-编号组合'
+                        })
+                        continue
+                    
+                    seen_combinations.add(combination)
+                    permissions_data.append([store_name, user_id, current_time])
+                    processed_count += 1
+                    
+                except Exception as e:
+                    processing_report['error_rows'].append({
+                        'row': idx + 1,
+                        'store': raw_store if 'raw_store' in locals() else 'N/A',
+                        'user': raw_user if 'raw_user' in locals() else 'N/A',
+                        'reason': f'处理错误: {str(e)}'
+                    })
+                    logger.warning(f"处理第{idx+1}行时出错: {str(e)}")
+                    continue
+            
+            # 清除进度显示
+            progress_container.empty()
+            
+            # 更新处理报告
+            processing_report['processed_rows'] = processed_count
+            processing_report['step_by_step'].append(f"步骤4: 数据处理完成，有效数据 {processed_count} 行")
+            
+            # 显示处理结果
+            st.success(f"✅ 步骤4: 数据处理完成！")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("原始数据", f"{processing_report['original_rows']} 行")
+            with col2:
+                st.metric("成功处理", f"{processed_count} 行", 
+                         delta=f"{processed_count - processing_report['original_rows']}")
+            with col3:
+                skipped_total = len(processing_report['skipped_rows']) + \
+                               len(processing_report['error_rows']) + \
+                               len(processing_report['empty_rows']) + \
+                               len(processing_report['duplicate_rows'])
+                st.metric("跳过数据", f"{skipped_total} 行")
+            
+            # 显示详细处理报告
+            with st.expander("📋 步骤4: 详细处理报告", expanded=True):
+                
+                # 成功处理的数据预览
+                if processed_count > 0:
+                    st.subheader("✅ 成功处理的数据")
+                    processed_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
+                    st.dataframe(processed_df.head(10), use_container_width=True)
+                    if len(processed_df) > 10:
+                        st.caption(f"显示前10条，共{len(processed_df)}条")
+                
+                # 各种过滤情况的详细报告
+                if processing_report['empty_rows']:
+                    st.subheader("⚪ 空行数据")
+                    st.write(f"发现 {len(processing_report['empty_rows'])} 个完全空行")
+                    empty_df = pd.DataFrame(processing_report['empty_rows'])
+                    st.dataframe(empty_df, use_container_width=True)
+                
+                if processing_report['skipped_rows']:
+                    st.subheader("⚠️ 跳过的数据")
+                    skip_df = pd.DataFrame(processing_report['skipped_rows'])
+                    st.dataframe(skip_df, use_container_width=True)
+                
+                if processing_report['duplicate_rows']:
+                    st.subheader("🔄 重复数据")
+                    dup_df = pd.DataFrame(processing_report['duplicate_rows'])
+                    st.dataframe(dup_df, use_container_width=True)
+                
+                if processing_report['error_rows']:
+                    st.subheader("❌ 处理错误的数据")
+                    error_df = pd.DataFrame(processing_report['error_rows'])
+                    st.dataframe(error_df, use_container_width=True)
+            
+            if processed_count == 0:
+                raise DataProcessingError("没有有效的权限数据可以保存")
+            
+            # 步骤5：准备Excel内容
+            processing_report['step_by_step'].append(f"步骤5: 准备Excel内容，共 {len(permissions_data)-1} 条权限记录")
+            st.info(f"📊 步骤5: 准备保存 {len(permissions_data)-1} 条权限记录 (Excel格式)")
+            
+            # 创建Excel文件
+            excel_buffer = io.BytesIO()
+            final_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
+            
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                final_df.to_excel(writer, index=False, sheet_name='权限数据')
+            
+            excel_content = excel_buffer.getvalue()
+            
+            processing_report['step_by_step'].append(f"步骤6: Excel文件生成完成，大小 {len(excel_content)} 字节")
+            st.info(f"📊 步骤6: Excel文件生成完成，大小 {len(excel_content)} 字节")
+            
+            # 显示即将保存的数据预览
+            with st.expander("🔍 步骤6: 即将保存的Excel内容预览", expanded=False):
+                st.write("Excel文件包含以下数据:")
+                st.dataframe(final_df.head(10), use_container_width=True)
+                if len(final_df) > 10:
+                    st.caption(f"显示前10行，共{len(final_df)}行数据")
+            
+            # 步骤7：上传到COS
+            # 更改文件扩展名为.xlsx
+            excel_permissions_file = permissions_file.replace('.csv', '.xlsx')
+            
+            processing_report['step_by_step'].append(f"步骤7: 开始上传到腾讯云COS (Excel格式)")
+            st.info(f"📊 步骤7: 正在上传到腾讯云... (文件: {excel_permissions_file})")
+            
+            with st.spinner("上传中..."):
+                cos_client.put_object(
+                    Bucket=bucket_name,
+                    Body=excel_content,
+                    Key=excel_permissions_file,
+                    ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    Metadata={
+                        'upload-time': current_time,
+                        'record-count': str(processed_count),
+                        'original-count': str(processing_report['original_rows']),
+                        'file-format': 'excel',
+                        'skipped-count': str(len(processing_report['skipped_rows']) + 
+                                              len(processing_report['error_rows']) + 
+                                              len(processing_report['empty_rows']) + 
+                                              len(processing_report['duplicate_rows']))
+                    }
+                )
+            
+            # 步骤8：验证上传结果
+            processing_report['step_by_step'].append(f"步骤8: 上传完成，验证保存结果")
+            st.success(f"✅ 步骤8: 上传完成！")
+            
+            # 立即验证保存的文件
+            try:
+                verify_response = cos_client.get_object(Bucket=bucket_name, Key=excel_permissions_file)
+                verify_content = verify_response['Body'].read()
+                verify_df = pd.read_excel(io.BytesIO(verify_content))
+                
+                st.success(f"🔍 验证成功: COS中已保存 {len(verify_df)} 行数据 (Excel格式)")
+                processing_report['step_by_step'].append(f"步骤9: 验证完成，COS中实际保存 {len(verify_df)} 行")
+                
+                # 显示验证结果
+                with st.expander("✅ 保存验证结果", expanded=False):
+                    st.write(f"**准备保存的行数**: {len(final_df)}")
+                    st.write(f"**COS中的行数**: {len(verify_df)}")
+                    st.write(f"**数据完整性**: {'✅ 完整' if len(final_df) == len(verify_df) else '❌ 不完整'}")
+                    st.write(f"**存储格式**: Excel (.xlsx)")
+                    import streamlit as st
 import pandas as pd
 import io
 import json
@@ -215,7 +500,7 @@ def safe_cos_operation(operation_func, *args, **kwargs):
     return retry_operation(operation_func, *args, **kwargs)
 
 def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, permissions_file: str) -> bool:
-    """保存权限数据到COS - 增强版，包含详细处理日志"""
+    """保存权限数据到COS - 全面诊断版，确保数据完整性"""
     with error_handler("保存权限数据"):
         def _save_operation():
             # 数据验证
@@ -227,7 +512,7 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
             
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # 创建处理报告
+            # 创建详细的处理报告
             processing_report = {
                 'original_rows': len(df),
                 'original_columns': len(df.columns),
@@ -235,44 +520,74 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 'skipped_rows': [],
                 'error_rows': [],
                 'duplicate_rows': [],
-                'empty_rows': []
+                'empty_rows': [],
+                'step_by_step': []
             }
             
-            # 显示原始数据统计
-            st.info(f"📊 原始数据：{len(df)} 行 × {len(df.columns)} 列")
+            # 步骤1：显示原始数据统计
+            processing_report['step_by_step'].append(f"步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
+            st.info(f"📊 步骤1: 接收到原始数据 {len(df)} 行 × {len(df.columns)} 列")
             
             # 显示原始数据预览
-            with st.expander("🔍 原始数据预览（前10行）", expanded=False):
+            with st.expander("🔍 步骤1: 原始数据预览（前10行）", expanded=True):
                 st.dataframe(df.head(10), use_container_width=True)
+                st.write(f"**列名**: {df.columns.tolist()}")
+                
+                # 显示数据类型
+                st.write("**数据类型**:")
+                for col in df.columns:
+                    st.write(f"- {col}: {df[col].dtype}")
             
-            # 准备CSV数据
-            csv_data = []
-            csv_data.append(['门店名称', '人员编号', '更新时间'])
+            # 步骤2：检查并显示每一行的内容（前20行）
+            processing_report['step_by_step'].append(f"步骤2: 检查前20行数据内容")
+            
+            with st.expander("🔍 步骤2: 详细行内容检查（前20行）", expanded=False):
+                for idx in range(min(20, len(df))):
+                    row = df.iloc[idx]
+                    st.write(f"**第{idx+1}行**: {dict(zip(df.columns, row.values))}")
+            
+            # 步骤3：提取权限列
+            # 确保使用正确的列
+            store_col = df.columns[0]
+            user_col = df.columns[1]
+            
+            # 创建权限数据
+            permissions_data = []
+            permissions_data.append(['门店名称', '人员编号', '更新时间'])
+            
+            processing_report['step_by_step'].append(f"步骤3: 开始逐行处理数据")
+            st.info(f"📊 步骤3: 开始逐行处理 {len(df)} 行数据")
+            
+            # 创建进度条
+            progress_container = st.container()
+            with progress_container:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                detail_text = st.empty()
             
             processed_count = 0
             seen_combinations = set()  # 用于检测重复数据
             
-            # 创建进度条
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
+            # 逐行处理数据
             for idx, row in df.iterrows():
-                progress = (idx + 1) / len(df)
-                progress_bar.progress(progress)
-                status_text.text(f"处理第 {idx + 1}/{len(df)} 行...")
-                
                 try:
+                    progress = (idx + 1) / len(df)
+                    progress_bar.progress(progress)
+                    status_text.text(f"处理第 {idx + 1}/{len(df)} 行...")
+                    
                     # 获取原始值
-                    raw_store = row.iloc[0] if pd.notna(row.iloc[0]) else ""
-                    raw_user = row.iloc[1] if pd.notna(row.iloc[1]) else ""
+                    raw_store = row[store_col] if pd.notna(row[store_col]) else ""
+                    raw_user = row[user_col] if pd.notna(row[user_col]) else ""
+                    
+                    detail_text.text(f"当前行: 门店='{raw_store}', 编号='{raw_user}'")
                     
                     # 转换为字符串并清理
                     store_name = str(raw_store).strip()
                     user_id = str(raw_user).strip()
                     
                     # 记录空行
-                    if (not store_name or store_name == 'nan' or store_name == 'None') and \
-                       (not user_id or user_id == 'nan' or user_id == 'None'):
+                    if (not store_name or store_name in ['nan', 'None']) and \
+                       (not user_id or user_id in ['nan', 'None']):
                         processing_report['empty_rows'].append({
                             'row': idx + 1,
                             'store': raw_store,
@@ -282,7 +597,7 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         continue
                     
                     # 检查门店名称
-                    if not store_name or store_name == 'nan' or store_name == 'None':
+                    if not store_name or store_name in ['nan', 'None']:
                         processing_report['skipped_rows'].append({
                             'row': idx + 1,
                             'store': raw_store,
@@ -292,7 +607,7 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         continue
                     
                     # 检查人员编号
-                    if not user_id or user_id == 'nan' or user_id == 'None':
+                    if not user_id or user_id in ['nan', 'None']:
                         processing_report['skipped_rows'].append({
                             'row': idx + 1,
                             'store': raw_store,
@@ -331,7 +646,7 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                         continue
                     
                     seen_combinations.add(combination)
-                    csv_data.append([store_name, user_id, current_time])
+                    permissions_data.append([store_name, user_id, current_time])
                     processed_count += 1
                     
                 except Exception as e:
@@ -344,13 +659,15 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                     logger.warning(f"处理第{idx+1}行时出错: {str(e)}")
                     continue
             
-            progress_bar.empty()
-            status_text.empty()
+            # 清除进度显示
+            progress_container.empty()
             
             # 更新处理报告
             processing_report['processed_rows'] = processed_count
+            processing_report['step_by_step'].append(f"步骤4: 数据处理完成，有效数据 {processed_count} 行")
             
             # 显示处理结果
+            st.success(f"✅ 步骤4: 数据处理完成！")
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("原始数据", f"{processing_report['original_rows']} 行")
@@ -365,71 +682,121 @@ def save_permissions_to_cos(df: pd.DataFrame, cos_client, bucket_name: str, perm
                 st.metric("跳过数据", f"{skipped_total} 行")
             
             # 显示详细处理报告
-            with st.expander("📋 详细处理报告", expanded=True):
+            with st.expander("📋 步骤4: 详细处理报告", expanded=True):
                 
                 # 成功处理的数据预览
                 if processed_count > 0:
                     st.subheader("✅ 成功处理的数据")
-                    processed_df = pd.DataFrame(csv_data[1:], columns=csv_data[0])
+                    processed_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
                     st.dataframe(processed_df.head(10), use_container_width=True)
                     if len(processed_df) > 10:
                         st.caption(f"显示前10条，共{len(processed_df)}条")
                 
-                # 空行报告
+                # 各种过滤情况的详细报告
                 if processing_report['empty_rows']:
                     st.subheader("⚪ 空行数据")
                     st.write(f"发现 {len(processing_report['empty_rows'])} 个完全空行")
-                    if len(processing_report['empty_rows']) <= 5:
-                        for item in processing_report['empty_rows']:
-                            st.caption(f"第{item['row']}行: 门店='{item['store']}', 编号='{item['user']}'")
-                    else:
-                        st.caption(f"显示前5个: {[f'第{item['row']}行' for item in processing_report['empty_rows'][:5]]}")
+                    empty_df = pd.DataFrame(processing_report['empty_rows'])
+                    st.dataframe(empty_df, use_container_width=True)
                 
-                # 跳过的数据报告
                 if processing_report['skipped_rows']:
                     st.subheader("⚠️ 跳过的数据")
                     skip_df = pd.DataFrame(processing_report['skipped_rows'])
                     st.dataframe(skip_df, use_container_width=True)
                 
-                # 重复数据报告
                 if processing_report['duplicate_rows']:
                     st.subheader("🔄 重复数据")
                     dup_df = pd.DataFrame(processing_report['duplicate_rows'])
                     st.dataframe(dup_df, use_container_width=True)
                 
-                # 错误数据报告
                 if processing_report['error_rows']:
                     st.subheader("❌ 处理错误的数据")
                     error_df = pd.DataFrame(processing_report['error_rows'])
                     st.dataframe(error_df, use_container_width=True)
             
             if processed_count == 0:
-                raise DataProcessingError("没有有效的权限数据")
+                raise DataProcessingError("没有有效的权限数据可以保存")
+            
+            # 步骤5：准备CSV内容
+            processing_report['step_by_step'].append(f"步骤5: 准备CSV内容，共 {len(permissions_data)} 行（包含表头）")
+            st.info(f"📊 步骤5: 准备保存 {len(permissions_data)-1} 条权限记录")
             
             # 转换为CSV格式
             csv_buffer = io.StringIO()
-            permissions_df = pd.DataFrame(csv_data[1:], columns=csv_data[0])
-            permissions_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+            final_df = pd.DataFrame(permissions_data[1:], columns=permissions_data[0])
+            final_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
             csv_content = csv_buffer.getvalue()
             
-            # 上传到COS
-            cos_client.put_object(
-                Bucket=bucket_name,
-                Body=csv_content.encode('utf-8-sig'),
-                Key=permissions_file,
-                ContentType='text/csv; charset=utf-8',
-                Metadata={
-                    'upload-time': current_time,
-                    'record-count': str(processed_count),
-                    'original-count': str(processing_report['original_rows']),
-                    'skipped-count': str(len(processing_report['skipped_rows']) + 
-                                          len(processing_report['error_rows']) + 
-                                          len(processing_report['empty_rows']) + 
-                                          len(processing_report['duplicate_rows']))
-                }
-            )
+            # 验证生成的CSV内容
+            csv_lines = csv_content.split('\n')
+            non_empty_lines = [line for line in csv_lines if line.strip()]
+            
+            processing_report['step_by_step'].append(f"步骤6: CSV内容生成完成，{len(non_empty_lines)} 行（包含表头）")
+            st.info(f"📊 步骤6: CSV内容准备完成，{len(non_empty_lines)} 行")
+            
+            # 显示即将保存的CSV预览
+            with st.expander("🔍 步骤6: 即将保存的CSV内容预览", expanded=False):
+                st.text("前10行内容:")
+                for i, line in enumerate(csv_lines[:10]):
+                    if line.strip():
+                        st.code(f"第{i+1}行: {line}")
+            
+            # 步骤7：上传到COS
+            processing_report['step_by_step'].append(f"步骤7: 开始上传到腾讯云COS")
+            st.info(f"📊 步骤7: 正在上传到腾讯云...")
+            
+            with st.spinner("上传中..."):
+                cos_client.put_object(
+                    Bucket=bucket_name,
+                    Body=csv_content.encode('utf-8-sig'),
+                    Key=permissions_file,
+                    ContentType='text/csv; charset=utf-8',
+                    Metadata={
+                        'upload-time': current_time,
+                        'record-count': str(processed_count),
+                        'original-count': str(processing_report['original_rows']),
+                        'csv-lines': str(len(non_empty_lines)),
+                        'skipped-count': str(len(processing_report['skipped_rows']) + 
+                                              len(processing_report['error_rows']) + 
+                                              len(processing_report['empty_rows']) + 
+                                              len(processing_report['duplicate_rows']))
+                    }
+                )
+            
+            # 步骤8：验证上传结果
+            processing_report['step_by_step'].append(f"步骤8: 上传完成，验证保存结果")
+            st.success(f"✅ 步骤8: 上传完成！")
+            
+            # 立即验证保存的文件
+            try:
+                verify_response = cos_client.get_object(Bucket=bucket_name, Key=permissions_file)
+                verify_content = verify_response['Body'].read().decode('utf-8-sig')
+                verify_lines = verify_content.split('\n')
+                verify_non_empty = [line for line in verify_lines if line.strip()]
+                
+                st.success(f"🔍 验证成功: COS中已保存 {len(verify_non_empty)} 行数据")
+                processing_report['step_by_step'].append(f"步骤9: 验证完成，COS中实际保存 {len(verify_non_empty)} 行")
+                
+                # 显示验证结果
+                with st.expander("✅ 保存验证结果", expanded=False):
+                    st.write(f"**上传的行数**: {len(non_empty_lines)}")
+                    st.write(f"**COS中的行数**: {len(verify_non_empty)}")
+                    st.write(f"**数据完整性**: {'✅ 完整' if len(non_empty_lines) == len(verify_non_empty) else '❌ 不完整'}")
+                    
+                    st.text("COS中保存的前5行:")
+                    for i, line in enumerate(verify_lines[:5]):
+                        if line.strip():
+                            st.code(f"第{i+1}行: {line}")
+                            
+            except Exception as e:
+                st.warning(f"⚠️ 无法验证保存结果: {str(e)}")
             
             logger.info(f"权限数据保存成功: {processed_count} 条记录 (原始: {processing_report['original_rows']} 条)")
+            
+            # 显示完整的处理日志
+            with st.expander("📋 完整处理日志", expanded=False):
+                for step in processing_report['step_by_step']:
+                    st.text(step)
             
             # 清除相关缓存
             clear_permissions_cache()
