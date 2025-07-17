@@ -97,7 +97,7 @@ class QueryHandler:
             return []
     
     def get_store_preview(self, store_name: str, rows: int = 5) -> Optional[Dict[str, Any]]:
-        """获取门店数据预览"""
+        """获取门店数据预览（按需加载）"""
         try:
             # 获取当前报表文件
             current_report = self.json_handler.get_current_report()
@@ -114,8 +114,8 @@ class QueryHandler:
             if not file_content:
                 return None
             
-            # 使用优化的预览方法
-            preview_data = self.excel_parser.get_sheet_preview(file_content, store_name, rows)
+            # 使用按需加载获取预览
+            preview_data = self.excel_parser.get_sheet_preview_on_demand(file_content, store_name, rows)
             return preview_data
                 
         except Exception as e:
@@ -134,7 +134,7 @@ class QueryHandler:
         return True
     
     def search_code_in_store(self, store_name: str, search_code: str, fuzzy_match: bool = True) -> Optional[Dict[str, Any]]:
-        """在指定门店中搜索编码"""
+        """在指定门店中搜索编码（按需加载）"""
         try:
             # 权限验证
             if not self.permission_handler.check_permission(store_name, search_code):
@@ -171,8 +171,9 @@ class QueryHandler:
                 st.error(f"工作表 {store_name} 不存在")
                 return None
             
-            # 使用优化的搜索方法
-            matches = self.excel_parser.search_in_sheet(file_content, store_name, search_code, fuzzy_match)
+            # 使用按需搜索方法
+            with st.spinner(f"正在 {store_name} 中搜索 {search_code}..."):
+                matches = self.excel_parser.search_in_sheet_on_demand(file_content, store_name, search_code, fuzzy_match)
             
             # 更新查询统计
             self._update_query_stats(store_name)
