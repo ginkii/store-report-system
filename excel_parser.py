@@ -234,16 +234,4 @@ class ExcelParser:
         """向后兼容的方法"""
         return self.get_sheet_basic_info_on_demand(file_content, sheet_name)
         
-    # 废弃的方法（保持兼容性）
-    def build_sheet_index(self, file_content: bytes) -> Generator[Dict[str, Any], None, None]:
-        """已废弃：现在使用按需加载"""
-        st.warning("build_sheet_index 方法已废弃，现在使用按需加载模式")
-        return iter([])
-    
-    def get_file_statistics_fast(self, file_content: bytes) -> Dict[str, Any]:
-        """重定向到新的快速统计方法"""
-        return self.get_file_statistics_for_upload(file_content)
-    
-    def _get_detailed_statistics(self, file_content: bytes, sheet_names: List[str]) -> Dict[str, Any]:
-        """已废弃：现在使用快速模式"""
-        return self.get_file_statistics_for_upload(file_content)
+   
