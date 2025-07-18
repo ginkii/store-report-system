@@ -1,8 +1,27 @@
+# 门店报表查询系统依赖包
+
+# 核心框架
 streamlit>=1.28.0
-pandas>=1.5.0
-openpyxl>=3.0.0
-cos-python-sdk-v5>=1.9.0
-python-dateutil>=2.8.0
-xlrd>=2.0.0
-requests>=2.25.0
-urllib3>=1.26.0
+pandas>=2.0.0
+
+# Excel处理
+openpyxl>=3.1.0
+
+# 腾讯云COS SDK
+cos-python-sdk-v5>=1.9.24
+
+# 数据处理
+python-dateutil>=2.8.2
+numpy>=1.24.0
+
+# 系统工具
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# 可选依赖（性能优化）
+xlrd>=2.0.1
+pillow>=10.0.0
+
+# 开发依赖（可选）
+# pytest>=7.0.0
+# black>=23.0.0
