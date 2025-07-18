@@ -12,7 +12,7 @@ try:
         APP_CONFIG, STREAMLIT_CONFIG, ADMIN_PASSWORD, 
         validate_config, get_cos_config, check_cos_connectivity,
         export_config_template, generate_cos_policy_example,
-        get_secrets_status, check_secrets_available
+        get_secrets_status, check_secrets_available, detect_environment
     )
 except ImportError:
     # 如果config模块不存在，使用内置配置
@@ -66,6 +66,14 @@ except ImportError as e:
                 return None
             def test_connection(self):
                 return False
+            def get_storage_info(self):
+                return {
+                    'connection_status': 'disconnected',
+                    'total_files': 0,
+                    'region': 'N/A'
+                }
+            def get_file_info(self, file_path):
+                return None
         
         storage_handler = EmptyStorageHandler()
         STORAGE_TYPE = "NONE"
@@ -78,7 +86,7 @@ try:
     HAS_PERMISSION_HANDLER = True
 except ImportError:
     # 简化的权限处理器
-    class PermissionHandler:
+    class SimplePermissionHandler:
         def get_permission_statistics(self):
             return {
                 'has_permissions': False,
@@ -166,55 +174,6 @@ class ReportQueryApp:
             self.permission_handler = PermissionHandler()
             self.has_permission_handler = True
         else:
-            # 简化的权限处理器
-            class SimplePermissionHandler:
-                def get_permission_statistics(self):
-                    return {
-                        'has_permissions': False,
-                        'total_records': 0,
-                        'unique_stores': 0,
-                        'unique_codes': 0,
-                        'file_info': {}
-                    }
-                
-                def validate_permission_file(self, file_content):
-                    return True, "文件格式正确"
-                
-                def get_file_statistics(self, file_content):
-                    return {
-                        'total_rows': 100,
-                        'valid_records': 95,
-                        'unique_stores': 10,
-                        'unique_codes': 50
-                    }
-                
-                def parse_permission_file(self, file_content):
-                    return True, [{'store': '门店A', 'code': 'CODE001'}], "解析成功"
-                
-                def validate_permissions_with_stores(self, available_stores):
-                    return {
-                        'valid': True,
-                        'invalid_stores': [],
-                        'orphaned_permissions': 0,
-                        'available_stores': len(available_stores),
-                        'total_permission_stores': 5
-                    }
-                
-                def upload_permission_file(self, file_content, filename):
-                    return f"permissions/{filename}"
-                
-                def update_permissions(self, file_path, permissions, filename, file_size):
-                    return True
-                
-                def get_permissions_preview(self, limit=20):
-                    return [{'store': '门店A', 'code': 'CODE001'}]
-                
-                def export_permissions(self):
-                    return b'dummy_excel_content'
-                
-                def clear_permissions(self):
-                    return True
-            
             self.permission_handler = SimplePermissionHandler()
             self.has_permission_handler = False
         
