@@ -11,36 +11,25 @@ try:
     from config import (
         APP_CONFIG, STREAMLIT_CONFIG, ADMIN_PASSWORD, 
         validate_config, get_cos_config, check_cos_connectivity,
-        export_config_template, generate_cos_policy_example
+        export_config_template, generate_cos_policy_example,
+        get_secrets_status, check_secrets_available
     )
 except ImportError:
     # 如果config模块不存在，使用内置配置
-    APP_CONFIG = {
-        'max_file_size': 10 * 1024 * 1024,  # 10MB
-        'upload_folder': 'uploads'
-    }
-    STREAMLIT_CONFIG = {
-        'page_title': '门店报表查询系统',
-        'page_icon': '📊',
-        'layout': 'wide',
-        'initial_sidebar_state': 'expanded'
-    }
-    ADMIN_PASSWORD = 'admin123'
+    st.error("❌ 配置模块不可用，请检查 config.py 文件")
+    st.stop()
+
+# 检查 Streamlit Secrets 配置状态
+if not check_secrets_available():
+    st.error("❌ Streamlit Secrets 未配置")
+    st.error("请在 Streamlit Cloud 的 Secrets 管理中配置，或创建本地 .streamlit/secrets.toml 文件")
     
-    def validate_config():
-        return True, []
+    with st.expander("📋 配置模板"):
+        template = export_config_template()
+        st.code(template, language="toml")
     
-    def get_cos_config():
-        return {}
-    
-    def check_cos_connectivity():
-        return {'connected': False, 'error': 'Config module not found'}
-    
-    def export_config_template():
-        return "# Config module not available"
-    
-    def generate_cos_policy_example():
-        return {"error": "Config module not available"}
+    st.info("💡 配置完成后请刷新页面")
+    st.stop()
 
 from json_handler import JSONHandler
 
@@ -1090,15 +1079,38 @@ COS_BUCKET=your-bucket-name
             st.json(system_status)
         
         # 配置验证
-        st.subheader("⚙️ 配置验证")
+        st.subheader("⚙️ Streamlit Secrets 配置")
         
-        # 显示当前存储类型
+        # 检查 Secrets 状态
+        secrets_status = get_secrets_status()
+        
         col1, col2 = st.columns(2)
         with col1:
-            if STORAGE_TYPE == "COS":
-                st.success(f"☁️ 当前使用腾讯云COS存储")
+            if secrets_status['available']:
+                st.success("✅ Streamlit Secrets 已启用")
                 
-                # COS配置验证
+                # 显示配置状态
+                if secrets_status['status'] == 'complete':
+                    st.success("🎉 所有必需配置已完成")
+                elif secrets_status['status'] == 'partial':
+                    st.warning("⚠️ 部分配置缺失")
+                else:
+                    st.error("❌ 配置存在错误")
+                
+                # 显示已配置的sections
+                if secrets_status['configured_sections']:
+                    st.info(f"✅ 已配置: {', '.join(secrets_status['configured_sections'])}")
+                
+                # 显示缺失的sections
+                if secrets_status['missing_sections']:
+                    st.warning(f"⚠️ 缺失: {', '.join(secrets_status['missing_sections'])}")
+            else:
+                st.error("❌ Streamlit Secrets 未配置")
+                st.error("请配置 Secrets 后刷新页面")
+        
+        with col2:
+            # COS配置验证
+            if secrets_status['available']:
                 is_valid, errors = validate_config()
                 if is_valid:
                     st.success("✅ COS配置验证通过")
@@ -1106,14 +1118,9 @@ COS_BUCKET=your-bucket-name
                     st.error("❌ COS配置验证失败")
                     for error in errors:
                         st.error(f"• {error}")
-            else:
-                st.info(f"💾 当前使用{STORAGE_TYPE}存储")
-                st.warning("⚠️ 建议配置腾讯云COS以支持多地域访问")
-        
-        with col2:
-            # 网络连通性检查
-            if st.button("🌐 检查COS连通性"):
-                if STORAGE_TYPE == "COS":
+                
+                # 网络连通性检查
+                if st.button("🌐 检查COS连通性"):
                     with st.spinner("正在检查网络连通性..."):
                         connectivity = check_cos_connectivity()
                         
@@ -1121,11 +1128,26 @@ COS_BUCKET=your-bucket-name
                             st.success(f"✅ COS连接正常 (延迟: {connectivity['latency']}ms)")
                         else:
                             st.error(f"❌ COS连接失败: {connectivity.get('error', '未知错误')}")
-                else:
-                    st.info("💾 本地存储模式，无需网络连接")
+        
+        # Secrets配置模板
+        with st.expander("📋 Streamlit Secrets 配置模板"):
+            st.write("**使用方法：**")
+            st.write("1. **Streamlit Cloud**: 复制以下内容到 Settings > Secrets")
+            st.write("2. **本地开发**: 保存为 `.streamlit/secrets.toml` 文件")
+            
+            template = export_config_template()
+            st.code(template, language="toml")
+            
+            # 提供下载链接
+            st.download_button(
+                label="📥 下载配置模板",
+                data=template,
+                file_name="secrets.toml",
+                mime="text/plain"
+            )
         
         # COS详细配置信息
-        if STORAGE_TYPE == "COS":
+        if secrets_status['available'] and 'COS' in secrets_status['configured_sections']:
             with st.expander("☁️ COS配置详情"):
                 cos_config = get_cos_config()
                 
@@ -1148,7 +1170,7 @@ COS_BUCKET=your-bucket-name
                     st.info(f"超时设置: {safe_config.get('timeout', 60)}秒")
                 
                 # COS权限检查
-                if st.button("🔐 检查COS权限"):
+                if STORAGE_TYPE == "COS" and st.button("🔐 检查COS权限"):
                     with st.spinner("正在检查COS桶权限..."):
                         bucket_policy = self.storage_handler.check_bucket_policy()
                         
@@ -1173,16 +1195,53 @@ COS_BUCKET=your-bucket-name
                         else:
                             st.error("❌ COS桶不可访问")
                             st.error(f"错误: {bucket_policy.get('error', '未知错误')}")
-            
-            # COS配置指南
-            with st.expander("📋 COS配置指南"):
-                st.write("**环境变量配置：**")
-                template = export_config_template()
-                st.code(template, language="bash")
-                
-                st.write("**权限策略示例：**")
+        
+        # COS权限策略示例
+        if secrets_status['available']:
+            with st.expander("🔐 COS权限策略示例"):
+                st.write("**在腾讯云控制台中配置以下权限策略：**")
                 policy_example = generate_cos_policy_example()
                 st.json(policy_example)
+                
+                st.write("**配置步骤：**")
+                st.write("1. 登录腾讯云控制台")
+                st.write("2. 进入 COS 控制台 > 存储桶列表")
+                st.write("3. 选择存储桶 > 权限管理 > Policy权限设置")
+                st.write("4. 添加策略，复制上述JSON内容")
+        
+        # 部署环境检测
+        st.subheader("🌍 部署环境")
+        
+        environment = detect_environment()
+        if environment == 'streamlit_cloud':
+            st.success("☁️ 检测到 Streamlit Cloud 环境")
+            st.info("💡 建议使用 Streamlit Secrets 管理配置")
+        elif environment == 'local':
+            st.info("💻 检测到本地开发环境")
+            st.info("💡 请创建 .streamlit/secrets.toml 文件")
+        else:
+            st.info(f"🔧 检测到 {environment} 环境")
+            
+        # 存储类型状态
+        col1, col2 = st.columns(2)
+        with col1:
+            if STORAGE_TYPE == "COS":
+                st.success(f"☁️ 当前使用腾讯云COS存储")
+            else:
+                st.info(f"💾 当前使用{STORAGE_TYPE}存储")
+                st.warning("⚠️ 建议配置腾讯云COS以支持多地域访问")
+        
+        with col2:
+            # 显示存储统计
+            if storage_available:
+                storage_info = self.storage_handler.get_storage_info()
+                connection_status = storage_info.get('connection_status', 'unknown')
+                if connection_status == 'connected':
+                    st.success("✅ 存储连接正常")
+                else:
+                    st.error("❌ 存储连接异常")
+                
+                st.info(f"已存储文件: {storage_info.get('total_files', 0)}个")
         
         # 连接测试
         st.subheader("连接测试")
