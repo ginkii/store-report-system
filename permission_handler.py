@@ -3,9 +3,15 @@ import streamlit as st
 import io
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
+import openpyxl
+from openpyxl import load_workbook
+import gc  # 垃圾回收
 
 class PermissionHandler:
     def __init__(self):
+        # 文件大小限制
+        self.max_file_size = 5 * 1024 * 1024  # 5MB，权限表通常较小
+        
         # 导入时动态选择存储处理器
         try:
             from cos_handler import COSHandler
@@ -19,67 +25,161 @@ class PermissionHandler:
         from json_handler import JSONHandler
         self.json_handler = JSONHandler()
     
-    def validate_permission_file(self, file_content: bytes) -> Tuple[bool, str]:
-        """验证权限表文件格式"""
+    def validate_permission_file(self, file_content: bytes, progress_callback=None) -> Tuple[bool, str]:
+        """验证权限表文件格式 - openpyxl优化版本"""
         try:
-            # 尝试读取Excel文件
-            df = pd.read_excel(io.BytesIO(file_content))
+            if progress_callback:
+                progress_callback(10, "正在验证文件格式...")
             
-            # 检查是否有数据
-            if df.empty:
-                return False, "文件为空"
+            # 文件大小检查
+            if len(file_content) > self.max_file_size:
+                return False, f"文件大小超过限制 ({self.max_file_size // (1024*1024)}MB)"
             
-            # 检查列数
-            if len(df.columns) < 2:
-                return False, "文件必须包含至少两列数据"
+            # 文件格式快速验证
+            if len(file_content) < 1024:
+                return False, "文件太小，可能不是有效的Excel文件"
             
-            # 获取前两列作为门店名称和查询编码
-            store_col = df.iloc[:, 0]
-            code_col = df.iloc[:, 1]
+            if progress_callback:
+                progress_callback(30, "正在打开Excel文件...")
             
-            # 检查是否有空值
-            if store_col.isnull().any():
-                return False, "门店名称列存在空值"
-            
-            if code_col.isnull().any():
-                return False, "查询编码列存在空值"
-            
-            # 检查数据类型
-            if not all(isinstance(x, (str, int, float)) for x in store_col):
-                return False, "门店名称格式不正确"
-            
-            if not all(isinstance(x, (str, int, float)) for x in code_col):
-                return False, "查询编码格式不正确"
-            
-            return True, "验证通过"
-            
+            # 使用内存优化的只读模式
+            try:
+                workbook = load_workbook(
+                    io.BytesIO(file_content), 
+                    read_only=True,
+                    data_only=True,
+                    keep_links=False
+                )
+                
+                if progress_callback:
+                    progress_callback(50, "正在检查工作表结构...")
+                
+                # 基本检查
+                if len(workbook.sheetnames) == 0:
+                    workbook.close()
+                    return False, "Excel文件中没有工作表"
+                
+                # 获取第一个工作表
+                worksheet = workbook[workbook.sheetnames[0]]
+                
+                if progress_callback:
+                    progress_callback(70, "正在验证数据结构...")
+                
+                # 检查工作表是否有数据
+                max_row = worksheet.max_row or 0
+                max_col = worksheet.max_column or 0
+                
+                if max_row < 2:  # 至少需要标题行+数据行
+                    workbook.close()
+                    return False, "文件中没有足够的数据行（至少需要2行：标题+数据）"
+                
+                if max_col < 2:  # 至少需要门店名称和查询编码两列
+                    workbook.close()
+                    return False, "文件必须包含至少两列数据（门店名称和查询编码）"
+                
+                if progress_callback:
+                    progress_callback(90, "正在验证数据内容...")
+                
+                # 快速检查前几行数据
+                has_valid_data = False
+                for row_num in range(2, min(6, max_row + 1)):  # 检查前5行数据
+                    store_cell = worksheet.cell(row_num, 1).value
+                    code_cell = worksheet.cell(row_num, 2).value
+                    
+                    if store_cell is not None and code_cell is not None:
+                        store_value = str(store_cell).strip()
+                        code_value = str(code_cell).strip()
+                        
+                        if store_value and code_value and store_value != 'None' and code_value != 'None':
+                            has_valid_data = True
+                            break
+                
+                workbook.close()
+                gc.collect()
+                
+                if not has_valid_data:
+                    return False, "文件中没有找到有效的权限数据"
+                
+                if progress_callback:
+                    progress_callback(100, "文件验证通过")
+                
+                return True, "验证通过"
+                
+            except openpyxl.utils.exceptions.InvalidFileException:
+                return False, "不是有效的Excel文件格式"
+            except Exception as e:
+                return False, f"文件格式验证失败: {str(e)}"
+                
         except Exception as e:
-            return False, f"文件解析失败: {str(e)}"
+            if progress_callback:
+                progress_callback(0, f"验证失败: {str(e)}")
+            return False, f"文件验证过程中出错: {str(e)}"
     
-    def parse_permission_file(self, file_content: bytes) -> Tuple[bool, List[Dict[str, str]], str]:
-        """解析权限表文件"""
+    def parse_permission_file(self, file_content: bytes, progress_callback=None) -> Tuple[bool, List[Dict[str, str]], str]:
+        """解析权限表文件 - openpyxl优化版本"""
         try:
-            # 读取Excel文件
-            df = pd.read_excel(io.BytesIO(file_content))
+            if progress_callback:
+                progress_callback(10, "正在打开权限表文件...")
             
-            # 获取前两列
-            store_col = df.iloc[:, 0]
-            code_col = df.iloc[:, 1]
+            # 内存优化的文件加载
+            workbook = load_workbook(
+                io.BytesIO(file_content), 
+                read_only=True,
+                data_only=True,
+                keep_links=False
+            )
             
-            # 转换为权限记录列表
+            # 获取第一个工作表
+            worksheet = workbook[workbook.sheetnames[0]]
+            max_row = worksheet.max_row or 0
+            
+            if progress_callback:
+                progress_callback(30, f"开始解析数据，共 {max_row-1} 行...")
+            
             permissions = []
-            for i in range(len(df)):
-                store_name = str(store_col.iloc[i]).strip()
-                query_code = str(code_col.iloc[i]).strip()
-                
-                # 跳过空值
-                if not store_name or not query_code or store_name == 'nan' or query_code == 'nan':
+            processed_count = 0
+            valid_count = 0
+            
+            # 跳过第一行（标题行），从第二行开始解析
+            for row_num in range(2, max_row + 1):
+                try:
+                    if progress_callback and processed_count % 10 == 0:  # 每10行更新一次进度
+                        progress = 30 + int((processed_count / (max_row - 1)) * 60)
+                        progress_callback(progress, f"正在解析第 {processed_count+1} 行...")
+                    
+                    # 读取门店名称（第一列）和查询编码（第二列）
+                    store_cell = worksheet.cell(row_num, 1).value
+                    code_cell = worksheet.cell(row_num, 2).value
+                    
+                    # 数据清理和验证
+                    if store_cell is not None and code_cell is not None:
+                        store_name = str(store_cell).strip()
+                        query_code = str(code_cell).strip()
+                        
+                        # 跳过空值和无效值
+                        if (store_name and query_code and 
+                            store_name.lower() not in ['none', 'null', 'nan', ''] and
+                            query_code.lower() not in ['none', 'null', 'nan', '']):
+                            
+                            permissions.append({
+                                'store': store_name,
+                                'code': query_code
+                            })
+                            valid_count += 1
+                    
+                    processed_count += 1
+                    
+                except Exception as e:
+                    # 单行解析失败，记录警告但继续处理
+                    st.warning(f"解析第 {row_num} 行时出错: {str(e)}")
+                    processed_count += 1
                     continue
-                
-                permissions.append({
-                    'store': store_name,
-                    'code': query_code
-                })
+            
+            workbook.close()
+            gc.collect()  # 强制垃圾回收
+            
+            if progress_callback:
+                progress_callback(100, f"解析完成！共处理 {processed_count} 行，有效记录 {valid_count} 条")
             
             if not permissions:
                 return False, [], "解析后没有有效的权限记录"
@@ -87,55 +187,166 @@ class PermissionHandler:
             return True, permissions, f"成功解析 {len(permissions)} 条权限记录"
             
         except Exception as e:
+            if progress_callback:
+                progress_callback(0, f"解析失败: {str(e)}")
             return False, [], f"解析失败: {str(e)}"
     
-    def get_file_statistics(self, file_content: bytes) -> Dict[str, Any]:
-        """获取权限表文件统计信息"""
+    def get_file_statistics(self, file_content: bytes, progress_callback=None) -> Dict[str, Any]:
+        """获取权限表文件统计信息 - openpyxl优化版本"""
         try:
-            df = pd.read_excel(io.BytesIO(file_content))
+            if progress_callback:
+                progress_callback(10, "正在分析文件统计...")
+            
+            # 内存优化的文件加载
+            workbook = load_workbook(
+                io.BytesIO(file_content), 
+                read_only=True,
+                data_only=True,
+                keep_links=False
+            )
+            
+            # 获取第一个工作表
+            worksheet = workbook[workbook.sheetnames[0]]
+            max_row = worksheet.max_row or 0
+            max_col = worksheet.max_column or 0
+            
+            if progress_callback:
+                progress_callback(40, "正在统计数据...")
             
             # 基本统计
-            total_rows = len(df)
+            total_rows = max_row - 1 if max_row > 0 else 0  # 减去标题行
             
-            # 获取前两列
-            store_col = df.iloc[:, 0]
-            code_col = df.iloc[:, 1]
+            # 读取表头
+            headers = []
+            if max_row > 0:
+                for col_num in range(1, min(max_col + 1, 10)):  # 最多读取10列表头
+                    cell_value = worksheet.cell(1, col_num).value
+                    header = str(cell_value).strip() if cell_value is not None else f"列{col_num}"
+                    headers.append(header)
             
-            # 去重统计
-            unique_stores = store_col.nunique()
-            unique_codes = code_col.nunique()
+            if progress_callback:
+                progress_callback(70, "正在分析数据质量...")
             
-            # 有效记录数（排除空值）
-            valid_records = len(df.dropna(subset=[df.columns[0], df.columns[1]]))
+            # 快速扫描数据质量（只检查前50行以提高性能）
+            stores_set = set()
+            codes_set = set()
+            valid_records = 0
+            scan_limit = min(max_row, 52)  # 标题行+最多50行数据
+            
+            for row_num in range(2, scan_limit + 1):
+                try:
+                    store_cell = worksheet.cell(row_num, 1).value
+                    code_cell = worksheet.cell(row_num, 2).value
+                    
+                    if store_cell is not None and code_cell is not None:
+                        store_name = str(store_cell).strip()
+                        query_code = str(code_cell).strip()
+                        
+                        if (store_name and query_code and 
+                            store_name.lower() not in ['none', 'null', 'nan', ''] and
+                            query_code.lower() not in ['none', 'null', 'nan', '']):
+                            
+                            stores_set.add(store_name)
+                            codes_set.add(query_code)
+                            valid_records += 1
+                            
+                except Exception:
+                    continue
+            
+            workbook.close()
+            gc.collect()
+            
+            if progress_callback:
+                progress_callback(100, "统计分析完成")
+            
+            # 如果扫描了全部数据，直接返回；否则按比例估算
+            if scan_limit >= max_row:
+                estimated_unique_stores = len(stores_set)
+                estimated_unique_codes = len(codes_set)
+                estimated_valid_records = valid_records
+            else:
+                # 按比例估算（保守估计）
+                scan_ratio = (scan_limit - 1) / total_rows if total_rows > 0 else 1
+                estimated_unique_stores = int(len(stores_set) / scan_ratio * 0.8)  # 保守估计
+                estimated_unique_codes = int(len(codes_set) / scan_ratio * 0.8)
+                estimated_valid_records = int(valid_records / scan_ratio * 0.9)
             
             return {
                 'total_rows': total_rows,
-                'valid_records': valid_records,
-                'unique_stores': unique_stores,
-                'unique_codes': unique_codes,
+                'valid_records': estimated_valid_records,
+                'unique_stores': estimated_unique_stores,
+                'unique_codes': estimated_unique_codes,
                 'file_size': len(file_content),
-                'columns': list(df.columns)
+                'columns': headers,
+                'scanned_rows': min(50, total_rows),
+                'is_estimated': scan_limit < max_row
             }
             
         except Exception as e:
+            if progress_callback:
+                progress_callback(0, f"统计分析失败: {str(e)}")
             st.error(f"获取文件统计失败: {str(e)}")
-            return {}
+            return {
+                'total_rows': 0,
+                'valid_records': 0,
+                'unique_stores': 0,
+                'unique_codes': 0,
+                'file_size': len(file_content),
+                'columns': [],
+                'scanned_rows': 0,
+                'is_estimated': False
+            }
     
-    def upload_permission_file(self, file_content: bytes, file_name: str) -> Optional[str]:
-        """上传权限表文件"""
+    def upload_permission_file(self, file_content: bytes, file_name: str, progress_callback=None) -> Optional[str]:
+        """上传权限表文件 - 支持进度显示"""
         try:
+            if progress_callback:
+                progress_callback(10, "准备上传权限表文件...")
+            
             # 构造存储路径
             folder = "permissions"
-            file_path = self.storage_handler.upload_file(file_content, file_name, folder)
+            
+            # 检查存储处理器是否支持进度回调
+            try:
+                import inspect
+                sig = inspect.signature(self.storage_handler.upload_file)
+                params = list(sig.parameters.keys())
+                
+                if 'progress_callback' in params or len(params) > 4:
+                    def upload_progress_callback(percent, message):
+                        # 上传占用 20-90% 的进度
+                        adjusted_percent = 20 + int(percent * 0.7)
+                        if progress_callback:
+                            progress_callback(adjusted_percent, f"上传中: {message}")
+                    
+                    file_path = self.storage_handler.upload_file(
+                        file_content, file_name, folder, 
+                        progress_callback=upload_progress_callback
+                    )
+                else:
+                    file_path = self.storage_handler.upload_file(file_content, file_name, folder)
+                    if progress_callback:
+                        progress_callback(80, "文件上传完成")
+            except:
+                # 兜底方案：不使用进度回调
+                file_path = self.storage_handler.upload_file(file_content, file_name, folder)
+                if progress_callback:
+                    progress_callback(80, "文件上传完成")
             
             if file_path:
+                if progress_callback:
+                    progress_callback(100, "权限表文件上传成功")
                 st.success(f"权限表文件上传成功: {file_path}")
                 return file_path
             else:
+                if progress_callback:
+                    progress_callback(0, "文件上传失败")
                 st.error("权限表文件上传失败")
                 return None
                 
         except Exception as e:
+            if progress_callback:
+                progress_callback(0, f"上传失败: {str(e)}")
             st.error(f"上传权限表文件失败: {str(e)}")
             return None
     
@@ -150,7 +361,8 @@ class PermissionHandler:
                     'file_path': file_path,
                     'upload_time': datetime.now().isoformat(),
                     'file_size': file_size,
-                    'total_records': len(permissions)
+                    'total_records': len(permissions),
+                    'storage_type': self.storage_type
                 },
                 'permissions': permissions
             }
@@ -261,7 +473,9 @@ class PermissionHandler:
                 return {
                     'valid': True,
                     'invalid_stores': [],
-                    'orphaned_permissions': 0
+                    'orphaned_permissions': 0,
+                    'total_permission_stores': 0,
+                    'available_stores': len(available_stores)
                 }
             
             permissions = permissions_data.get('permissions', [])
@@ -290,7 +504,9 @@ class PermissionHandler:
             return {
                 'valid': False,
                 'invalid_stores': [],
-                'orphaned_permissions': 0
+                'orphaned_permissions': 0,
+                'total_permission_stores': 0,
+                'available_stores': len(available_stores)
             }
     
     def clear_permissions(self) -> bool:
@@ -302,7 +518,7 @@ class PermissionHandler:
             return False
     
     def export_permissions(self) -> Optional[bytes]:
-        """导出权限表为Excel"""
+        """导出权限表为Excel - 使用openpyxl优化"""
         try:
             permissions_data = self.get_current_permissions()
             if not permissions_data:
@@ -312,15 +528,43 @@ class PermissionHandler:
             if not permissions:
                 return None
             
-            # 转换为DataFrame
-            df = pd.DataFrame(permissions)
-            df = df.rename(columns={'store': '门店名称', 'code': '查询编码'})
+            # 使用openpyxl直接创建Excel文件以提高性能
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
             
-            # 导出为Excel
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "权限表"
+            
+            # 设置表头
+            headers = ['门店名称', '查询编码']
+            for col_num, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_num, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center")
+            
+            # 写入数据
+            for row_num, permission in enumerate(permissions, 2):
+                ws.cell(row=row_num, column=1, value=permission.get('store', ''))
+                ws.cell(row=row_num, column=2, value=permission.get('code', ''))
+            
+            # 自动调整列宽
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # 保存为字节流
             output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='权限表', index=False)
-            
+            wb.save(output)
             return output.getvalue()
             
         except Exception as e:
