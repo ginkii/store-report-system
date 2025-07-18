@@ -8,11 +8,15 @@ from typing import Optional
 
 # 导入自定义模块
 try:
-    from config import APP_CONFIG, STREAMLIT_CONFIG, ADMIN_PASSWORD, validate_config
+    from config import (
+        APP_CONFIG, STREAMLIT_CONFIG, ADMIN_PASSWORD, 
+        validate_config, get_cos_config, check_cos_connectivity,
+        export_config_template, generate_cos_policy_example
+    )
 except ImportError:
-    # 如果config模块不存在，使用默认配置
+    # 如果config模块不存在，使用内置配置
     APP_CONFIG = {
-        'max_file_size': 50 * 1024 * 1024,  # 50MB
+        'max_file_size': 10 * 1024 * 1024,  # 10MB
         'upload_folder': 'uploads'
     }
     STREAMLIT_CONFIG = {
@@ -22,127 +26,62 @@ except ImportError:
         'initial_sidebar_state': 'expanded'
     }
     ADMIN_PASSWORD = 'admin123'
+    
     def validate_config():
-        return True
+        return True, []
+    
+    def get_cos_config():
+        return {}
+    
+    def check_cos_connectivity():
+        return {'connected': False, 'error': 'Config module not found'}
+    
+    def export_config_template():
+        return "# Config module not available"
+    
+    def generate_cos_policy_example():
+        return {"error": "Config module not available"}
 
 from json_handler import JSONHandler
 
+# 导入修复后的 ExcelParser 和 QueryHandler
 try:
     from excel_parser import ExcelParser
-except ImportError:
-    # 简化的Excel解析器
-    class ExcelParser:
-        def __init__(self):
-            self.cache = {}
-        
-        def validate_excel_file(self, file_content):
-            return True
-        
-        def get_file_statistics(self, file_content):
-            return {
-                'total_sheets': 1,
-                'file_size': len(file_content),
-                'sheets_info': [{'name': 'Sheet1', 'has_data': True, 'rows': 100, 'columns': 10}],
-                'sheet_names': ['Sheet1']
-            }
-        
-        def get_sheet_names_fast(self, file_content):
-            return ['Sheet1']
-        
-        def get_cache_info(self):
-            return {
-                'sheet_data_cache_size': 0,
-                'max_cache_size': 100,
-                'cached_sheets': []
-            }
-        
-        def clear_cache(self):
-            self.cache.clear()
-
-try:
     from query_handler import QueryHandler
-except ImportError:
-    # 简化的查询处理器
-    class QueryHandler:
-        def __init__(self):
-            pass
-        
-        def get_available_stores(self):
-            return ['门店A', '门店B', '门店C']
-        
-        def get_system_status(self):
-            return {
-                'stores_count': 3,
-                'total_queries': 0,
-                'history_count': 0,
-                'cos_connection': True,
-                'file_accessible': True,
-                'last_updated': None,
-                'system_time': datetime.now().isoformat()
-            }
-        
-        def validate_search_code(self, code):
-            return bool(code and code.strip())
-        
-        def search_code_in_store(self, store_name, search_code, fuzzy_match=True):
-            return {
-                'match_count': 1,
-                'sheet_name': store_name,
-                'search_code': search_code,
-                'matches': [
-                    {
-                        'row_index': 0,
-                        'column': 'A',
-                        'matched_value': search_code,
-                        'row_data': {'A': search_code, 'B': '测试数据'}
-                    }
-                ]
-            }
-        
-        def get_store_preview(self, store_name, limit=5):
-            return {
-                'total_rows': 100,
-                'total_columns': 5,
-                'preview_data': [
-                    {'A': '数据1', 'B': '数据2', 'C': '数据3'},
-                    {'A': '数据4', 'B': '数据5', 'C': '数据6'}
-                ]
-            }
-        
-        def export_search_results(self, search_results):
-            return b'dummy_excel_content'
-        
-        def get_query_history(self, limit=20):
-            return [
-                {'store_name': '门店A', 'query_count': 5, 'last_query_time': '2025-01-01 12:00:00'},
-                {'store_name': '门店B', 'query_count': 3, 'last_query_time': '2025-01-01 11:00:00'}
-            ]
+except ImportError as e:
+    st.error(f"无法导入核心模块: {str(e)}")
+    st.error("请确保 excel_parser.py 和 query_handler.py 文件存在且正确")
+    st.stop()
 
-# 尝试导入 COS 处理器，如果失败则使用本地存储
+# 尝试导入 COS 处理器，优先使用COS存储
 try:
     from cos_handler import COSHandler
     storage_handler = COSHandler()
     STORAGE_TYPE = "COS"
+    storage_available = True
 except ImportError as e:
     st.warning(f"COS 模块导入失败: {str(e)}")
     try:
         from local_storage_handler import LocalStorageHandler
         storage_handler = LocalStorageHandler()
         STORAGE_TYPE = "LOCAL"
+        storage_available = True
+        st.info("💾 当前使用本地存储模式，建议配置腾讯云COS以支持多地域访问")
     except ImportError:
-        # 简化的本地存储处理器
-        class LocalStorageHandler:
-            def upload_file(self, file_content, filename, folder):
-                return f"local/{filename}"
-            
-            def download_file(self, file_path):
-                return b'dummy_content'
-            
+        # 最后的备选方案
+        class EmptyStorageHandler:
+            def upload_file(self, *args, **kwargs):
+                st.error("❌ 存储系统未配置，请联系管理员")
+                return None
+            def download_file(self, *args, **kwargs):
+                return None
             def test_connection(self):
-                return True
+                return False
         
-        storage_handler = LocalStorageHandler()
-        STORAGE_TYPE = "LOCAL"
+        storage_handler = EmptyStorageHandler()
+        STORAGE_TYPE = "NONE"
+        storage_available = False
+        st.error("❌ 存储系统不可用，请配置腾讯云COS或本地存储")
 
 # 权限处理器
 try:
@@ -200,13 +139,30 @@ except ImportError:
     
     HAS_PERMISSION_HANDLER = False
 
-# 页面配置
+# 页面配置 - 优化大文件上传
 st.set_page_config(
     page_title=STREAMLIT_CONFIG['page_title'],
     page_icon=STREAMLIT_CONFIG['page_icon'],
     layout=STREAMLIT_CONFIG['layout'],
     initial_sidebar_state=STREAMLIT_CONFIG['initial_sidebar_state']
 )
+
+# Streamlit 配置优化
+if hasattr(st, 'runtime') and hasattr(st.runtime, 'caching'):
+    # 增加文件上传限制和超时设置
+    import streamlit.runtime.caching.storage
+    import streamlit.web.server.server
+
+# 设置最大上传文件大小 (10MB)
+try:
+    import streamlit.web.server.server as server
+    server.TORNADO_SETTINGS = getattr(server, 'TORNADO_SETTINGS', {})
+    server.TORNADO_SETTINGS.update({
+        'max_buffer_size': 10 * 1024 * 1024,  # 10MB
+        'max_body_size': 10 * 1024 * 1024,    # 10MB
+    })
+except Exception:
+    pass  # 静默处理配置错误
 
 class ReportQueryApp:
     def __init__(self):
@@ -217,10 +173,60 @@ class ReportQueryApp:
         
         # 权限处理器
         if HAS_PERMISSION_HANDLER:
+            from permission_handler import PermissionHandler
             self.permission_handler = PermissionHandler()
             self.has_permission_handler = True
         else:
-            self.permission_handler = PermissionHandler()  # 使用简化版本
+            # 简化的权限处理器
+            class SimplePermissionHandler:
+                def get_permission_statistics(self):
+                    return {
+                        'has_permissions': False,
+                        'total_records': 0,
+                        'unique_stores': 0,
+                        'unique_codes': 0,
+                        'file_info': {}
+                    }
+                
+                def validate_permission_file(self, file_content):
+                    return True, "文件格式正确"
+                
+                def get_file_statistics(self, file_content):
+                    return {
+                        'total_rows': 100,
+                        'valid_records': 95,
+                        'unique_stores': 10,
+                        'unique_codes': 50
+                    }
+                
+                def parse_permission_file(self, file_content):
+                    return True, [{'store': '门店A', 'code': 'CODE001'}], "解析成功"
+                
+                def validate_permissions_with_stores(self, available_stores):
+                    return {
+                        'valid': True,
+                        'invalid_stores': [],
+                        'orphaned_permissions': 0,
+                        'available_stores': len(available_stores),
+                        'total_permission_stores': 5
+                    }
+                
+                def upload_permission_file(self, file_content, filename):
+                    return f"permissions/{filename}"
+                
+                def update_permissions(self, file_path, permissions, filename, file_size):
+                    return True
+                
+                def get_permissions_preview(self, limit=20):
+                    return [{'store': '门店A', 'code': 'CODE001'}]
+                
+                def export_permissions(self):
+                    return b'dummy_excel_content'
+                
+                def clear_permissions(self):
+                    return True
+            
+            self.permission_handler = SimplePermissionHandler()
             self.has_permission_handler = False
         
         # 初始化session state
@@ -293,108 +299,405 @@ class ReportQueryApp:
                 self.admin_system_settings()
     
     def admin_upload_report(self):
-        """管理员上传报表"""
-        st.subheader("📤 上传汇总报表")
+        """管理员上传报表 - COS优化版本"""
+        st.subheader("📤 上传汇总报表到云存储")
+        
+        # 存储状态检查
+        if not storage_available:
+            st.error("❌ 存储系统未配置")
+            with st.expander("🔧 配置指南"):
+                st.write("**腾讯云COS配置步骤：**")
+                st.code("""
+# 设置环境变量
+export COS_SECRET_ID=your_secret_id
+export COS_SECRET_KEY=your_secret_key
+export COS_REGION=ap-guangzhou
+export COS_BUCKET=your-bucket-name
+                """)
+                st.write("**或创建 .env 文件：**")
+                st.code("""
+COS_SECRET_ID=your_secret_id
+COS_SECRET_KEY=your_secret_key
+COS_REGION=ap-guangzhou
+COS_BUCKET=your-bucket-name
+                """)
+            return
+        
+        # 显示存储状态
+        storage_info = self.storage_handler.get_storage_info()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if STORAGE_TYPE == "COS":
+                st.success(f"☁️ 腾讯云COS ({storage_info.get('region', 'Unknown')})")
+            else:
+                st.info(f"💾 {STORAGE_TYPE} 存储")
+        
+        with col2:
+            connection_status = storage_info.get('connection_status', 'unknown')
+            if connection_status == 'connected':
+                st.success("✅ 连接正常")
+            else:
+                st.error("❌ 连接异常")
+        
+        with col3:
+            st.info(f"已存储文件: {storage_info.get('total_files', 0)}个")
+        
+        # COS连接测试
+        if STORAGE_TYPE == "COS":
+            if st.button("🔗 测试COS连接"):
+                with st.spinner("正在测试COS连接和权限..."):
+                    if self.storage_handler.test_connection():
+                        st.success("✅ COS连接测试成功！读写权限正常")
+                    else:
+                        st.error("❌ COS连接测试失败，请检查配置")
+                        
+                        # 详细诊断
+                        with st.expander("🔍 诊断信息"):
+                            bucket_info = self.storage_handler.check_bucket_policy()
+                            st.json(bucket_info)
+        
+        st.divider()
         
         # 文件上传
         uploaded_file = st.file_uploader(
             "选择汇总报表文件",
             type=['xlsx', 'xls'],
-            help="请选择包含各门店数据的Excel汇总报表"
+            help=f"请选择包含各门店数据的Excel汇总报表（最大{APP_CONFIG['max_file_size']//1024//1024}MB）"
         )
         
         if uploaded_file is not None:
             # 显示文件信息
-            st.info(f"文件名: {uploaded_file.name}")
-            st.info(f"文件大小: {uploaded_file.size / 1024 / 1024:.2f} MB")
+            file_size_mb = uploaded_file.size / 1024 / 1024
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"📁 文件名: {uploaded_file.name}")
+                st.info(f"📊 文件大小: {file_size_mb:.2f} MB")
+            
+            with col2:
+                if STORAGE_TYPE == "COS":
+                    estimated_time = max(2, file_size_mb * 0.5)  # 估算上传时间
+                    st.info(f"⏱️ 预计上传时间: {estimated_time:.0f}秒")
+                    st.info(f"🌐 存储位置: 腾讯云COS")
+                else:
+                    st.info(f"💾 存储位置: 本地临时目录")
             
             # 文件大小检查
             if uploaded_file.size > APP_CONFIG['max_file_size']:
-                st.error(f"文件大小超过限制 ({APP_CONFIG['max_file_size'] / 1024 / 1024:.0f}MB)")
+                st.error(f"❌ 文件大小超过限制 ({APP_CONFIG['max_file_size'] / 1024 / 1024:.0f}MB)")
+                st.info("💡 建议：删除不必要的工作表或减少数据行数")
                 return
             
-            # 读取文件内容
-            file_content = uploaded_file.read()
+            # 创建进度显示区域
+            progress_container = st.container()
             
-            # 验证文件格式
-            if not self.excel_parser.validate_excel_file(file_content):
-                st.error("文件格式无效，请检查文件是否为有效的Excel文件")
-                return
-            
-            # 获取文件统计信息
-            stats = self.excel_parser.get_file_statistics(file_content)
-            
-            # 显示文件统计
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("工作表数量", stats.get('total_sheets', 0))
-            with col2:
-                st.metric("文件大小", f"{stats.get('file_size', 0) / 1024 / 1024:.2f} MB")
-            with col3:
-                sheets_info = stats.get('sheets_info', [])
-                store_count = len([s for s in sheets_info if s.get('has_data', False)]) if sheets_info else 0
-                st.metric("门店数量", store_count)
-            
-            # 显示门店列表
-            sheet_names = stats.get('sheet_names', [])
-            if sheet_names:
-                st.subheader("检测到的门店列表")
+            with progress_container:
+                # 全局进度条和状态
+                main_progress = st.progress(0)
+                main_status = st.empty()
                 
-                # 创建门店信息DataFrame
-                sheets_info = stats.get('sheets_info', [])
-                if sheets_info:
-                    store_df = pd.DataFrame(sheets_info)
-                    if not store_df.empty:
-                        store_df = store_df.rename(columns={
-                            'name': '门店名称',
-                            'rows': '行数',
-                            'columns': '列数',
-                            'has_data': '有数据'
-                        })
-                        st.dataframe(store_df, use_container_width=True)
-                else:
-                    # 如果没有详细信息，只显示名称列表
-                    st.write("检测到的门店：")
-                    for name in sheet_names:
-                        st.write(f"• {name}")
+                # 详细进度（COS上传时显示）
+                detail_progress = st.empty()
+                detail_status = st.empty()
                 
-                # 上传配置
-                st.subheader("上传配置")
-                
-                description = st.text_area(
-                    "报表描述",
-                    value=f"{datetime.now().strftime('%Y年%m月')}门店汇总报表",
-                    help="请输入对此报表的描述"
-                )
-                
-                if st.button("确认上传", type="primary"):
-                    with st.spinner("正在上传文件..."):
-                        # 上传文件
+                try:
+                    # 步骤1: 读取文件内容
+                    main_status.info("🔄 正在读取文件...")
+                    main_progress.progress(5)
+                    
+                    file_content = uploaded_file.read()
+                    
+                    # 步骤2: 文件格式验证
+                    main_status.info("🔍 正在验证文件格式...")
+                    main_progress.progress(10)
+                    
+                    is_valid, validation_message = self.excel_parser.validate_excel_file(file_content)
+                    if not is_valid:
+                        main_status.empty()
+                        main_progress.empty()
+                        st.error(f"❌ {validation_message}")
+                        
+                        with st.expander("💡 解决建议"):
+                            st.write("• 确保文件是有效的 Excel 格式（.xlsx 或 .xls）")
+                            st.write("• 检查文件是否损坏，尝试重新保存")
+                            st.write("• 确保文件不是受保护或加密的")
+                        return
+                    
+                    # 步骤3: Excel文件分析
+                    def excel_progress_callback(percent, message):
+                        adjusted_percent = 10 + int(percent * 0.4)  # 10-50%
+                        main_progress.progress(adjusted_percent)
+                        main_status.info(f"🔬 {message}")
+                    
+                    stats = self.excel_parser.get_file_statistics(file_content, excel_progress_callback)
+                    
+                    if stats['valid_sheets'] == 0:
+                        main_status.empty()
+                        main_progress.empty()
+                        st.error("❌ 文件中没有找到有效的门店数据")
+                        
+                        with st.expander("🔍 文件分析详情"):
+                            st.write(f"总工作表数: {stats['total_sheets']}")
+                            if stats['sheets_info']:
+                                st.write("工作表详情:")
+                                for sheet_info in stats['sheets_info']:
+                                    status = "✅ 有数据" if sheet_info['has_data'] else "❌ 无数据"
+                                    st.write(f"  • {sheet_info['name']}: {sheet_info['rows']}行 x {sheet_info['columns']}列 {status}")
+                        
+                        with st.expander("💡 解决建议"):
+                            st.write("• 确保 Excel 文件中有包含实际数据的工作表")
+                            st.write("• 检查数据是否从第二行开始（第一行为标题）")
+                            st.write("• 删除空白的工作表")
+                        return
+                    
+                    # 步骤4: 云存储上传
+                    main_status.info("☁️ 准备上传到云存储...")
+                    main_progress.progress(55)
+                    
+                    # COS上传进度回调
+                    def cos_progress_callback(percent, message):
+                        # COS上传占用 55-95% 的进度
+                        adjusted_percent = 55 + int(percent * 0.4)
+                        main_progress.progress(adjusted_percent)
+                        main_status.info(f"☁️ {message}")
+                        
+                        # 显示详细的COS上传信息
+                        if STORAGE_TYPE == "COS":
+                            if "分片" in message or "MB" in message:
+                                detail_status.info(f"📦 {message}")
+                            elif percent > 0:
+                                detail_progress.progress(percent / 100)
+                    
+                    # 执行上传
+                    if STORAGE_TYPE == "COS":
+                        file_path = self.storage_handler.upload_file(
+                            file_content,
+                            uploaded_file.name,
+                            APP_CONFIG['upload_folder'],
+                            progress_callback=cos_progress_callback
+                        )
+                    else:
                         file_path = self.storage_handler.upload_file(
                             file_content,
                             uploaded_file.name,
                             APP_CONFIG['upload_folder']
                         )
+                        main_progress.progress(85)
+                        main_status.info("💾 文件已保存到本地存储")
+                    
+                    if not file_path:
+                        main_status.empty()
+                        main_progress.empty()
+                        detail_progress.empty()
+                        detail_status.empty()
                         
-                        if file_path:
-                            # 更新JSON数据
-                            report_info = {
-                                'id': datetime.now().strftime('%Y%m%d_%H%M%S'),
-                                'file_name': uploaded_file.name,
-                                'file_path': file_path,
-                                'description': description,
-                                'file_size': uploaded_file.size,
-                                'version': '1.0'
-                            }
+                        st.error("❌ 文件上传失败")
+                        
+                        if STORAGE_TYPE == "COS":
+                            with st.expander("🔧 COS故障排除"):
+                                st.write("**可能的原因：**")
+                                st.write("• 网络连接不稳定")
+                                st.write("• COS配置错误（密钥、区域、桶名）")
+                                st.write("• COS存储空间不足")
+                                st.write("• 权限不足（无写入权限）")
+                                
+                                if st.button("🔍 重新测试COS连接"):
+                                    with st.spinner("测试中..."):
+                                        if self.storage_handler.test_connection():
+                                            st.success("COS连接正常，请重试上传")
+                                        else:
+                                            st.error("COS连接失败，请检查配置")
+                        
+                        if st.button("🔄 重新尝试上传"):
+                            st.rerun()
+                        return
+                    
+                    # 步骤5: 保存配置信息
+                    main_status.info("💾 正在保存报表配置...")
+                    main_progress.progress(90)
+                    
+                    # 更新JSON数据
+                    report_info = {
+                        'id': datetime.now().strftime('%Y%m%d_%H%M%S'),
+                        'file_name': uploaded_file.name,
+                        'file_path': file_path,
+                        'description': f"{datetime.now().strftime('%Y年%m月')}门店汇总报表",
+                        'file_size': uploaded_file.size,
+                        'version': '1.0',
+                        'upload_method': 'optimized_openpyxl',
+                        'storage_type': STORAGE_TYPE,
+                        'valid_sheets': len(stats['sheet_names'])
+                    }
+                    
+                    sheet_names = stats.get('sheet_names', [])
+                    success = self.json_handler.update_current_report(report_info, sheet_names)
+                    
+                    if success:
+                        # 步骤6: 完成并清理
+                        main_status.success("🎉 报表配置完成！")
+                        main_progress.progress(100)
+                        
+                        # 清除详细进度显示
+                        time.sleep(1)
+                        detail_progress.empty()
+                        detail_status.empty()
+                        main_progress.empty()
+                        main_status.empty()
+                        
+                        # 显示成功信息
+                        st.success("🎉 报表上传并配置成功！")
+                        
+                        # 成功统计显示
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("上传文件", uploaded_file.name)
+                        with col2:
+                            st.metric("有效门店", len(sheet_names))
+                        with col3:
+                            st.metric("文件大小", f"{file_size_mb:.1f}MB")
+                        with col4:
+                            st.metric("存储位置", STORAGE_TYPE)
+                        
+                        st.balloons()
+                        
+                        # 如果是COS，显示文件访问信息
+                        if STORAGE_TYPE == "COS":
+                            with st.expander("☁️ 云存储信息"):
+                                file_info = self.storage_handler.get_file_info(file_path)
+                                if file_info and file_info.get('accessible'):
+                                    st.success("✅ 文件已成功存储到腾讯云COS")
+                                    st.info(f"📍 存储路径: {file_path}")
+                                    st.info(f"🌐 全球用户现在都可以访问此报表")
+                                    
+                                    # 生成访问链接（可选）
+                                    if hasattr(self.storage_handler, 'get_download_url'):
+                                        download_url = self.storage_handler.get_download_url(file_path, expires=3600)
+                                        if download_url:
+                                            st.info("🔗 临时访问链接已生成（1小时有效）")
+                        
+                        # 提供下一步操作
+                        st.info("✨ 现在您可以:")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            if st.button("📊 查看系统统计", use_container_width=True):
+                                st.session_state.admin_goto_stats = True
+                                st.rerun()
+                        
+                        with col2:
+                            if st.button("🔍 测试门店查询", use_container_width=True):
+                                st.session_state.admin_goto_query = True
+                                st.rerun()
+                        
+                        with col3:
+                            if st.button("⚙️ 查看存储状态", use_container_width=True):
+                                storage_detail = self.storage_handler.get_storage_info()
+                                st.json(storage_detail)
+                        
+                    else:
+                        main_status.empty()
+                        main_progress.empty()
+                        detail_progress.empty()
+                        detail_status.empty()
+                        st.error("❌ 保存报表配置失败")
+                        
+                        if st.button("🔄 重新保存配置"):
+                            st.rerun()
+                        
+                except Exception as e:
+                    # 全局错误处理
+                    main_status.empty()
+                    main_progress.empty()
+                    detail_progress.empty()
+                    detail_status.empty()
+                    
+                    st.error(f"❌ 上传过程中出现错误: {str(e)}")
+                    
+                    with st.expander("🔧 错误详情"):
+                        st.code(str(e))
+                        
+                        if STORAGE_TYPE == "COS":
+                            st.write("**COS相关的常见问题：**")
+                            st.write("• 检查网络连接是否稳定")
+                            st.write("• 验证COS配置是否正确")
+                            st.write("• 确认存储桶权限设置")
+                            st.write("• 检查文件大小是否超过COS限制")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("🔄 重新尝试上传"):
+                            st.rerun()
+                    
+                    with col2:
+                        if STORAGE_TYPE == "COS" and st.button("🔧 测试COS连接"):
+                            with st.spinner("测试COS连接..."):
+                                if self.storage_handler.test_connection():
+                                    st.success("COS连接正常")
+                                else:
+                                    st.error("COS连接失败")
+            
+            # 如果没有开始上传，显示详细的文件分析
+            if 'stats' in locals() and stats['valid_sheets'] > 0:
+                st.subheader("🏪 检测到的门店列表")
+                
+                sheet_names = stats.get('sheet_names', [])
+                sheets_info = stats.get('sheets_info', [])
+                
+                if sheets_info:
+                    valid_sheets = [s for s in sheets_info if s.get('has_data', False)]
+                    if valid_sheets:
+                        store_df = pd.DataFrame(valid_sheets)
+                        store_df = store_df.rename(columns={
+                            'name': '门店名称',
+                            'rows': '数据行数',
+                            'columns': '数据列数',
+                            'has_data': '状态'
+                        })
+                        store_df['状态'] = '✅ 有效'
+                        st.dataframe(store_df[['门店名称', '数据行数', '数据列数', '状态']], use_container_width=True)
+                else:
+                    cols = st.columns(min(3, len(sheet_names)))
+                    for i, name in enumerate(sheet_names):
+                        with cols[i % 3]:
+                            st.success(f"🏪 {name}")
+                
+                # 提供自定义配置选项
+                with st.expander("⚙️ 高级上传选项"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        custom_description = st.text_area(
+                            "自定义报表描述",
+                            value=f"{datetime.now().strftime('%Y年%m月')}门店汇总报表",
+                            help="描述此报表的用途和内容"
+                        )
+                    
+                    with col2:
+                        if STORAGE_TYPE == "COS":
+                            st.write("**COS上传选项**")
+                            force_multipart = st.checkbox(
+                                "强制分片上传", 
+                                value=file_size_mb > 5,
+                                help="大文件建议启用分片上传"
+                            )
                             
-                            if self.json_handler.update_current_report(report_info, sheet_names):
-                                st.success("报表上传成功！")
-                                st.success(f"共检测到 {len(sheet_names)} 个门店")
-                                st.balloons()
-                            else:
-                                st.error("更新报表信息失败")
-                        else:
-                            st.error("文件上传失败")
+                            show_cos_details = st.checkbox(
+                                "显示详细上传进度", 
+                                value=True,
+                                help="显示分片上传的详细进度"
+                            )
+        
+        # 处理页面跳转
+        if st.session_state.get('admin_goto_stats'):
+            st.session_state.admin_goto_stats = False
+            # 这里可以添加跳转到统计页面的逻辑
+            st.info("即将跳转到系统统计页面...")
+            
+        if st.session_state.get('admin_goto_query'):
+            st.session_state.admin_goto_query = False
+            # 这里可以添加跳转到查询页面的逻辑
+            st.info("即将跳转到门店查询页面...")
     
     def admin_permission_management(self):
         """管理员权限管理"""
@@ -787,17 +1090,99 @@ class ReportQueryApp:
             st.json(system_status)
         
         # 配置验证
-        st.subheader("配置验证")
+        st.subheader("⚙️ 配置验证")
         
-        st.info(f"当前使用存储类型: {STORAGE_TYPE}")
-        
-        if STORAGE_TYPE == "COS":
-            if validate_config():
-                st.success("✅ COS 配置验证通过")
+        # 显示当前存储类型
+        col1, col2 = st.columns(2)
+        with col1:
+            if STORAGE_TYPE == "COS":
+                st.success(f"☁️ 当前使用腾讯云COS存储")
+                
+                # COS配置验证
+                is_valid, errors = validate_config()
+                if is_valid:
+                    st.success("✅ COS配置验证通过")
+                else:
+                    st.error("❌ COS配置验证失败")
+                    for error in errors:
+                        st.error(f"• {error}")
             else:
-                st.error("❌ COS 配置验证失败，请检查腾讯云COS配置")
-        else:
-            st.success("✅ 本地存储配置验证通过")
+                st.info(f"💾 当前使用{STORAGE_TYPE}存储")
+                st.warning("⚠️ 建议配置腾讯云COS以支持多地域访问")
+        
+        with col2:
+            # 网络连通性检查
+            if st.button("🌐 检查COS连通性"):
+                if STORAGE_TYPE == "COS":
+                    with st.spinner("正在检查网络连通性..."):
+                        connectivity = check_cos_connectivity()
+                        
+                        if connectivity['connected']:
+                            st.success(f"✅ COS连接正常 (延迟: {connectivity['latency']}ms)")
+                        else:
+                            st.error(f"❌ COS连接失败: {connectivity.get('error', '未知错误')}")
+                else:
+                    st.info("💾 本地存储模式，无需网络连接")
+        
+        # COS详细配置信息
+        if STORAGE_TYPE == "COS":
+            with st.expander("☁️ COS配置详情"):
+                cos_config = get_cos_config()
+                
+                # 安全显示配置（隐藏敏感信息）
+                safe_config = cos_config.copy()
+                if safe_config.get('secret_key'):
+                    safe_config['secret_key'] = safe_config['secret_key'][:8] + '****'
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**基础配置**")
+                    st.info(f"地域: {safe_config.get('region_name', 'Unknown')} ({safe_config.get('region', '')})")
+                    st.info(f"存储桶: {safe_config.get('bucket', 'Not Set')}")
+                    st.info(f"密钥ID: {safe_config.get('secret_id', 'Not Set')}")
+                
+                with col2:
+                    st.write("**高级配置**")
+                    st.info(f"分片大小: {safe_config.get('chunk_size', 0) // 1024}KB")
+                    st.info(f"分片阈值: {safe_config.get('multipart_threshold', 0) // 1024 // 1024}MB")
+                    st.info(f"超时设置: {safe_config.get('timeout', 60)}秒")
+                
+                # COS权限检查
+                if st.button("🔐 检查COS权限"):
+                    with st.spinner("正在检查COS桶权限..."):
+                        bucket_policy = self.storage_handler.check_bucket_policy()
+                        
+                        if bucket_policy.get('bucket_accessible'):
+                            st.success("✅ COS桶可访问")
+                            
+                            permissions = bucket_policy.get('permissions', {})
+                            if permissions.get('read'):
+                                st.success("✅ 读权限正常")
+                            else:
+                                st.error("❌ 缺少读权限")
+                            
+                            if permissions.get('write'):
+                                st.success("✅ 写权限正常")
+                            else:
+                                st.error("❌ 缺少写权限")
+                            
+                            if bucket_policy.get('cors_configured'):
+                                st.success("✅ CORS已配置")
+                            else:
+                                st.warning("⚠️ 建议配置CORS")
+                        else:
+                            st.error("❌ COS桶不可访问")
+                            st.error(f"错误: {bucket_policy.get('error', '未知错误')}")
+            
+            # COS配置指南
+            with st.expander("📋 COS配置指南"):
+                st.write("**环境变量配置：**")
+                template = export_config_template()
+                st.code(template, language="bash")
+                
+                st.write("**权限策略示例：**")
+                policy_example = generate_cos_policy_example()
+                st.json(policy_example)
         
         # 连接测试
         st.subheader("连接测试")
@@ -893,26 +1278,93 @@ class ReportQueryApp:
         if indexing_progress['total_sheets'] > 0:
             st.progress(progress_percentage / 100)
         
-        # 缓存管理
-        st.subheader("缓存管理")
+        # 缓存和内存管理
+        st.subheader("💾 缓存和内存管理")
         
         cache_info = self.excel_parser.get_cache_info()
+        memory_info = self.excel_parser.get_memory_usage()
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.info(f"**工作表缓存**: {cache_info['sheet_data_cache_size']}/{cache_info['max_cache_size']}")
+            st.metric("缓存条目", cache_info['sheet_data_cache_size'])
+            st.info(f"最大缓存: {cache_info['max_cache_size']}")
         
         with col2:
-            if st.button("清理缓存"):
+            st.metric("缓存内存", f"{cache_info.get('estimated_cache_size_mb', 0):.1f}MB")
+            st.info(f"内存使用: {memory_info.get('cache_memory_mb', 0):.1f}MB")
+        
+        with col3:
+            st.metric("缓存超时", f"{cache_info['cache_timeout']}秒")
+            st.info(f"最大文件: {memory_info.get('max_file_size_mb', 10)}MB")
+        
+        # 缓存操作
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🧹 清理缓存", use_container_width=True):
                 self.excel_parser.clear_cache()
+                self.query_handler.clear_cache()
                 st.success("✅ 缓存已清理")
                 st.rerun()
+        
+        with col2:
+            if st.button("🔧 优化内存", use_container_width=True):
+                self.excel_parser.optimize_memory()
+                st.success("✅ 内存已优化")
+                st.rerun()
+        
+        with col3:
+            if st.button("📊 内存状态", use_container_width=True):
+                st.json(memory_info)
         
         # 显示缓存详情
         if cache_info['cached_sheets']:
             with st.expander("查看缓存详情"):
+                st.write("已缓存的工作表:")
                 for cached_sheet in cache_info['cached_sheets']:
                     st.text(f"• {cached_sheet}")
+        
+        # 性能监控
+        st.subheader("⚡ 性能监控")
+        
+        # 系统性能指标
+        perf_col1, perf_col2 = st.columns(2)
+        
+        with perf_col1:
+            st.write("**Excel 解析配置**")
+            st.info(f"最大扫描行数: {self.excel_parser.max_rows_to_scan:,}")
+            st.info(f"最大检查列数: {self.excel_parser.max_cols_to_check}")
+            st.info(f"数据检查行数: {self.excel_parser.max_data_check_rows}")
+        
+        with perf_col2:
+            st.write("**缓存配置**")
+            st.info(f"最大缓存条目: {self.excel_parser.max_cache_size}")
+            st.info(f"缓存超时: {self.excel_parser.cache_timeout}秒")
+            st.info(f"预览行数: {self.excel_parser.preview_rows}")
+        
+        # 性能调优选项
+        with st.expander("🔧 性能调优（高级）"):
+            st.warning("⚠️ 修改这些设置可能影响系统性能，请谨慎操作")
+            
+            new_max_rows = st.number_input(
+                "最大扫描行数", 
+                min_value=100, 
+                max_value=5000, 
+                value=self.excel_parser.max_rows_to_scan,
+                help="减少此值可提高处理速度，但可能遗漏数据"
+            )
+            
+            new_cache_size = st.number_input(
+                "最大缓存条目", 
+                min_value=5, 
+                max_value=100, 
+                value=self.excel_parser.max_cache_size,
+                help="增加缓存可提高重复访问速度，但占用更多内存"
+            )
+            
+            if st.button("应用性能设置"):
+                self.excel_parser.max_rows_to_scan = new_max_rows
+                self.excel_parser.max_cache_size = new_cache_size
+                st.success("✅ 性能设置已更新")
         
         # 高级操作
         st.subheader("高级操作")
@@ -927,23 +1379,37 @@ class ReportQueryApp:
         
         with col2:
             if st.button("重建索引", type="secondary"):
-                st.info("正在重建索引...")
-                # 这里可以添加重建索引的逻辑
-                current_report = self.json_handler.get_current_report()
-                if current_report:
-                    file_path = current_report.get('file_path')
-                    if file_path:
-                        file_content = self.storage_handler.download_file(file_path)
-                        if file_content:
-                            sheet_names = self.excel_parser.get_sheet_names_fast(file_content)
-                            # 这里可以添加实际的索引构建逻辑
-                            st.success("索引重建完成")
+                with st.spinner("正在重建索引..."):
+                    try:
+                        current_report = self.json_handler.get_current_report()
+                        if current_report:
+                            file_path = current_report.get('file_path')
+                            if file_path:
+                                file_content = self.storage_handler.download_file(file_path)
+                                if file_content:
+                                    # 重新分析文件并获取门店列表
+                                    stats = self.excel_parser.get_file_statistics(file_content)
+                                    sheet_names = stats.get('sheet_names', [])
+                                    
+                                    if sheet_names:
+                                        # 更新门店工作表信息
+                                        self.json_handler.update_current_report(current_report, sheet_names)
+                                        
+                                        # 清除相关缓存
+                                        self.excel_parser.clear_cache()
+                                        self.query_handler.clear_cache()
+                                        
+                                        st.success(f"索引重建完成，共发现 {len(sheet_names)} 个门店")
+                                    else:
+                                        st.warning("未在文件中找到有效的门店工作表")
+                                else:
+                                    st.error("无法下载文件")
+                            else:
+                                st.error("文件路径不存在")
                         else:
-                            st.error("无法下载文件")
-                    else:
-                        st.error("文件路径不存在")
-                else:
-                    st.error("无当前报表")
+                            st.error("无当前报表")
+                    except Exception as e:
+                        st.error(f"重建索引失败: {str(e)}")
         
         with col3:
             if self.has_permission_handler:
@@ -1018,6 +1484,10 @@ class ReportQueryApp:
                         st.info(f"检测到 {store_sheets_count} 个门店，但查询接口获取失败")
             
             if st.button("🔄 刷新门店列表"):
+                # 刷新门店数据
+                with st.spinner("正在刷新门店列表..."):
+                    self.query_handler.refresh_store_data()
+                    st.success("门店列表已刷新")
                 st.rerun()
             
             return
