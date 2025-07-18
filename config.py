@@ -1,59 +1,75 @@
-# 优化的配置文件 - COS集成版本
-import os
-import json
+# Streamlit Secrets 专用配置文件
+import streamlit as st
 from typing import Dict, Any, Optional
 
-# 应用配置
+def get_secret(section: str, key: str, default: Any = None) -> Any:
+    """从 Streamlit Secrets 安全获取配置值"""
+    try:
+        if hasattr(st, 'secrets') and section in st.secrets:
+            return st.secrets[section].get(key, default)
+        else:
+            return default
+    except Exception:
+        return default
+
+def check_secrets_available() -> bool:
+    """检查 Streamlit Secrets 是否可用"""
+    try:
+        return hasattr(st, 'secrets') and len(st.secrets) > 0
+    except Exception:
+        return False
+
+# 应用配置 - 从 Streamlit Secrets 读取
 APP_CONFIG = {
-    'max_file_size': 10 * 1024 * 1024,  # 10MB - 提升文件大小限制
-    'upload_folder': 'uploads',
-    'temp_folder': 'temp',
-    'backup_folder': 'backups',
+    'max_file_size': get_secret('APP', 'max_file_size', 10 * 1024 * 1024),
+    'upload_folder': get_secret('APP', 'upload_folder', 'uploads'),
+    'temp_folder': get_secret('APP', 'temp_folder', 'temp'),
+    'backup_folder': get_secret('APP', 'backup_folder', 'backups'),
     'allowed_file_types': ['xlsx', 'xls'],
-    'max_concurrent_uploads': 3,
-    'upload_timeout': 300,  # 5分钟超时
-    'cache_ttl': 3600,  # 1小时缓存
+    'max_concurrent_uploads': get_secret('APP', 'max_concurrent_uploads', 3),
+    'upload_timeout': get_secret('APP', 'upload_timeout', 300),
+    'cache_ttl': get_secret('APP', 'cache_ttl', 3600),
 }
 
 # Streamlit 界面配置
 STREAMLIT_CONFIG = {
-    'page_title': '门店报表查询系统',
-    'page_icon': '📊',
-    'layout': 'wide',
-    'initial_sidebar_state': 'expanded',
+    'page_title': get_secret('UI', 'page_title', '门店报表查询系统'),
+    'page_icon': get_secret('UI', 'page_icon', '📊'),
+    'layout': get_secret('UI', 'layout', 'wide'),
+    'initial_sidebar_state': get_secret('UI', 'initial_sidebar_state', 'expanded'),
     'menu_items': {
         'Get Help': None,
         'Report a bug': None,
-        'About': "门店报表查询系统 v2.0 - COS云存储版"
+        'About': "门店报表查询系统 v2.0 - Streamlit Secrets版"
     }
 }
 
-# 管理员密码
-ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
+# 管理员密码 - 从 Streamlit Secrets 读取
+ADMIN_PASSWORD = get_secret('AUTH', 'admin_password', 'admin123')
 
-# 腾讯云 COS 配置 - 增强版本
+# 腾讯云 COS 配置 - 完全基于 Streamlit Secrets
 COS_CONFIG = {
-    'secret_id': os.getenv('COS_SECRET_ID', ''),
-    'secret_key': os.getenv('COS_SECRET_KEY', ''),
-    'region': os.getenv('COS_REGION', 'ap-guangzhou'),
-    'bucket': os.getenv('COS_BUCKET', ''),
-    'domain': os.getenv('COS_DOMAIN', ''),
+    'secret_id': get_secret('COS', 'secret_id', ''),
+    'secret_key': get_secret('COS', 'secret_key', ''),
+    'region': get_secret('COS', 'region', 'ap-guangzhou'),
+    'bucket': get_secret('COS', 'bucket', ''),
+    'domain': get_secret('COS', 'domain', ''),
     
     # 高级配置
-    'timeout': int(os.getenv('COS_TIMEOUT', '60')),
-    'max_retries': int(os.getenv('COS_MAX_RETRIES', '3')),
-    'chunk_size': int(os.getenv('COS_CHUNK_SIZE', str(1024 * 1024))),  # 1MB
-    'enable_multipart': os.getenv('COS_ENABLE_MULTIPART', 'true').lower() == 'true',
-    'multipart_threshold': int(os.getenv('COS_MULTIPART_THRESHOLD', str(5 * 1024 * 1024))),  # 5MB
+    'timeout': int(get_secret('COS', 'timeout', 60)),
+    'max_retries': int(get_secret('COS', 'max_retries', 3)),
+    'chunk_size': int(get_secret('COS', 'chunk_size', 1024 * 1024)),
+    'enable_multipart': get_secret('COS', 'enable_multipart', True),
+    'multipart_threshold': int(get_secret('COS', 'multipart_threshold', 5 * 1024 * 1024)),
     
     # CDN和加速配置
-    'cdn_domain': os.getenv('COS_CDN_DOMAIN', ''),
-    'enable_cdn': os.getenv('COS_ENABLE_CDN', 'false').lower() == 'true',
-    'signed_url_expires': int(os.getenv('COS_SIGNED_URL_EXPIRES', '3600')),  # 1小时
+    'cdn_domain': get_secret('COS', 'cdn_domain', ''),
+    'enable_cdn': get_secret('COS', 'enable_cdn', False),
+    'signed_url_expires': int(get_secret('COS', 'signed_url_expires', 3600)),
     
     # 安全配置
-    'use_https': os.getenv('COS_USE_HTTPS', 'true').lower() == 'true',
-    'verify_ssl': os.getenv('COS_VERIFY_SSL', 'true').lower() == 'true',
+    'use_https': get_secret('COS', 'use_https', True),
+    'verify_ssl': get_secret('COS', 'verify_ssl', True),
 }
 
 # 地域配置优化
@@ -72,81 +88,71 @@ COS_REGIONS = {
     'eu-frankfurt': {'name': '法兰克福', 'endpoint': 'cos.eu-frankfurt.myqcloud.com'},
 }
 
-# 数据库配置（如果使用）
+# 数据库配置
 DATABASE_CONFIG = {
-    'type': 'json',  # 默认使用JSON文件
-    'path': os.getenv('DB_PATH', 'data'),
-    'backup_interval': 24,  # 24小时自动备份
-    'max_backups': 7,  # 保留7个备份
+    'type': 'json',
+    'path': get_secret('DB', 'path', 'data'),
+    'backup_interval': int(get_secret('DB', 'backup_interval', 24)),
+    'max_backups': int(get_secret('DB', 'max_backups', 7)),
 }
 
 # 系统配置
 SYSTEM_CONFIG = {
-    'debug': os.getenv('DEBUG', 'False').lower() == 'true',
-    'log_level': os.getenv('LOG_LEVEL', 'INFO'),
-    'performance_monitoring': True,
-    'auto_cleanup': True,
-    'memory_threshold': 80,  # 内存使用超过80%时清理缓存
-    'network_timeout': 30,   # 网络超时设置
+    'debug': get_secret('SYSTEM', 'debug', False),
+    'log_level': get_secret('SYSTEM', 'log_level', 'INFO'),
+    'performance_monitoring': get_secret('SYSTEM', 'performance_monitoring', True),
+    'auto_cleanup': get_secret('SYSTEM', 'auto_cleanup', True),
+    'memory_threshold': int(get_secret('SYSTEM', 'memory_threshold', 80)),
+    'network_timeout': int(get_secret('SYSTEM', 'network_timeout', 30)),
 }
 
-# Excel 解析配置 - 针对COS优化
+# Excel 解析配置
 EXCEL_CONFIG = {
-    'max_rows_scan': 1000,      # 最大扫描行数
-    'max_cols_scan': 50,        # 最大扫描列数
-    'preview_rows': 5,          # 预览行数
-    'cache_timeout': 300,       # 5分钟缓存
-    'memory_limit': 100,        # 100MB内存限制
-    'chunk_size': 1000,         # 分块处理大小
-    'enable_fast_scan': True,   # 启用快速扫描
-    'optimize_for_cos': True,   # COS优化模式
+    'max_rows_scan': int(get_secret('EXCEL', 'max_rows_scan', 1000)),
+    'max_cols_scan': int(get_secret('EXCEL', 'max_cols_scan', 50)),
+    'preview_rows': int(get_secret('EXCEL', 'preview_rows', 5)),
+    'cache_timeout': int(get_secret('EXCEL', 'cache_timeout', 300)),
+    'memory_limit': int(get_secret('EXCEL', 'memory_limit', 100)),
+    'chunk_size': int(get_secret('EXCEL', 'chunk_size', 1000)),
+    'enable_fast_scan': get_secret('EXCEL', 'enable_fast_scan', True),
+    'optimize_for_cos': get_secret('EXCEL', 'optimize_for_cos', True),
 }
 
 # 搜索配置
 SEARCH_CONFIG = {
-    'max_results': 100,         # 最大搜索结果数
-    'fuzzy_threshold': 0.8,     # 模糊匹配阈值
-    'search_timeout': 30,       # 30秒搜索超时
-    'cache_results': True,      # 缓存搜索结果
+    'max_results': int(get_secret('SEARCH', 'max_results', 100)),
+    'fuzzy_threshold': float(get_secret('SEARCH', 'fuzzy_threshold', 0.8)),
+    'search_timeout': int(get_secret('SEARCH', 'search_timeout', 30)),
+    'cache_results': get_secret('SEARCH', 'cache_results', True),
 }
 
 # 网络配置
 NETWORK_CONFIG = {
-    'connection_timeout': 10,   # 连接超时
-    'read_timeout': 60,         # 读取超时
-    'max_retries': 3,           # 最大重试次数
-    'retry_delay': 2,           # 重试延迟（秒）
-    'enable_keep_alive': True,  # 保持连接
+    'connection_timeout': int(get_secret('NETWORK', 'connection_timeout', 10)),
+    'read_timeout': int(get_secret('NETWORK', 'read_timeout', 60)),
+    'max_retries': int(get_secret('NETWORK', 'max_retries', 3)),
+    'retry_delay': int(get_secret('NETWORK', 'retry_delay', 2)),
+    'enable_keep_alive': get_secret('NETWORK', 'enable_keep_alive', True),
 }
-
-def load_env_file(env_path: str = '.env'):
-    """加载.env文件中的环境变量"""
-    try:
-        if os.path.exists(env_path):
-            with open(env_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#') and '=' in line:
-                        key, value = line.split('=', 1)
-                        os.environ[key.strip()] = value.strip().strip('"\'')
-            return True
-    except Exception as e:
-        print(f"加载.env文件失败: {e}")
-    return False
 
 def validate_config() -> tuple[bool, list[str]]:
     """验证配置是否完整和有效"""
     errors = []
     
+    # 检查 Streamlit Secrets 是否可用
+    if not check_secrets_available():
+        errors.append("Streamlit Secrets 未配置或不可用")
+        return False, errors
+    
     try:
-        # 检查基础配置
+        # 检查管理员密码
         if not ADMIN_PASSWORD or ADMIN_PASSWORD == 'admin123':
-            errors.append("建议修改默认管理员密码")
+            errors.append("请在 Streamlit Secrets 中配置安全的管理员密码")
         
-        # 检查文件大小限制是否合理
+        # 检查文件大小限制
         max_size = APP_CONFIG.get('max_file_size', 0)
-        if max_size < 1024 * 1024:  # 小于1MB
-            errors.append("文件大小限制过小")
+        if max_size < 1024 * 1024:
+            errors.append("文件大小限制配置过小")
         
         # 检查COS配置
         cos_required = ['secret_id', 'secret_key', 'region', 'bucket']
@@ -162,10 +168,6 @@ def validate_config() -> tuple[bool, list[str]]:
         # 验证COS地域
         if COS_CONFIG.get('region') and COS_CONFIG['region'] not in COS_REGIONS:
             errors.append(f"不支持的COS地域: {COS_CONFIG['region']}")
-        
-        # 检查文件类型配置
-        if not APP_CONFIG.get('allowed_file_types'):
-            errors.append("未配置允许的文件类型")
         
         return len(errors) == 0, errors
         
@@ -209,53 +211,6 @@ def get_performance_config() -> dict:
 def get_network_config() -> dict:
     """获取网络配置"""
     return NETWORK_CONFIG.copy()
-
-def update_config(section: str, key: str, value) -> bool:
-    """动态更新配置"""
-    try:
-        config_map = {
-            'app': APP_CONFIG,
-            'streamlit': STREAMLIT_CONFIG,
-            'cos': COS_CONFIG,
-            'excel': EXCEL_CONFIG,
-            'search': SEARCH_CONFIG,
-            'system': SYSTEM_CONFIG,
-            'network': NETWORK_CONFIG,
-        }
-        
-        if section in config_map:
-            config_map[section][key] = value
-            return True
-        
-        return False
-        
-    except Exception:
-        return False
-
-def detect_environment() -> str:
-    """检测运行环境"""
-    if os.getenv('STREAMLIT_SHARING'):
-        return 'streamlit_cloud'
-    elif os.getenv('HEROKU'):
-        return 'heroku'
-    elif os.getenv('DOCKER'):
-        return 'docker'
-    elif os.getenv('KUBERNETES_SERVICE_HOST'):
-        return 'kubernetes'
-    else:
-        return 'local'
-
-def get_optimal_cos_region() -> str:
-    """根据环境获取最优COS地域"""
-    environment = detect_environment()
-    
-    # 根据部署环境推荐地域
-    if environment == 'streamlit_cloud':
-        return 'ap-singapore'  # Streamlit Cloud通常在海外
-    elif environment in ['heroku', 'kubernetes']:
-        return 'ap-hongkong'   # 国际访问友好
-    else:
-        return 'ap-guangzhou'  # 国内默认
 
 def check_cos_connectivity() -> Dict[str, Any]:
     """检查COS连通性"""
@@ -334,58 +289,118 @@ def generate_cos_policy_example() -> Dict[str, Any]:
     }
 
 def export_config_template() -> str:
-    """导出配置模板"""
-    template = f"""# 门店报表查询系统配置文件
-# 请根据实际情况修改以下配置
+    """导出 Streamlit Secrets 配置模板"""
+    template = f"""# Streamlit Secrets 配置模板
+# 在 Streamlit Cloud 中：设置 > Secrets > 粘贴以下内容
+# 本地开发：创建 .streamlit/secrets.toml 文件
 
-# 管理员密码
-ADMIN_PASSWORD=your_secure_password
+[AUTH]
+admin_password = "your_secure_password_here"
 
-# 腾讯云COS配置
-COS_SECRET_ID=your_secret_id
-COS_SECRET_KEY=your_secret_key
-COS_REGION={get_optimal_cos_region()}
-COS_BUCKET=your-bucket-name
-COS_DOMAIN=your-custom-domain.com
+[COS]
+secret_id = "your_secret_id"
+secret_key = "your_secret_key"
+region = "ap-guangzhou"
+bucket = "your-bucket-name"
+domain = "your-custom-domain.com"  # 可选
+timeout = 60
+max_retries = 3
+chunk_size = 1048576  # 1MB
+enable_multipart = true
+multipart_threshold = 5242880  # 5MB
 
-# 高级COS配置（可选）
-COS_TIMEOUT=60
-COS_MAX_RETRIES=3
-COS_CHUNK_SIZE={1024 * 1024}
-COS_ENABLE_MULTIPART=true
-COS_MULTIPART_THRESHOLD={5 * 1024 * 1024}
+[APP]
+max_file_size = 10485760  # 10MB
+upload_folder = "uploads"
+max_concurrent_uploads = 3
+upload_timeout = 300
 
-# CDN配置（可选）
-COS_CDN_DOMAIN=your-cdn-domain.com
-COS_ENABLE_CDN=false
+[EXCEL]
+max_rows_scan = 1000
+max_cols_scan = 50
+cache_timeout = 300
+memory_limit = 100
+enable_fast_scan = true
+optimize_for_cos = true
 
-# 系统配置
-DEBUG=false
-LOG_LEVEL=INFO
-MAX_FILE_SIZE={APP_CONFIG['max_file_size']}
+[SYSTEM]
+debug = false
+log_level = "INFO"
+performance_monitoring = true
+auto_cleanup = true
+memory_threshold = 80
+
+[UI]
+page_title = "门店报表查询系统"
+page_icon = "📊"
+layout = "wide"
+
+# 可选的高级配置
+[COS.advanced]
+cdn_domain = "your-cdn-domain.com"
+enable_cdn = false
+signed_url_expires = 3600
+use_https = true
+verify_ssl = true
 """
     
     return template
 
+def get_secrets_status() -> Dict[str, Any]:
+    """获取 Secrets 配置状态"""
+    try:
+        secrets_available = check_secrets_available()
+        
+        if not secrets_available:
+            return {
+                'available': False,
+                'configured_sections': [],
+                'missing_sections': ['AUTH', 'COS', 'APP'],
+                'status': 'not_configured'
+            }
+        
+        # 检查已配置的sections
+        configured_sections = []
+        missing_sections = []
+        required_sections = ['AUTH', 'COS', 'APP']
+        
+        for section in required_sections:
+            try:
+                if section in st.secrets and len(st.secrets[section]) > 0:
+                    configured_sections.append(section)
+                else:
+                    missing_sections.append(section)
+            except:
+                missing_sections.append(section)
+        
+        status = 'complete' if len(missing_sections) == 0 else 'partial'
+        
+        return {
+            'available': True,
+            'configured_sections': configured_sections,
+            'missing_sections': missing_sections,
+            'status': status
+        }
+        
+    except Exception as e:
+        return {
+            'available': False,
+            'configured_sections': [],
+            'missing_sections': ['AUTH', 'COS', 'APP'],
+            'status': 'error',
+            'error': str(e)
+        }
+
+def detect_environment() -> str:
+    """检测运行环境"""
+    try:
+        # 检查是否在 Streamlit Cloud
+        if check_secrets_available():
+            return 'streamlit_cloud'
+        else:
+            return 'local'
+    except Exception:
+        return 'unknown'
+
 # 根据环境调整配置
 ENVIRONMENT = detect_environment()
-
-if ENVIRONMENT == 'streamlit_cloud':
-    # Streamlit Cloud 环境优化
-    APP_CONFIG['max_file_size'] = 8 * 1024 * 1024  # 8MB
-    EXCEL_CONFIG['max_rows_scan'] = 800
-    EXCEL_CONFIG['memory_limit'] = 80  # 80MB
-    COS_CONFIG['timeout'] = 90  # 增加超时时间
-elif ENVIRONMENT == 'heroku':
-    # Heroku 环境优化
-    APP_CONFIG['max_file_size'] = 10 * 1024 * 1024  # 10MB
-    EXCEL_CONFIG['max_rows_scan'] = 1000
-    COS_CONFIG['timeout'] = 60
-elif ENVIRONMENT == 'local':
-    # 本地环境可以使用更高的限制
-    APP_CONFIG['max_file_size'] = 20 * 1024 * 1024  # 20MB
-    EXCEL_CONFIG['max_rows_scan'] = 2000
-    EXCEL_CONFIG['memory_limit'] = 200  # 200MB
-
-# 自动加载.env文件
-load_env_file()
