@@ -12,6 +12,8 @@ import hashlib
 import pickle
 import traceback
 from contextlib import contextmanager
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -184,34 +186,134 @@ def safe_sheet_operation(operation_func, *args, **kwargs):
     return retry_operation(operation_func, *args, **kwargs)
 
 def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
-    """获取或创建表格 - 增强错误处理"""
+    """获取或创建表格 - 修改版，添加移动到共享文件夹功能"""
     def _operation():
+        shared_folder_id = get_shared_folder_id()
+        
         try:
-            spreadsheet = gc.open(name)
-            logger.info(f"表格 '{name}' 已存在")
-            return spreadsheet
-        except gspread.SpreadsheetNotFound:
-            logger.info(f"创建新表格 '{name}'")
-            spreadsheet = gc.create(name)
-            # 设置权限为可编辑
-            spreadsheet.share('', perm_type='anyone', role='writer')
-            return spreadsheet
+            # 首先尝试在共享文件夹中查找
+            if shared_folder_id:
+                try:
+                    drive_service = get_drive_service()
+                    # 在共享文件夹中搜索
+                    query = f"name='{name}' and '{shared_folder_id}' in parents and trashed=false"
+                    results = drive_service.files().list(q=query, fields="files(id,name)").execute()
+                    files = results.get('files', [])
+                    
+                    if files:
+                        # 找到文件，用gspread打开
+                        spreadsheet_id = files[0]['id']
+                        spreadsheet = gc.open_by_key(spreadsheet_id)
+                        logger.info(f"在共享文件夹中找到表格 '{name}'")
+                        return spreadsheet
+                except Exception as e:
+                    logger.warning(f"搜索共享文件夹失败: {str(e)}")
+            
+            # 尝试在根目录打开（兼容旧文件）
+            try:
+                spreadsheet = gc.open(name)
+                logger.info(f"在根目录找到表格 '{name}'")
+                
+                # 如果配置了共享文件夹，尝试移动过去
+                if shared_folder_id:
+                    logger.info(f"尝试将现有表格移动到共享文件夹")
+                    move_success = move_spreadsheet_to_shared_folder(spreadsheet.id, shared_folder_id)
+                    if move_success:
+                        logger.info("表格移动成功")
+                    else:
+                        logger.warning("表格移动失败，但不影响使用")
+                
+                return spreadsheet
+                
+            except gspread.SpreadsheetNotFound:
+                # 文件不存在，创建新文件
+                logger.info(f"创建新表格 '{name}'")
+                spreadsheet = gc.create(name)
+                
+                # 设置权限为可编辑
+                spreadsheet.share('', perm_type='anyone', role='writer')
+                
+                # 如果配置了共享文件夹，移动过去
+                if shared_folder_id:
+                    logger.info("将新创建的表格移动到共享文件夹")
+                    move_success = move_spreadsheet_to_shared_folder(spreadsheet.id, shared_folder_id)
+                    if move_success:
+                        logger.info("新表格已移动到共享文件夹")
+                    else:
+                        logger.warning("新表格移动失败，但不影响使用")
+                
+                return spreadsheet
+                
+        except Exception as e:
+            logger.error(f"表格操作失败: {str(e)}")
+            raise
     
     return safe_sheet_operation(_operation)
 
-def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
-    """获取或创建工作表 - 增强错误处理"""
-    def _operation():
+# 2. 在现有的 get_google_sheets_client() 函数后面添加新函数
+@st.cache_resource(show_spinner="初始化Drive客户端...")
+def get_drive_service():
+    """获取Google Drive API客户端 - 新增函数"""
+    try:
+        credentials_info = st.secrets["google_sheets"]  # 使用相同的认证信息
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets", 
+            "https://www.googleapis.com/auth/drive"
+        ]
+        credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
+        drive_service = build('drive', 'v3', credentials=credentials)
+        logger.info("Google Drive客户端创建成功")
+        return drive_service
+    except Exception as e:
+        logger.error(f"Google Drive客户端创建失败: {str(e)}")
+        raise SheetOperationError(f"Drive连接失败: {str(e)}")
+
+def get_shared_folder_id():
+    """获取共享文件夹ID - 新增函数"""
+    try:
+        return st.secrets["drive_config"]["shared_folder_id"]
+    except KeyError:
+        logger.warning("未配置共享文件夹ID，文件将保存在根目录")
+        return None
+
+def move_spreadsheet_to_shared_folder(spreadsheet_id: str, folder_id: str) -> bool:
+    """将表格移动到共享文件夹 - 新增函数"""
+    if not folder_id:
+        logger.info("未配置共享文件夹，跳过移动操作")
+        return True
+        
+    def _move_operation():
         try:
-            worksheet = spreadsheet.worksheet(name)
-            logger.info(f"工作表 '{name}' 已存在")
-            return worksheet
-        except gspread.WorksheetNotFound:
-            logger.info(f"创建新工作表 '{name}'")
-            worksheet = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
-            return worksheet
+            drive_service = get_drive_service()
+            
+            # 获取文件当前的父级
+            file = drive_service.files().get(fileId=spreadsheet_id, fields='parents').execute()
+            previous_parents = ",".join(file.get('parents'))
+            
+            # 移动文件到共享文件夹
+            drive_service.files().update(
+                fileId=spreadsheet_id,
+                addParents=folder_id,
+                removeParents=previous_parents,
+                fields='id,parents'
+            ).execute()
+            
+            logger.info(f"表格 {spreadsheet_id} 已移动到共享文件夹 {folder_id}")
+            return True
+            
+        except HttpError as e:
+            if e.resp.status == 404:
+                logger.error(f"文件或文件夹不存在: {str(e)}")
+            elif e.resp.status == 403:
+                logger.error(f"权限不足: {str(e)}")
+            else:
+                logger.error(f"Drive API错误: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"移动文件失败: {str(e)}")
+            return False
     
-    return safe_sheet_operation(_operation)
+    return retry_operation(_move_operation)
 
 def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
     """清理DataFrame以便JSON序列化"""
@@ -843,6 +945,94 @@ with st.sidebar:
                             
                 except Exception as e:
                     show_status_message(f"❌ 处理失败：{str(e)}", "error")
+
+            def list_files_in_shared_folder():
+    """列出共享文件夹中的文件 - 新增管理功能"""
+    shared_folder_id = get_shared_folder_id()
+    if not shared_folder_id:
+        return []
+    
+    try:
+        drive_service = get_drive_service()
+        query = f"'{shared_folder_id}' in parents and trashed=false"
+        results = drive_service.files().list(
+            q=query,
+            fields="files(id,name,size,createdTime,modifiedTime,mimeType)",
+            orderBy="modifiedTime desc"
+        ).execute()
+        return results.get('files', [])
+    except Exception as e:
+        logger.error(f"列出文件失败: {str(e)}")
+        return []
+
+def delete_file_from_shared_folder(file_id: str) -> bool:
+    """从共享文件夹删除文件 - 新增管理功能"""
+    try:
+        drive_service = get_drive_service()
+        drive_service.files().delete(fileId=file_id).execute()
+        logger.info(f"文件 {file_id} 已删除")
+        return True
+    except Exception as e:
+        logger.error(f"删除文件失败: {str(e)}")
+        return False
+
+# 5. 在管理员界面添加存储管理功能（可选）
+def show_storage_management_panel():
+    """显示存储管理面板 - 新增管理功能"""
+    shared_folder_id = get_shared_folder_id()
+    if not shared_folder_id:
+        st.warning("⚠️ 未配置共享文件夹ID")
+        return
+    
+    st.subheader("📁 存储空间管理")
+    
+    try:
+        files = list_files_in_shared_folder()
+        
+        if files:
+            st.info(f"共享文件夹中共有 {len(files)} 个文件")
+            
+            # 按大小排序显示
+            files_with_size = []
+            total_size = 0
+            
+            for file in files:
+                size = int(file.get('size', 0))
+                total_size += size
+                files_with_size.append({
+                    'name': file['name'],
+                    'size': size,
+                    'size_mb': round(size / 1024 / 1024, 2),
+                    'created': file['createdTime'][:10],
+                    'id': file['id']
+                })
+            
+            # 显示总容量使用
+            total_mb = round(total_size / 1024 / 1024, 2)
+            st.metric("当前使用容量", f"{total_mb} MB")
+            
+            if total_mb > 10000:  # 超过10GB警告
+                st.warning(f"⚠️ 存储使用量较高：{total_mb} MB")
+            
+            # 显示文件列表
+            files_df = pd.DataFrame(files_with_size)
+            if len(files_df) > 0:
+                files_df = files_df.sort_values('size', ascending=False)
+                st.dataframe(files_df[['name', 'size_mb', 'created']], 
+                           use_container_width=True)
+                
+                # 清理建议
+                large_files = files_df[files_df['size_mb'] > 50]
+                if len(large_files) > 0:
+                    st.subheader("🧹 清理建议")
+                    st.write("以下大文件建议优先清理：")
+                    for _, row in large_files.head(5).iterrows():
+                        st.write(f"• {row['name']} ({row['size_mb']} MB)")
+        else:
+            st.info("共享文件夹为空")
+            
+    except Exception as e:
+        st.error(f"获取存储信息失败: {str(e)}")
             
             # 缓存管理
             st.subheader("🗂️ 缓存管理")
