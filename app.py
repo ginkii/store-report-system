@@ -9,7 +9,6 @@ from google.oauth2.service_account import Credentials
 import logging
 from typing import Optional, Dict, Any, List
 import hashlib
-import pickle
 import traceback
 from contextlib import contextmanager
 from googleapiclient.discovery import build
@@ -167,26 +166,271 @@ def get_cache(key: str) -> Optional[Any]:
         logger.warning(f"获取缓存失败: {str(e)}")
     return None
 
-@st.cache_resource(show_spinner="连接云数据库...")
-def get_google_sheets_client():
-    """获取Google Sheets客户端 - 使用缓存"""
+# ===== 阶段1优化：统一认证逻辑 =====
+@st.cache_data(show_spinner="获取认证凭据...")
+def get_google_credentials():
+    """统一的Google API认证函数 - 新增"""
     try:
         credentials_info = st.secrets["google_sheets"]
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets", 
+            "https://www.googleapis.com/auth/drive"
+        ]
         credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
+        logger.info("Google认证凭据创建成功")
+        return credentials
+    except Exception as e:
+        logger.error(f"Google认证凭据创建失败: {str(e)}")
+        raise SheetOperationError(f"认证失败: {str(e)}")
+
+@st.cache_resource(show_spinner="连接云数据库...")
+def get_google_sheets_client():
+    """获取Google Sheets客户端 - 优化版"""
+    try:
+        credentials = get_google_credentials()
         client = gspread.authorize(credentials)
         logger.info("Google Sheets客户端创建成功")
         return client
     except Exception as e:
         logger.error(f"Google Sheets客户端创建失败: {str(e)}")
-        raise SheetOperationError(f"连接失败: {str(e)}")
+        raise SheetOperationError(f"Sheets连接失败: {str(e)}")
 
-def safe_sheet_operation(operation_func, *args, **kwargs):
-    """安全的表格操作"""
-    return retry_operation(operation_func, *args, **kwargs)
+@st.cache_resource(show_spinner="初始化Drive客户端...")
+def get_drive_service():
+    """获取Google Drive API客户端 - 优化版"""
+    try:
+        credentials = get_google_credentials()
+        drive_service = build('drive', 'v3', credentials=credentials)
+        logger.info("Google Drive客户端创建成功")
+        return drive_service
+    except Exception as e:
+        logger.error(f"Google Drive客户端创建失败: {str(e)}")
+        raise SheetOperationError(f"Drive连接失败: {str(e)}")
+
+def get_shared_folder_id():
+    """获取共享文件夹ID"""
+    try:
+        return st.secrets["drive_config"]["shared_folder_id"]
+    except KeyError:
+        logger.warning("未配置共享文件夹ID，文件将保存在根目录")
+        return None
+
+def move_spreadsheet_to_shared_folder(spreadsheet_id: str, folder_id: str) -> bool:
+    """将表格移动到共享文件夹"""
+    if not folder_id:
+        logger.info("未配置共享文件夹，跳过移动操作")
+        return True
+        
+    def _move_operation():
+        try:
+            drive_service = get_drive_service()
+            
+            # 获取文件当前的父级
+            file = drive_service.files().get(fileId=spreadsheet_id, fields='parents').execute()
+            previous_parents = ",".join(file.get('parents'))
+            
+            # 移动文件到共享文件夹
+            drive_service.files().update(
+                fileId=spreadsheet_id,
+                addParents=folder_id,
+                removeParents=previous_parents,
+                fields='id,parents'
+            ).execute()
+            
+            logger.info(f"表格 {spreadsheet_id} 已移动到共享文件夹 {folder_id}")
+            return True
+            
+        except HttpError as e:
+            if e.resp.status == 404:
+                logger.error(f"文件或文件夹不存在: {str(e)}")
+            elif e.resp.status == 403:
+                logger.error(f"权限不足: {str(e)}")
+            else:
+                logger.error(f"Drive API错误: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"移动文件失败: {str(e)}")
+            return False
+    
+    return retry_operation(_move_operation)
+
+def list_files_in_shared_folder():
+    """列出共享文件夹中的文件"""
+    shared_folder_id = get_shared_folder_id()
+    if not shared_folder_id:
+        return []
+    
+    try:
+        drive_service = get_drive_service()
+        query = f"'{shared_folder_id}' in parents and trashed=false"
+        results = drive_service.files().list(
+            q=query,
+            fields="files(id,name,size,createdTime,modifiedTime,mimeType)",
+            orderBy="modifiedTime desc"
+        ).execute()
+        return results.get('files', [])
+    except Exception as e:
+        logger.error(f"列出文件失败: {str(e)}")
+        return []
+
+def delete_file_from_shared_folder(file_id: str) -> bool:
+    """从共享文件夹删除文件"""
+    try:
+        drive_service = get_drive_service()
+        drive_service.files().delete(fileId=file_id).execute()
+        logger.info(f"文件 {file_id} 已删除")
+        return True
+    except Exception as e:
+        logger.error(f"删除文件失败: {str(e)}")
+        return False
+
+def show_storage_management_panel():
+    """显示存储管理面板 - 阶段1优化：完善删除功能"""
+    shared_folder_id = get_shared_folder_id()
+    if not shared_folder_id:
+        st.warning("⚠️ 未配置共享文件夹ID")
+        return
+    
+    st.subheader("📁 存储空间管理")
+    
+    try:
+        files = list_files_in_shared_folder()
+        
+        if files:
+            st.info(f"共享文件夹中共有 {len(files)} 个文件")
+            
+            # 按大小排序显示
+            files_with_size = []
+            total_size = 0
+            
+            for file in files:
+                size = int(file.get('size', 0))
+                total_size += size
+                files_with_size.append({
+                    'name': file['name'],
+                    'size': size,
+                    'size_mb': round(size / 1024 / 1024, 2),
+                    'created': file['createdTime'][:10],
+                    'id': file['id'],
+                    'type': file.get('mimeType', 'unknown')
+                })
+            
+            # 显示总容量使用
+            total_mb = round(total_size / 1024 / 1024, 2)
+            total_gb = round(total_mb / 1024, 2)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("当前使用容量", f"{total_mb:.1f} MB")
+            with col2:
+                st.metric("使用容量(GB)", f"{total_gb:.2f} GB")
+            with col3:
+                usage_percent = (total_gb / 15) * 100  # 15GB总容量
+                st.metric("使用百分比", f"{usage_percent:.1f}%")
+            
+            # 容量警告
+            if total_gb > 12:  # 超过12GB警告
+                st.error(f"🚨 存储使用量过高：{total_gb:.2f} GB / 15 GB")
+            elif total_gb > 10:  # 超过10GB提示
+                st.warning(f"⚠️ 存储使用量较高：{total_gb:.2f} GB / 15 GB")
+            
+            # 显示文件列表和删除功能
+            if len(files_with_size) > 0:
+                files_df = pd.DataFrame(files_with_size)
+                files_df = files_df.sort_values('size', ascending=False)
+                
+                st.subheader("📋 文件列表")
+                
+                # 文件管理表格
+                for idx, file in files_df.iterrows():
+                    with st.expander(f"📄 {file['name']} ({file['size_mb']} MB)", expanded=False):
+                        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**大小：** {file['size_mb']} MB")
+                            st.write(f"**创建时间：** {file['created']}")
+                            st.write(f"**类型：** {file['type'].split('.')[-1] if '.' in file['type'] else 'Google文件'}")
+                        
+                        with col2:
+                            if st.button(f"🔗 查看", key=f"view_{file['id']}"):
+                                view_url = f"https://drive.google.com/file/d/{file['id']}/view"
+                                st.write(f"[点击查看文件]({view_url})")
+                        
+                        with col3:
+                            if file['size_mb'] > 50:  # 大文件突出显示删除按钮
+                                button_type = "primary"
+                                button_text = "🗑️ 删除大文件"
+                            else:
+                                button_type = "secondary" 
+                                button_text = "🗑️ 删除"
+                                
+                            if st.button(button_text, key=f"delete_{file['id']}", type=button_type):
+                                st.session_state[f"confirm_delete_{file['id']}"] = True
+                        
+                        with col4:
+                            # 删除确认
+                            if st.session_state.get(f"confirm_delete_{file['id']}", False):
+                                st.warning("⚠️ 确认删除？")
+                                col4a, col4b = st.columns(2)
+                                with col4a:
+                                    if st.button("✅ 确认", key=f"confirm_yes_{file['id']}"):
+                                        if delete_file_from_shared_folder(file['id']):
+                                            st.success(f"✅ 已删除: {file['name']}")
+                                            st.session_state[f"confirm_delete_{file['id']}"] = False
+                                            time.sleep(1)
+                                            st.rerun()
+                                        else:
+                                            st.error("❌ 删除失败")
+                                with col4b:
+                                    if st.button("❌ 取消", key=f"confirm_no_{file['id']}"):
+                                        st.session_state[f"confirm_delete_{file['id']}"] = False
+                                        st.rerun()
+                
+                # 清理建议
+                large_files = files_df[files_df['size_mb'] > 50]
+                if len(large_files) > 0:
+                    st.subheader("🧹 清理建议")
+                    st.write("**建议优先清理以下大文件：**")
+                    for _, row in large_files.head(5).iterrows():
+                        st.write(f"• {row['name']} ({row['size_mb']} MB) - 创建于 {row['created']}")
+                        
+                # 快速清理按钮
+                if total_gb > 10:
+                    st.subheader("⚡ 快速清理")
+                    if st.button("🗑️ 清理所有超过100MB的大文件", type="primary"):
+                        large_files_to_delete = files_df[files_df['size_mb'] > 100]
+                        if len(large_files_to_delete) > 0:
+                            deleted_count = 0
+                            for _, file in large_files_to_delete.iterrows():
+                                if delete_file_from_shared_folder(file['id']):
+                                    deleted_count += 1
+                            st.success(f"✅ 已删除 {deleted_count} 个大文件")
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.info("没有找到超过100MB的文件")
+        else:
+            st.info("共享文件夹为空")
+            
+    except Exception as e:
+        st.error(f"获取存储信息失败: {str(e)}")
+
+def get_or_create_worksheet(spreadsheet, name, rows=1000, cols=20):
+    """获取或创建工作表"""
+    def _operation():
+        try:
+            worksheet = spreadsheet.worksheet(name)
+            logger.info(f"工作表 '{name}' 已存在")
+            return worksheet
+        except gspread.WorksheetNotFound:
+            logger.info(f"创建新工作表 '{name}'")
+            worksheet = spreadsheet.add_worksheet(title=name, rows=rows, cols=cols)
+            return worksheet
+    
+    return retry_operation(_operation)  # 阶段1优化：直接使用retry_operation
 
 def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
-    """获取或创建表格 - 修改版，添加移动到共享文件夹功能"""
+    """获取或创建表格 - 阶段1优化：简化错误处理"""
     def _operation():
         shared_folder_id = get_shared_folder_id()
         
@@ -248,72 +492,7 @@ def get_or_create_spreadsheet(gc, name="门店报表系统数据"):
             logger.error(f"表格操作失败: {str(e)}")
             raise
     
-    return safe_sheet_operation(_operation)
-
-# 2. 在现有的 get_google_sheets_client() 函数后面添加新函数
-@st.cache_resource(show_spinner="初始化Drive客户端...")
-def get_drive_service():
-    """获取Google Drive API客户端 - 新增函数"""
-    try:
-        credentials_info = st.secrets["google_sheets"]  # 使用相同的认证信息
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets", 
-            "https://www.googleapis.com/auth/drive"
-        ]
-        credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
-        drive_service = build('drive', 'v3', credentials=credentials)
-        logger.info("Google Drive客户端创建成功")
-        return drive_service
-    except Exception as e:
-        logger.error(f"Google Drive客户端创建失败: {str(e)}")
-        raise SheetOperationError(f"Drive连接失败: {str(e)}")
-
-def get_shared_folder_id():
-    """获取共享文件夹ID - 新增函数"""
-    try:
-        return st.secrets["drive_config"]["shared_folder_id"]
-    except KeyError:
-        logger.warning("未配置共享文件夹ID，文件将保存在根目录")
-        return None
-
-def move_spreadsheet_to_shared_folder(spreadsheet_id: str, folder_id: str) -> bool:
-    """将表格移动到共享文件夹 - 新增函数"""
-    if not folder_id:
-        logger.info("未配置共享文件夹，跳过移动操作")
-        return True
-        
-    def _move_operation():
-        try:
-            drive_service = get_drive_service()
-            
-            # 获取文件当前的父级
-            file = drive_service.files().get(fileId=spreadsheet_id, fields='parents').execute()
-            previous_parents = ",".join(file.get('parents'))
-            
-            # 移动文件到共享文件夹
-            drive_service.files().update(
-                fileId=spreadsheet_id,
-                addParents=folder_id,
-                removeParents=previous_parents,
-                fields='id,parents'
-            ).execute()
-            
-            logger.info(f"表格 {spreadsheet_id} 已移动到共享文件夹 {folder_id}")
-            return True
-            
-        except HttpError as e:
-            if e.resp.status == 404:
-                logger.error(f"文件或文件夹不存在: {str(e)}")
-            elif e.resp.status == 403:
-                logger.error(f"权限不足: {str(e)}")
-            else:
-                logger.error(f"Drive API错误: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"移动文件失败: {str(e)}")
-            return False
-    
-    return retry_operation(_move_operation)
+    return retry_operation(_operation)  # 阶段1优化：直接使用retry_operation
 
 def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
     """清理DataFrame以便JSON序列化"""
@@ -345,7 +524,7 @@ def clean_dataframe_for_json(df: pd.DataFrame) -> pd.DataFrame:
         raise DataProcessingError(f"数据清理失败: {str(e)}")
 
 def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
-    """保存权限数据 - 增强版"""
+    """保存权限数据 - 阶段1优化：简化错误处理"""
     with error_handler("保存权限数据"):
         def _save_operation():
             spreadsheet = get_or_create_spreadsheet(gc)
@@ -377,10 +556,10 @@ def save_permissions_to_sheets(df: pd.DataFrame, gc) -> bool:
             
             return True
         
-        return safe_sheet_operation(_save_operation)
+        return retry_operation(_save_operation)  # 阶段1优化：直接使用retry_operation
 
 def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
-    """加载权限数据 - 使用缓存"""
+    """加载权限数据 - 阶段1优化：简化错误处理"""
     cache_key = get_cache_key("permissions", "load")
     cached_data = get_cache(cache_key)
     if cached_data is not None:
@@ -422,7 +601,7 @@ def load_permissions_from_sheets(gc) -> Optional[pd.DataFrame]:
                 logger.info("权限表不存在")
                 return None
         
-        return safe_sheet_operation(_load_operation)
+        return retry_operation(_load_operation)  # 阶段1优化：直接使用retry_operation
 
 def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: int = 15) -> bool:
     """分批保存大数据到表格"""
@@ -526,7 +705,7 @@ def save_large_data_to_sheets(data_dict: Dict[str, Any], worksheet, batch_size: 
         raise
 
 def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
-    """保存报表数据 - 增强版"""
+    """保存报表数据 - 阶段1优化：简化错误处理"""
     with error_handler("保存报表数据"):
         def _save_operation():
             spreadsheet = get_or_create_spreadsheet(gc)
@@ -551,7 +730,7 @@ def save_reports_to_sheets(reports_dict: Dict[str, pd.DataFrame], gc) -> bool:
                 return True
             return False
         
-        return safe_sheet_operation(_save_operation)
+        return retry_operation(_save_operation)  # 阶段1优化：直接使用retry_operation
 
 def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str) -> Optional[pd.DataFrame]:
     """重构分片数据"""
@@ -627,7 +806,7 @@ def reconstruct_fragmented_data(fragments: List[Dict[str, Any]], store_name: str
         return None
 
 def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
-    """加载报表数据 - 使用缓存和分片重构"""
+    """加载报表数据 - 阶段1优化：简化错误处理"""
     cache_key = get_cache_key("reports", "load")
     cached_data = get_cache(cache_key)
     if cached_data is not None:
@@ -703,7 +882,7 @@ def load_reports_from_sheets(gc) -> Dict[str, pd.DataFrame]:
                 logger.info("报表数据表不存在")
                 return {}
         
-        return safe_sheet_operation(_load_operation)
+        return retry_operation(_load_operation)  # 阶段1优化：直接使用retry_operation
 
 def analyze_receivable_data(df: pd.DataFrame) -> Dict[str, Any]:
     """分析应收未收额数据 - 专门查找第69行"""
@@ -945,94 +1124,10 @@ with st.sidebar:
                             
                 except Exception as e:
                     show_status_message(f"❌ 处理失败：{str(e)}", "error")
-
-            def list_files_in_shared_folder():
-    """列出共享文件夹中的文件 - 新增管理功能"""
-    shared_folder_id = get_shared_folder_id()
-    if not shared_folder_id:
-        return []
-    
-    try:
-        drive_service = get_drive_service()
-        query = f"'{shared_folder_id}' in parents and trashed=false"
-        results = drive_service.files().list(
-            q=query,
-            fields="files(id,name,size,createdTime,modifiedTime,mimeType)",
-            orderBy="modifiedTime desc"
-        ).execute()
-        return results.get('files', [])
-    except Exception as e:
-        logger.error(f"列出文件失败: {str(e)}")
-        return []
-
-def delete_file_from_shared_folder(file_id: str) -> bool:
-    """从共享文件夹删除文件 - 新增管理功能"""
-    try:
-        drive_service = get_drive_service()
-        drive_service.files().delete(fileId=file_id).execute()
-        logger.info(f"文件 {file_id} 已删除")
-        return True
-    except Exception as e:
-        logger.error(f"删除文件失败: {str(e)}")
-        return False
-
-# 5. 在管理员界面添加存储管理功能（可选）
-def show_storage_management_panel():
-    """显示存储管理面板 - 新增管理功能"""
-    shared_folder_id = get_shared_folder_id()
-    if not shared_folder_id:
-        st.warning("⚠️ 未配置共享文件夹ID")
-        return
-    
-    st.subheader("📁 存储空间管理")
-    
-    try:
-        files = list_files_in_shared_folder()
-        
-        if files:
-            st.info(f"共享文件夹中共有 {len(files)} 个文件")
             
-            # 按大小排序显示
-            files_with_size = []
-            total_size = 0
-            
-            for file in files:
-                size = int(file.get('size', 0))
-                total_size += size
-                files_with_size.append({
-                    'name': file['name'],
-                    'size': size,
-                    'size_mb': round(size / 1024 / 1024, 2),
-                    'created': file['createdTime'][:10],
-                    'id': file['id']
-                })
-            
-            # 显示总容量使用
-            total_mb = round(total_size / 1024 / 1024, 2)
-            st.metric("当前使用容量", f"{total_mb} MB")
-            
-            if total_mb > 10000:  # 超过10GB警告
-                st.warning(f"⚠️ 存储使用量较高：{total_mb} MB")
-            
-            # 显示文件列表
-            files_df = pd.DataFrame(files_with_size)
-            if len(files_df) > 0:
-                files_df = files_df.sort_values('size', ascending=False)
-                st.dataframe(files_df[['name', 'size_mb', 'created']], 
-                           use_container_width=True)
-                
-                # 清理建议
-                large_files = files_df[files_df['size_mb'] > 50]
-                if len(large_files) > 0:
-                    st.subheader("🧹 清理建议")
-                    st.write("以下大文件建议优先清理：")
-                    for _, row in large_files.head(5).iterrows():
-                        st.write(f"• {row['name']} ({row['size_mb']} MB)")
-        else:
-            st.info("共享文件夹为空")
-            
-    except Exception as e:
-        st.error(f"获取存储信息失败: {str(e)}")
+            # 阶段1优化：完善的存储管理面板
+            st.divider()
+            show_storage_management_panel()
             
             # 缓存管理
             st.subheader("🗂️ 缓存管理")
@@ -1329,4 +1424,4 @@ with col2:
     cache_count = len([key for key in st.session_state.keys() if key.startswith('cache_')])
     st.caption(f"💾 缓存项目: {cache_count}")
 with col3:
-    st.caption("🔧 版本: v2.0 (稳定版)")
+    st.caption("🔧 版本: v2.1 (阶段1优化版)")
