@@ -1,10 +1,17 @@
 import streamlit as st
 import pandas as pd
 import io
-import pymongo
 import logging
 from datetime import datetime
 from typing import Optional, Dict, List
+
+# 尝试导入pymongo，如果失败则显示友好错误
+try:
+    import pymongo
+    PYMONGO_AVAILABLE = True
+except ImportError as e:
+    PYMONGO_AVAILABLE = False
+    PYMONGO_ERROR = str(e)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +25,11 @@ st.set_page_config(
 )
 
 # 系统配置
-ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
+try:
+    ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
+except:
+    ADMIN_PASSWORD = "admin123"
+
 MAX_FILE_SIZE_MB = 10
 
 # CSS样式
@@ -73,6 +84,14 @@ st.markdown("""
     .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
     .warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
     .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+    .dependency-error {
+        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 15px;
+        margin: 2rem 0;
+        text-align: center;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -80,9 +99,136 @@ def show_message(message: str, msg_type: str = "info"):
     """显示状态消息"""
     st.markdown(f'<div class="status-box {msg_type}">{message}</div>', unsafe_allow_html=True)
 
+def show_dependency_error():
+    """显示依赖错误页面"""
+    st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
+    
+    st.markdown(f'''
+        <div class="dependency-error">
+            <h2>🚨 系统依赖错误</h2>
+            <p><strong>pymongo 模块未正确安装</strong></p>
+            <p>错误信息: {PYMONGO_ERROR if 'PYMONGO_ERROR' in globals() else 'Module not found'}</p>
+        </div>
+    ''', unsafe_allow_html=True)
+    
+    st.error("❌ 数据库连接模块未安装，请联系技术支持")
+    
+    with st.expander("🔧 技术人员解决步骤"):
+        st.markdown("""
+        **请检查以下配置：**
+        
+        1. **requirements.txt 文件内容：**
+        ```txt
+        streamlit==1.32.2
+        pandas==2.2.1
+        pymongo==4.6.1
+        dnspython==2.4.2
+        openpyxl==3.1.2
+        ```
+        
+        2. **重新部署步骤：**
+        - 更新 requirements.txt 文件
+        - 推送到 GitHub: `git push origin main`
+        - 在 Streamlit Cloud 中点击 "Reboot app"
+        
+        3. **检查 Streamlit Cloud 日志：**
+        - 点击应用右下角的 "Manage app"
+        - 查看 "Logs" 标签页的详细错误信息
+        
+        4. **常见解决方案：**
+        - 确保 requirements.txt 格式正确（无额外空格）
+        - 使用标准的 pymongo 而不是 pymongo[srv]
+        - 单独安装 dnspython 支持 SRV 记录
+        """)
+    
+    # 显示系统信息
+    st.subheader("📋 系统诊断信息")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write("**Python版本:**", "3.11+")
+        st.write("**Streamlit版本:**", st.__version__)
+        
+    with col2:
+        st.write("**PyMongo状态:**", "❌ 未安装" if not PYMONGO_AVAILABLE else "✅ 已安装")
+        st.write("**系统状态:**", "🔴 依赖错误")
+
+# MongoDB相关函数（只在pymongo可用时定义）
+if PYMONGO_AVAILABLE:
+    @st.cache_resource
+    def get_mongodb_client():
+        """获取MongoDB客户端"""
+        try:
+            if "mongodb" not in st.secrets:
+                raise Exception("MongoDB配置未找到，请检查secrets设置")
+            
+            client = pymongo.MongoClient(
+                st.secrets["mongodb"]["uri"], 
+                serverSelectionTimeoutMS=30000,  # 增加超时时间到30秒
+                connectTimeoutMS=20000,
+                socketTimeoutMS=20000
+            )
+            
+            # 测试连接
+            client.admin.command('ping')
+            logger.info("MongoDB连接成功")
+            return client
+            
+        except Exception as e:
+            logger.error(f"MongoDB连接失败: {str(e)}")
+            raise Exception(f"数据库连接失败: {str(e)}")
+
+    @st.cache_resource
+    def get_database():
+        """获取数据库实例"""
+        try:
+            client = get_mongodb_client()
+            return client['store_reports']
+        except Exception as e:
+            raise Exception(f"数据库获取失败: {str(e)}")
+
+    def get_database_stats():
+        """获取数据库统计信息"""
+        try:
+            db = get_database()
+            stats = db.command("dbStats")
+            collections = db.list_collection_names()
+            
+            collection_stats = {}
+            for coll_name in collections:
+                try:
+                    coll_stats = db.command("collStats", coll_name)
+                    collection_stats[coll_name] = {
+                        'count': coll_stats.get('count', 0),
+                        'size_mb': coll_stats.get('size', 0) / 1024 / 1024
+                    }
+                except:
+                    collection_stats[coll_name] = {'count': 0, 'size_mb': 0}
+            
+            return {
+                'data_size_mb': stats.get('dataSize', 0) / 1024 / 1024,
+                'storage_size_mb': stats.get('storageSize', 0) / 1024 / 1024,
+                'collections': collection_stats
+            }
+        except Exception as e:
+            logger.error(f"获取数据库统计失败: {str(e)}")
+            return None
+
+else:
+    # 如果pymongo不可用，提供空的替代函数
+    def get_database_stats():
+        return None
+    
+    def get_database():
+        raise Exception("pymongo模块未安装")
+
 # ===== 缓存管理 =====
 def show_cache_management():
     """缓存管理界面"""
+    if not PYMONGO_AVAILABLE:
+        st.error("❌ 数据库连接不可用，无法管理缓存")
+        return
+        
     st.subheader("💾 缓存管理")
     
     # 缓存控制按钮
@@ -122,56 +268,6 @@ def show_cache_management():
         - 🧹 **手动清理**: 上传新数据后建议清理缓存
         """)
 
-# ===== MongoDB连接管理 =====
-@st.cache_resource
-def get_mongodb_client():
-    """获取MongoDB客户端 - 长期缓存连接对象"""
-    try:
-        if "mongodb" not in st.secrets:
-            raise Exception("MongoDB配置未找到，请检查secrets设置")
-        
-        client = pymongo.MongoClient(st.secrets["mongodb"]["uri"], serverSelectionTimeoutMS=5000)
-        client.admin.command('ping')  # 测试连接
-        logger.info("MongoDB连接成功")
-        return client
-    except Exception as e:
-        logger.error(f"MongoDB连接失败: {str(e)}")
-        st.error(f"❌ 数据库连接失败: {str(e)}")
-        st.stop()
-
-@st.cache_resource
-def get_database():
-    """获取数据库实例 - 长期缓存"""
-    client = get_mongodb_client()
-    return client['store_reports']
-
-def get_database_stats():
-    """获取数据库统计信息 - 不缓存，实时查询"""
-    try:
-        db = get_database()
-        stats = db.command("dbStats")
-        collections = db.list_collection_names()
-        
-        collection_stats = {}
-        for coll_name in collections:
-            try:
-                coll_stats = db.command("collStats", coll_name)
-                collection_stats[coll_name] = {
-                    'count': coll_stats.get('count', 0),
-                    'size_mb': coll_stats.get('size', 0) / 1024 / 1024
-                }
-            except:
-                collection_stats[coll_name] = {'count': 0, 'size_mb': 0}
-        
-        return {
-            'data_size_mb': stats.get('dataSize', 0) / 1024 / 1024,
-            'storage_size_mb': stats.get('storageSize', 0) / 1024 / 1024,
-            'collections': collection_stats
-        }
-    except Exception as e:
-        logger.error(f"获取数据库统计失败: {str(e)}")
-        return None
-
 # ===== 文件处理统一模块 =====
 def validate_file(uploaded_file) -> bool:
     """验证上传文件"""
@@ -193,7 +289,7 @@ def validate_file(uploaded_file) -> bool:
     return True
 
 def parse_excel_file(uploaded_file) -> Dict[str, pd.DataFrame]:
-    """统一的Excel文件解析器 - 不缓存，直接处理"""
+    """统一的Excel文件解析器"""
     try:
         file_ext = uploaded_file.name.split('.')[-1].lower()
         
@@ -226,168 +322,171 @@ def parse_excel_file(uploaded_file) -> Dict[str, pd.DataFrame]:
         show_message(f"❌ 文件解析失败: {str(e)}", "error")
         return {}
 
-# ===== 数据存储模块 =====
-@st.cache_data(ttl=120)  # 权限数据小，缓存2分钟
-def load_permissions() -> Optional[pd.DataFrame]:
-    """加载权限数据 - 小数据缓存"""
-    try:
-        db = get_database()
-        permissions = list(db.permissions.find({}, {'_id': 0}))
-        
-        if not permissions:
+# 只在pymongo可用时定义数据存储函数
+if PYMONGO_AVAILABLE:
+    @st.cache_data(ttl=120)
+    def load_permissions() -> Optional[pd.DataFrame]:
+        """加载权限数据"""
+        try:
+            db = get_database()
+            permissions = list(db.permissions.find({}, {'_id': 0}))
+            
+            if not permissions:
+                return None
+            
+            df = pd.DataFrame(permissions)
+            logger.info(f"权限数据加载成功: {len(df)} 条记录")
+            return df[['store_name', 'user_id']].copy()
+        except Exception as e:
+            logger.error(f"加载权限数据失败: {str(e)}")
             return None
-        
-        df = pd.DataFrame(permissions)
-        logger.info(f"权限数据加载成功: {len(df)} 条记录")
-        return df[['store_name', 'user_id']].copy()
-    except Exception as e:
-        logger.error(f"加载权限数据失败: {str(e)}")
-        return None
 
-@st.cache_data(ttl=60)   # 门店列表缓存1分钟
-def get_store_list() -> List[str]:
-    """获取门店列表 - 元数据缓存"""
-    try:
-        db = get_database()
-        reports = db.reports.find({}, {'store_name': 1, '_id': 0})
-        store_names = [doc['store_name'] for doc in reports if not doc['store_name'].endswith('_错误')]
-        return sorted(list(set(store_names)))
-    except Exception as e:
-        logger.error(f"获取门店列表失败: {str(e)}")
-        return []
+    @st.cache_data(ttl=60)
+    def get_store_list() -> List[str]:
+        """获取门店列表"""
+        try:
+            db = get_database()
+            reports = db.reports.find({}, {'store_name': 1, '_id': 0})
+            store_names = [doc['store_name'] for doc in reports if not doc['store_name'].endswith('_错误')]
+            return sorted(list(set(store_names)))
+        except Exception as e:
+            logger.error(f"获取门店列表失败: {str(e)}")
+            return []
 
-def load_reports() -> Dict[str, pd.DataFrame]:
-    """加载报表数据 - 不缓存，直接从数据库读取"""
-    try:
-        db = get_database()
-        reports = list(db.reports.find({}, {'_id': 0}))
-        
-        if not reports:
-            return {}
-        
-        reports_dict = {}
-        for report in reports:
-            try:
-                store_name = report['store_name']
-                if store_name.endswith('_错误'):
+    def load_reports() -> Dict[str, pd.DataFrame]:
+        """加载报表数据"""
+        try:
+            db = get_database()
+            reports = list(db.reports.find({}, {'_id': 0}))
+            
+            if not reports:
+                return {}
+            
+            reports_dict = {}
+            for report in reports:
+                try:
+                    store_name = report['store_name']
+                    if store_name.endswith('_错误'):
+                        continue
+                    
+                    data_records = report.get('data', [])
+                    if data_records:
+                        df = pd.DataFrame(data_records)
+                        reports_dict[store_name] = df
+                except Exception as e:
+                    logger.warning(f"跳过损坏的报表数据: {str(e)}")
                     continue
-                
-                data_records = report.get('data', [])
-                if data_records:
-                    df = pd.DataFrame(data_records)
-                    reports_dict[store_name] = df
-            except Exception as e:
-                logger.warning(f"跳过损坏的报表数据: {str(e)}")
-                continue
-        
-        logger.info(f"加载报表数据成功: {len(reports_dict)} 个门店")
-        return reports_dict
-        
-    except Exception as e:
-        logger.error(f"加载报表数据失败: {str(e)}")
+            
+            logger.info(f"加载报表数据成功: {len(reports_dict)} 个门店")
+            return reports_dict
+            
+        except Exception as e:
+            logger.error(f"加载报表数据失败: {str(e)}")
+            return {}
+
+    def save_permissions(df: pd.DataFrame) -> bool:
+        """保存权限数据"""
+        try:
+            db = get_database()
+            collection = db.permissions
+            
+            collection.delete_many({})
+            
+            permissions_data = []
+            for _, row in df.iterrows():
+                permissions_data.append({
+                    'store_name': str(row.iloc[0]).strip(),
+                    'user_id': str(row.iloc[1]).strip(),
+                    'update_time': datetime.now().isoformat()
+                })
+            
+            if permissions_data:
+                collection.insert_many(permissions_data)
+            
+            load_permissions.clear()
+            get_store_list.clear()
+            
+            logger.info(f"权限数据保存成功: {len(permissions_data)} 条记录")
+            return True
+            
+        except Exception as e:
+            logger.error(f"保存权限数据失败: {str(e)}")
+            show_message(f"❌ 保存权限数据失败: {str(e)}", "error")
+            return False
+
+    def save_reports(reports_dict: Dict[str, pd.DataFrame]) -> bool:
+        """保存报表数据"""
+        try:
+            db = get_database()
+            collection = db.reports
+            
+            collection.delete_many({})
+            
+            reports_data = []
+            current_time = datetime.now().isoformat()
+            
+            for store_name, df in reports_dict.items():
+                try:
+                    data_records = df.to_dict('records')
+                    
+                    reports_data.append({
+                        'store_name': store_name,
+                        'data': data_records,
+                        'update_time': current_time,
+                        'file_info': {
+                            'rows': len(df),
+                            'columns': len(df.columns),
+                            'filename': f"{store_name}.xlsx"
+                        }
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"处理 {store_name} 数据失败: {str(e)}")
+                    reports_data.append({
+                        'store_name': f"{store_name}_错误",
+                        'data': [],
+                        'error': str(e),
+                        'update_time': current_time
+                    })
+            
+            if reports_data:
+                collection.insert_many(reports_data)
+            
+            get_store_list.clear()
+            
+            logger.info(f"报表数据保存成功: {len(reports_data)} 个门店")
+            return True
+            
+        except Exception as e:
+            logger.error(f"保存报表数据失败: {str(e)}")
+            show_message(f"❌ 保存报表数据失败: {str(e)}", "error")
+            return False
+
+else:
+    # pymongo不可用时的替代函数
+    def load_permissions():
+        return None
+    def get_store_list():
+        return []
+    def load_reports():
         return {}
-
-def save_permissions(df: pd.DataFrame) -> bool:
-    """保存权限数据"""
-    try:
-        db = get_database()
-        collection = db.permissions
-        
-        # 清空现有数据
-        collection.delete_many({})
-        
-        # 准备新数据
-        permissions_data = []
-        for _, row in df.iterrows():
-            permissions_data.append({
-                'store_name': str(row.iloc[0]).strip(),
-                'user_id': str(row.iloc[1]).strip(),
-                'update_time': datetime.now().isoformat()
-            })
-        
-        # 批量插入
-        if permissions_data:
-            collection.insert_many(permissions_data)
-        
-        # 清除相关缓存
-        load_permissions.clear()
-        get_store_list.clear()
-        
-        logger.info(f"权限数据保存成功: {len(permissions_data)} 条记录")
-        return True
-        
-    except Exception as e:
-        logger.error(f"保存权限数据失败: {str(e)}")
-        show_message(f"❌ 保存权限数据失败: {str(e)}", "error")
+    def save_permissions(df):
         return False
-
-def save_reports(reports_dict: Dict[str, pd.DataFrame]) -> bool:
-    """保存报表数据"""
-    try:
-        db = get_database()
-        collection = db.reports
-        
-        # 清空现有数据
-        collection.delete_many({})
-        
-        # 准备新数据
-        reports_data = []
-        current_time = datetime.now().isoformat()
-        
-        for store_name, df in reports_dict.items():
-            try:
-                # 转换DataFrame为记录格式
-                data_records = df.to_dict('records')
-                
-                reports_data.append({
-                    'store_name': store_name,
-                    'data': data_records,
-                    'update_time': current_time,
-                    'file_info': {
-                        'rows': len(df),
-                        'columns': len(df.columns),
-                        'filename': f"{store_name}.xlsx"
-                    }
-                })
-                
-            except Exception as e:
-                logger.error(f"处理 {store_name} 数据失败: {str(e)}")
-                # 保存错误信息
-                reports_data.append({
-                    'store_name': f"{store_name}_错误",
-                    'data': [],
-                    'error': str(e),
-                    'update_time': current_time
-                })
-        
-        # 批量保存
-        if reports_data:
-            collection.insert_many(reports_data)
-        
-        # 清除相关缓存
-        get_store_list.clear()
-        
-        logger.info(f"报表数据保存成功: {len(reports_data)} 个门店")
-        return True
-        
-    except Exception as e:
-        logger.error(f"保存报表数据失败: {str(e)}")
-        show_message(f"❌ 保存报表数据失败: {str(e)}", "error")
+    def save_reports(reports_dict):
         return False
 
 # ===== 应收未收额分析模块 =====
 def analyze_receivable_data(df: pd.DataFrame) -> Dict:
-    """分析应收未收额数据 - 字段查找优先，行查找备用"""
+    """分析应收未收额数据"""
     result = {}
     
     if df.empty:
         return result
     
-    # 方法1: 字段名查找（优先）
     keywords = ['应收-未收额', '应收未收额', '应收-未收', '应收未收']
     
+    # 方法1: 字段名查找
     for keyword in keywords:
-        # 在列名中查找
         matching_cols = [col for col in df.columns if keyword in str(col)]
         if matching_cols:
             for col in matching_cols:
@@ -411,14 +510,13 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict:
                     except (ValueError, TypeError):
                         continue
     
-    # 方法2: 在数据行中查找关键词（备用）
+    # 方法2: 行查找
     for idx, row in df.iterrows():
         try:
             row_name = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
             
             for keyword in keywords:
                 if keyword in row_name:
-                    # 从右到左查找数值
                     for col_idx in range(len(row)-1, 0, -1):
                         val = row.iloc[col_idx]
                         if pd.notna(val) and str(val).strip() not in ['', '0', '0.0']:
@@ -444,10 +542,10 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict:
         except Exception:
             continue
     
-    # 方法3: 特定第69行查找（兼容旧逻辑）
-    if len(df) > 68:  # 第69行存在
+    # 方法3: 第69行查找
+    if len(df) > 68:
         try:
-            row = df.iloc[68]  # 第69行
+            row = df.iloc[68]
             row_name = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
             
             for keyword in keywords:
@@ -477,7 +575,6 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict:
         except Exception:
             pass
     
-    # 调试信息
     result['debug_info'] = {
         'total_rows': len(df),
         'total_columns': len(df.columns),
@@ -487,7 +584,6 @@ def analyze_receivable_data(df: pd.DataFrame) -> Dict:
     
     return result
 
-# ===== 用户权限验证 =====
 def verify_user_permission(store_name: str, user_id: str, permissions_data: Optional[pd.DataFrame]) -> bool:
     """验证用户权限"""
     if permissions_data is None or len(permissions_data) == 0:
@@ -510,9 +606,12 @@ def find_matching_reports(store_name: str, reports_data: Dict[str, pd.DataFrame]
             matching.append(sheet_name)
     return matching
 
-# ===== 存储管理界面 =====
 def show_storage_management():
     """显示存储管理界面"""
+    if not PYMONGO_AVAILABLE:
+        st.error("❌ 数据库连接不可用，无法管理存储")
+        return
+        
     st.subheader("💾 MongoDB存储管理")
     
     stats = get_database_stats()
@@ -553,7 +652,6 @@ def show_storage_management():
                         try:
                             db = get_database()
                             db[coll_name].delete_many({})
-                            # 清除相关缓存
                             if coll_name == 'permissions':
                                 load_permissions.clear()
                             elif coll_name == 'reports':
@@ -577,15 +675,19 @@ def show_storage_management():
                 db = get_database()
                 for coll_name in stats['collections'].keys():
                     db[coll_name].delete_many({})
-                # 清除所有缓存
                 st.cache_data.clear()
                 show_message("✅ 所有数据已清空", "success")
                 st.rerun()
             except Exception as e:
                 show_message(f"❌ 清空失败: {str(e)}", "error")
 
-# ===== 主应用界面 =====
 def main():
+    """主应用函数"""
+    # 如果pymongo不可用，显示错误页面
+    if not PYMONGO_AVAILABLE:
+        show_dependency_error()
+        return
+    
     # 初始化会话状态
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False
@@ -595,26 +697,29 @@ def main():
     # 主标题
     st.markdown('<h1 class="main-header">📊 门店报表查询系统</h1>', unsafe_allow_html=True)
     
-    # 测试数据库连接
+    # 测试数据库连接（不阻塞应用启动）
     try:
         get_database()
         show_message("✅ MongoDB数据库连接成功", "success")
+        database_available = True
     except Exception as e:
-        show_message(f"❌ 数据库连接失败: {str(e)}", "error")
-        return
+        show_message(f"⚠️ 数据库连接异常: {str(e)}", "warning")
+        database_available = False
     
     # 侧边栏
     with st.sidebar:
         st.title("⚙️ 系统功能")
         
         # 系统状态
-        stats = get_database_stats()
-        
-        if stats:
-            st.success("🟢 数据库已连接")
-            st.caption(f"存储: {stats['storage_size_mb']:.1f}MB")
+        if database_available:
+            stats = get_database_stats()
+            if stats:
+                st.success("🟢 数据库已连接")
+                st.caption(f"存储: {stats['storage_size_mb']:.1f}MB")
+            else:
+                st.warning("🟡 数据库连接不稳定")
         else:
-            st.error("🔴 数据库异常")
+            st.error("🔴 数据库连接失败")
         
         user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
         
@@ -630,7 +735,7 @@ def main():
                 else:
                     show_message("❌ 密码错误", "error")
             
-            if st.session_state.is_admin:
+            if st.session_state.is_admin and database_available:
                 st.subheader("📁 文件管理")
                 
                 # 权限表上传
@@ -638,7 +743,6 @@ def main():
                 if permissions_file and validate_file(permissions_file):
                     sheets_dict = parse_excel_file(permissions_file)
                     if sheets_dict:
-                        # 取第一个工作表作为权限数据
                         first_sheet = list(sheets_dict.values())[0]
                         if len(first_sheet.columns) >= 2:
                             if save_permissions(first_sheet):
@@ -667,12 +771,16 @@ def main():
                     st.rerun()
     
     # 主界面内容
+    if not database_available:
+        st.error("❌ 数据库连接不可用，请稍后重试或联系技术支持")
+        return
+        
     if user_type == "管理员" and st.session_state.is_admin:
         st.markdown('<div class="admin-panel"><h3>👨‍💼 管理员控制面板</h3></div>', unsafe_allow_html=True)
         
         # 数据统计
         permissions_data = load_permissions()
-        store_list = get_store_list()  # 使用缓存的门店列表
+        store_list = get_store_list()
         
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -739,7 +847,6 @@ def main():
             # 用户报表查询界面
             st.markdown(f'<div class="store-info"><h3>🏪 {st.session_state.store_name}</h3><p>操作员：{st.session_state.user_id}</p></div>', unsafe_allow_html=True)
             
-            # 实时加载报表数据（不缓存）
             with st.spinner("加载报表数据..."):
                 reports_data = load_reports()
                 matching_sheets = find_matching_reports(st.session_state.store_name, reports_data)
@@ -834,9 +941,9 @@ def main():
     with col1:
         st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     with col2:
-        st.caption("💾 MongoDB Atlas")
+        st.caption("💾 MongoDB Atlas" if PYMONGO_AVAILABLE else "❌ 数据库不可用")
     with col3:
-        st.caption("🔧 v4.2 (部署优化版)")
+        st.caption("🔧 v4.3 (错误处理优化版)")
 
 if __name__ == "__main__":
     main()
