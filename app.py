@@ -3,8 +3,6 @@ import pandas as pd
 import io
 import pymongo
 import logging
-import psutil
-import os
 from datetime import datetime
 from typing import Optional, Dict, List
 
@@ -22,7 +20,6 @@ st.set_page_config(
 # 系统配置
 ADMIN_PASSWORD = st.secrets.get("system", {}).get("admin_password", "admin123")
 MAX_FILE_SIZE_MB = 10
-MEMORY_WARNING_MB = 800  # 内存使用警告阈值
 
 # CSS样式
 st.markdown("""
@@ -83,46 +80,13 @@ def show_message(message: str, msg_type: str = "info"):
     """显示状态消息"""
     st.markdown(f'<div class="status-box {msg_type}">{message}</div>', unsafe_allow_html=True)
 
-# ===== 内存和缓存管理 =====
-def get_memory_usage():
-    """获取当前内存使用情况"""
-    try:
-        process = psutil.Process(os.getpid())
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        return round(memory_mb, 1)
-    except:
-        return 0
-
+# ===== 缓存管理 =====
 def show_cache_management():
     """缓存管理界面"""
-    st.subheader("💾 缓存与内存管理")
-    
-    # 内存使用情况
-    memory_mb = get_memory_usage()
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("应用内存使用", f"{memory_mb} MB")
-    with col2:
-        if memory_mb > MEMORY_WARNING_MB:
-            st.metric("内存状态", "⚠️ 警告", delta="内存过高")
-        else:
-            st.metric("内存状态", "✅ 正常", delta="运行良好")
-    with col3:
-        cache_percentage = min((memory_mb / 1024) * 100, 100)
-        st.metric("内存使用率", f"{cache_percentage:.1f}%")
-    
-    # 内存警告
-    if memory_mb > MEMORY_WARNING_MB:
-        show_message(f"🚨 内存使用过高: {memory_mb}MB，建议清理缓存", "warning")
-    elif memory_mb > 600:
-        show_message(f"⚠️ 内存使用较高: {memory_mb}MB", "info")
-    else:
-        show_message("✅ 内存使用正常", "success")
+    st.subheader("💾 缓存管理")
     
     # 缓存控制按钮
-    st.subheader("🧹 缓存控制")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         if st.button("🗑️ 清除数据缓存"):
@@ -143,10 +107,6 @@ def show_cache_management():
             show_message("✅ 所有缓存已清除", "success")
             st.rerun()
     
-    with col4:
-        if st.button("🔄 刷新内存状态"):
-            st.rerun()
-    
     # 缓存策略说明
     with st.expander("📖 缓存策略说明"):
         st.markdown("""
@@ -154,12 +114,12 @@ def show_cache_management():
         - ✅ **权限数据**: 缓存2分钟（数据小，提升性能）
         - ✅ **数据库连接**: 长期缓存（必需的系统资源）  
         - ✅ **门店列表**: 缓存1分钟（元数据，占用极小）
-        - ❌ **报表数据**: 不缓存（数据大，避免内存溢出）
+        - ❌ **报表数据**: 不缓存（数据大，避免问题）
         
-        **内存管理:**
-        - 🎯 **目标**: 保持内存使用 < 600MB
-        - ⚠️ **警告**: 内存使用 > 800MB
-        - 🚨 **危险**: 内存使用 > 900MB（可能导致应用重启）
+        **缓存管理:**
+        - 🎯 **建议**: 定期清理缓存保持最新数据
+        - 🔄 **自动过期**: 缓存会自动过期更新
+        - 🧹 **手动清理**: 上传新数据后建议清理缓存
         """)
 
 # ===== MongoDB连接管理 =====
@@ -649,23 +609,12 @@ def main():
         
         # 系统状态
         stats = get_database_stats()
-        memory_mb = get_memory_usage()
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if stats:
-                st.success("🟢 数据库")
-                st.caption(f"DB: {stats['storage_size_mb']:.1f}MB")
-            else:
-                st.error("🔴 数据库异常")
-        
-        with col2:
-            if memory_mb > MEMORY_WARNING_MB:
-                st.warning("⚠️ 内存")
-                st.caption(f"RAM: {memory_mb}MB")
-            else:
-                st.success("✅ 内存")
-                st.caption(f"RAM: {memory_mb}MB")
+        if stats:
+            st.success("🟢 数据库已连接")
+            st.caption(f"存储: {stats['storage_size_mb']:.1f}MB")
+        else:
+            st.error("🔴 数据库异常")
         
         user_type = st.radio("选择用户类型", ["普通用户", "管理员"])
         
@@ -753,7 +702,7 @@ def main():
         st.divider()
         show_storage_management()
         
-        # 缓存和内存管理
+        # 缓存管理
         st.divider()
         show_cache_management()
     
@@ -881,16 +830,13 @@ def main():
     
     # 页面底部
     st.divider()
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     with col2:
         st.caption("💾 MongoDB Atlas")
     with col3:
-        memory_mb = get_memory_usage()
-        st.caption(f"🧠 内存: {memory_mb}MB")
-    with col4:
-        st.caption("🔧 v4.1 (缓存优化版)")
+        st.caption("🔧 v4.2 (部署优化版)")
 
 if __name__ == "__main__":
     main()
