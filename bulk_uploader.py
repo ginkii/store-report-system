@@ -134,7 +134,7 @@ class BulkReportUploader:
             'failed_count': 0,
             'errors': [],
             'processed_stores': [],
-            'unmatched_sheets': [],
+            'failed_stores': [],  # 存储失败的门店信息
             'total_time': 0
         }
         
@@ -176,7 +176,10 @@ class BulkReportUploader:
                     store = self.find_or_create_store(sheet_name)
                     
                     if not store:
-                        result['unmatched_sheets'].append(sheet_name)
+                        result['failed_stores'].append({
+                            'store_name': sheet_name,
+                            'reason': '无法创建门店记录'
+                        })
                         result['failed_count'] += 1
                         result['errors'].append(f"{sheet_name}: 无法创建门店记录")
                         continue
@@ -208,10 +211,18 @@ class BulkReportUploader:
                             'store_code': store['store_code']
                         })
                     else:
+                        result['failed_stores'].append({
+                            'store_name': sheet_name,
+                            'reason': '数据处理失败'
+                        })
                         result['failed_count'] += 1
                         result['errors'].append(f"{sheet_name}: 数据处理失败")
                 
                 except Exception as e:
+                    result['failed_stores'].append({
+                        'store_name': sheet_name,
+                        'reason': f"处理错误: {str(e)}"
+                    })
                     result['failed_count'] += 1
                     result['errors'].append(f"{sheet_name}: {str(e)}")
             
@@ -541,18 +552,14 @@ def create_upload_interface():
                     success_df = pd.DataFrame(result['processed_stores'])
                     st.dataframe(success_df, use_container_width=True)
                 
-                # 未匹配的工作表
-                if result['unmatched_sheets']:
-                    st.subheader("❌ 未匹配的工作表")
-                    st.warning(f"以下工作表未能匹配到门店：")
-                    for sheet in result['unmatched_sheets']:
-                        st.write(f"- {sheet}")
-                
-                # 错误信息
-                if result['errors']:
-                    st.subheader("🚨 错误详情")
-                    for error in result['errors']:
-                        st.error(error)
+                # 上传失败信息
+                if result['failed_stores']:
+                    st.subheader("❌ 上传失败")
+                    st.error(f"共 {result['failed_count']} 个门店上传失败")
+                    
+                    # 显示失败的门店列表
+                    failed_df = pd.DataFrame(result['failed_stores'])
+                    st.dataframe(failed_df, use_container_width=True)
                 
                 # 清理进度条
                 progress_bar.empty()
