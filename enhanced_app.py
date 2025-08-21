@@ -152,8 +152,8 @@ def parse_receivables_amount(report: Dict) -> Dict:
 
 # 显示应收未收看板
 def display_receivables_dashboard(reports: List[Dict]):
-    """显示应收未收金额看板"""
-    st.subheader("💰 应收未收金额看板")
+    """显示应收未收金额看板（简化版）"""
+    st.subheader("💰 应收未收金额")
     
     if not reports:
         st.warning("暂无数据")
@@ -161,129 +161,113 @@ def display_receivables_dashboard(reports: List[Dict]):
     
     # 解析所有月份的应收未收数据
     receivables_data = []
-    total_payable = 0  # 门店应付总额
-    total_refundable = 0  # 总部应退总额
-    
     for report in reports:
         receivables_info = parse_receivables_amount(report)
         receivables_data.append({
             'month': report['report_month'],
             'amount': receivables_info['amount'],
             'type': receivables_info['type'],
-            'color': receivables_info['color'],
             'icon': receivables_info['icon']
         })
-        
-        if receivables_info['type'] == '门店应付':
-            total_payable += receivables_info['amount']
-        elif receivables_info['type'] == '总部应退':
-            total_refundable += receivables_info['amount']
     
-    # 顶部汇总指标
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="💳 门店应付总额",
-            value=f"¥{total_payable:,.2f}",
-            delta=None
-        )
-    
-    with col2:
-        st.metric(
-            label="💰 总部应退总额", 
-            value=f"¥{total_refundable:,.2f}",
-            delta=None
-        )
-    
-    with col3:
-        net_amount = total_payable - total_refundable
-        st.metric(
-            label="📊 净应收金额",
-            value=f"¥{net_amount:,.2f}",
-            delta=f"{'门店净应付' if net_amount > 0 else '总部净应退' if net_amount < 0 else '已平衡'}"
-        )
-    
-    with col4:
-        latest_data = receivables_data[0] if receivables_data else None
-        if latest_data:
+    # 显示每月的应收未收金额
+    for data in receivables_data:
+        if data['type'] in ['门店应付', '总部应退']:
             st.metric(
-                label=f"{latest_data['icon']} 最新状态",
-                value=f"¥{latest_data['amount']:,.2f}",
-                delta=latest_data['type']
+                label=f"{data['icon']} {data['month']} - {data['type']}",
+                value=f"¥{data['amount']:,.2f}"
             )
+
+# 显示完整门店报表
+def display_complete_report(reports: List[Dict], store_info: Dict):
+    """显示完整门店报表并提供下载"""
+    st.subheader("📊 完整门店报表")
     
-    # 可视化图表
-    col1, col2 = st.columns(2)
+    if not reports:
+        st.warning("暂无报表数据")
+        return
     
-    with col1:
-        # 应收未收趋势图
-        if receivables_data:
-            df = pd.DataFrame(receivables_data)
+    # 创建完整报表数据
+    complete_data = []
+    for report in reports:
+        # 基础信息
+        row_data = {
+            '门店名称': store_info['store_name'],
+            '报表月份': report['report_month'],
+        }
+        
+        # 财务数据
+        financial_data = report.get('financial_data', {})
+        
+        # 应收未收金额
+        receivables = financial_data.get('receivables', {})
+        net_amount = receivables.get('net_amount', 0)
+        if net_amount < 0:
+            row_data['总部应退金额'] = abs(net_amount)
+            row_data['门店应付金额'] = 0
+        elif net_amount > 0:
+            row_data['门店应付金额'] = net_amount
+            row_data['总部应退金额'] = 0
+        else:
+            row_data['门店应付金额'] = 0
+            row_data['总部应退金额'] = 0
+        
+        # 收入数据
+        revenue = financial_data.get('revenue', {})
+        row_data['总收入'] = revenue.get('total_revenue', 0)
+        row_data['线上收入'] = revenue.get('online_revenue', 0)
+        row_data['线下收入'] = revenue.get('offline_revenue', 0)
+        
+        # 成本数据
+        cost = financial_data.get('cost', {})
+        row_data['总成本'] = cost.get('total_cost', 0)
+        row_data['商品成本'] = cost.get('product_cost', 0)
+        row_data['租金成本'] = cost.get('rent_cost', 0)
+        row_data['人工成本'] = cost.get('labor_cost', 0)
+        row_data['其他成本'] = cost.get('other_cost', 0)
+        
+        # 利润数据
+        profit = financial_data.get('profit', {})
+        row_data['毛利润'] = profit.get('gross_profit', 0)
+        row_data['净利润'] = profit.get('net_profit', 0)
+        row_data['利润率'] = profit.get('profit_margin', 0)
+        
+        complete_data.append(row_data)
+    
+    # 创建DataFrame
+    df = pd.DataFrame(complete_data)
+    
+    # 显示报表
+    st.dataframe(df, use_container_width=True)
+    
+    # 提供下载功能
+    if len(df) > 0:
+        # 转换为CSV
+        csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+        
+        st.download_button(
+            label="📥 下载完整报表 (CSV)",
+            data=csv_data,
+            file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.csv",
+            mime="text/csv"
+        )
+        
+        # 转换为Excel
+        try:
+            import io
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='门店报表', index=False)
+            excel_data = excel_buffer.getvalue()
             
-            # 为不同类型设置不同颜色
-            colors = []
-            for _, row in df.iterrows():
-                if row['type'] == '门店应付':
-                    colors.append('orange')
-                elif row['type'] == '总部应退':
-                    colors.append('red')
-                else:
-                    colors.append('green')
-            
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df['month'],
-                y=df['amount'],
-                marker_color=colors,
-                text=df['type'],
-                textposition='auto',
-                name='应收未收金额'
-            ))
-            
-            fig.update_layout(
-                title='应收未收金额趋势',
-                xaxis_title='月份',
-                yaxis_title='金额 (¥)',
-                showlegend=False
+            st.download_button(
+                label="📊 下载完整报表 (Excel)",
+                data=excel_data,
+                file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        # 应收未收类型分布饼图
-        if receivables_data:
-            type_summary = {}
-            for item in receivables_data:
-                if item['type'] in type_summary:
-                    type_summary[item['type']] += item['amount']
-                else:
-                    type_summary[item['type']] = item['amount']
-            
-            if type_summary:
-                fig = px.pie(
-                    values=list(type_summary.values()),
-                    names=list(type_summary.keys()),
-                    title='应收未收类型分布',
-                    color_discrete_map={
-                        '门店应付': 'orange',
-                        '总部应退': 'red',
-                        '已结清': 'green'
-                    }
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    # 详细数据表
-    st.subheader("📋 应收未收明细")
-    if receivables_data:
-        df = pd.DataFrame(receivables_data)
-        df['金额'] = df['amount'].apply(lambda x: f"¥{x:,.2f}")
-        df['状态'] = df.apply(lambda row: f"{row['icon']} {row['type']}", axis=1)
-        
-        display_df = df[['month', '金额', '状态']].copy()
-        display_df.columns = ['月份', '金额', '状态']
-        
-        st.dataframe(display_df, use_container_width=True)
+        except ImportError:
+            st.info("Excel下载功能需要openpyxl库支持")
 
 # 显示收入报表
 def display_revenue_report(reports: List[Dict]):
@@ -482,8 +466,6 @@ database_name = "store_reports"
         with st.sidebar:
             st.subheader(f"查询编号: {query_code}")
             st.info(f"当前门店: {store_info['store_name']}")
-            st.write(f"门店代码: {store_info.get('store_code', 'N/A')}")
-            st.write(f"区域: {store_info.get('region', '未知')}")
             
             # 获取可用月份
             available_months = get_available_months(store_info['_id'], db)
@@ -498,12 +480,12 @@ database_name = "store_reports"
                 
                 report_type = st.selectbox(
                     "选择报表类型",
-                    options=["应收未收看板", "收入分析", "成本分析", "利润分析", "综合报表"]
+                    options=["应收未收金额", "完整门店报表"]
                 )
             else:
                 st.warning("暂无可用报表数据")
                 selected_months = []
-                report_type = "应收未收看板"
+                report_type = "应收未收金额"
             
             if st.button("退出登录"):
                 st.session_state.authenticated = False
@@ -512,29 +494,16 @@ database_name = "store_reports"
                 st.rerun()
         
         # 主内容区域
-        st.subheader(f"📊 {store_info['store_name']} 报表分析")
-        st.write(f"门店代码: {store_info.get('store_code', 'N/A')} | 区域: {store_info.get('region', '未知')}")
+        st.title(f"📊 {store_info['store_name']}")
         
         if selected_months:
             reports = get_report_data(store_info['_id'], selected_months, db)
             
             if reports:
-                if report_type == "应收未收看板":
+                if report_type == "应收未收金额":
                     display_receivables_dashboard(reports)
-                elif report_type == "收入分析":
-                    display_revenue_report(reports)
-                elif report_type == "成本分析":
-                    display_cost_report(reports)
-                elif report_type == "利润分析":
-                    display_profit_report(reports)
-                else:  # 综合报表
-                    display_receivables_dashboard(reports)
-                    st.divider()
-                    display_revenue_report(reports)
-                    st.divider()
-                    display_cost_report(reports)
-                    st.divider()
-                    display_profit_report(reports)
+                elif report_type == "完整门店报表":
+                    display_complete_report(reports, store_info)
             else:
                 st.warning("选定月份暂无报表数据")
         else:
