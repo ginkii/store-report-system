@@ -67,10 +67,15 @@ def get_store_info(store_code: str, db) -> Optional[Dict]:
         st.error(f"获取门店信息失败: {e}")
         return None
 
-# 获取报表数据
+# 获取报表数据（带限制）
 def get_report_data(store_id: str, months: List[str], db) -> List[Dict]:
     """获取指定月份的报表数据"""
     try:
+        # 限制最多查询12个月的数据，防止内存溢出
+        if len(months) > 12:
+            months = months[:12]
+            st.warning("为避免内存超限，最多显示12个月的数据")
+        
         reports_collection = db['reports']
         query = {
             'store_id': store_id,
@@ -178,96 +183,108 @@ def display_receivables_dashboard(reports: List[Dict]):
                 value=f"¥{data['amount']:,.2f}"
             )
 
-# 显示完整门店报表
+# 显示完整门店报表（原始Excel数据）
 def display_complete_report(reports: List[Dict], store_info: Dict):
-    """显示完整门店报表并提供下载"""
-    st.subheader("📊 完整门店报表")
+    """显示完整门店报表原始数据"""
+    st.subheader("📊 门店报表数据")
     
     if not reports:
         st.warning("暂无报表数据")
-        return
+        return None
     
-    # 创建完整报表数据
-    complete_data = []
+    all_dataframes = []
+    
     for report in reports:
-        # 基础信息
-        row_data = {
-            '门店名称': store_info['store_name'],
-            '报表月份': report['report_month'],
-        }
+        month = report['report_month']
         
-        # 财务数据
-        financial_data = report.get('financial_data', {})
+        # 显示月份标题
+        st.markdown(f"### 📅 {month} 月报表")
         
-        # 应收未收金额
-        receivables = financial_data.get('receivables', {})
-        net_amount = receivables.get('net_amount', 0)
-        if net_amount < 0:
-            row_data['总部应退金额'] = abs(net_amount)
-            row_data['门店应付金额'] = 0
-        elif net_amount > 0:
-            row_data['门店应付金额'] = net_amount
-            row_data['总部应退金额'] = 0
+        # 获取原始Excel数据
+        raw_data = report.get('raw_excel_data')
+        
+        if raw_data and isinstance(raw_data, list):
+            # 如果有原始Excel数据（records格式），直接显示
+            try:
+                df = pd.DataFrame(raw_data)
+                st.dataframe(df, use_container_width=True)
+                
+                # 添加月份信息到DataFrame
+                df_with_month = df.copy()
+                df_with_month.insert(0, '报表月份', month)
+                df_with_month.insert(0, '门店名称', store_info['store_name'])
+                all_dataframes.append(df_with_month)
+                
+            except Exception as e:
+                st.error(f"显示{month}月数据时出错: {e}")
+                # 如果原始数据有问题，使用备选方案
+                df_backup = create_fallback_dataframe(report, store_info, month)
+                if df_backup is not None:
+                    st.dataframe(df_backup, use_container_width=True)
+                    all_dataframes.append(df_backup)
+        elif raw_data and isinstance(raw_data, dict):
+            # 兼容旧的dict格式
+            try:
+                df = pd.DataFrame(raw_data)
+                st.dataframe(df, use_container_width=True)
+                
+                # 添加月份信息到DataFrame
+                df_with_month = df.copy()
+                df_with_month.insert(0, '报表月份', month)
+                df_with_month.insert(0, '门店名称', store_info['store_name'])
+                all_dataframes.append(df_with_month)
+                
+            except Exception as e:
+                st.error(f"显示{month}月数据时出错: {e}")
+                # 如果原始数据有问题，使用备选方案
+                df_backup = create_fallback_dataframe(report, store_info, month)
+                if df_backup is not None:
+                    st.dataframe(df_backup, use_container_width=True)
+                    all_dataframes.append(df_backup)
         else:
-            row_data['门店应付金额'] = 0
-            row_data['总部应退金额'] = 0
-        
-        # 收入数据
-        revenue = financial_data.get('revenue', {})
-        row_data['总收入'] = revenue.get('total_revenue', 0)
-        row_data['线上收入'] = revenue.get('online_revenue', 0)
-        row_data['线下收入'] = revenue.get('offline_revenue', 0)
-        
-        # 成本数据
-        cost = financial_data.get('cost', {})
-        row_data['总成本'] = cost.get('total_cost', 0)
-        row_data['商品成本'] = cost.get('product_cost', 0)
-        row_data['租金成本'] = cost.get('rent_cost', 0)
-        row_data['人工成本'] = cost.get('labor_cost', 0)
-        row_data['其他成本'] = cost.get('other_cost', 0)
-        
-        # 利润数据
-        profit = financial_data.get('profit', {})
-        row_data['毛利润'] = profit.get('gross_profit', 0)
-        row_data['净利润'] = profit.get('net_profit', 0)
-        row_data['利润率'] = profit.get('profit_margin', 0)
-        
-        complete_data.append(row_data)
+            # 如果没有原始数据，创建备选显示
+            df_backup = create_fallback_dataframe(report, store_info, month)
+            if df_backup is not None:
+                st.dataframe(df_backup, use_container_width=True)
+                all_dataframes.append(df_backup)
+            else:
+                st.warning(f"{month}月暂无详细数据")
     
-    # 创建DataFrame
-    df = pd.DataFrame(complete_data)
+    # 合并所有月份的数据供下载
+    if all_dataframes:
+        combined_df = pd.concat(all_dataframes, ignore_index=True)
+        return combined_df
     
-    # 显示报表
-    st.dataframe(df, use_container_width=True)
-    
-    # 提供下载功能
-    if len(df) > 0:
-        # 转换为CSV
-        csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+    return None
+
+def create_fallback_dataframe(report: Dict, store_info: Dict, month: str) -> pd.DataFrame:
+    """创建备选数据框（当原始Excel数据不可用时）"""
+    try:
+        # 从financial_data的other_metrics中获取所有数据
+        financial_data = report.get('financial_data', {})
+        other_metrics = financial_data.get('other_metrics', {})
         
-        st.download_button(
-            label="📥 下载完整报表 (CSV)",
-            data=csv_data,
-            file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.csv",
-            mime="text/csv"
-        )
-        
-        # 转换为Excel
-        try:
-            import io
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='门店报表', index=False)
-            excel_data = excel_buffer.getvalue()
+        if other_metrics:
+            # 创建显示所有other_metrics数据的DataFrame
+            data_rows = []
+            for key, value in other_metrics.items():
+                data_rows.append({
+                    '项目': key,
+                    '数值': value if pd.notna(value) else 0
+                })
             
-            st.download_button(
-                label="📊 下载完整报表 (Excel)",
-                data=excel_data,
-                file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        except ImportError:
-            st.info("Excel下载功能需要openpyxl库支持")
+            df = pd.DataFrame(data_rows)
+            
+            # 添加基础信息
+            df.insert(0, '报表月份', month)
+            df.insert(0, '门店名称', store_info['store_name'])
+            
+            return df
+        
+        return None
+        
+    except Exception:
+        return None
 
 # 显示收入报表
 def display_revenue_report(reports: List[Dict]):
@@ -464,28 +481,7 @@ database_name = "store_reports"
         
         # 侧边栏
         with st.sidebar:
-            st.subheader(f"查询编号: {query_code}")
             st.info(f"当前门店: {store_info['store_name']}")
-            
-            # 获取可用月份
-            available_months = get_available_months(store_info['_id'], db)
-            
-            if available_months:
-                st.subheader("查询选项")
-                selected_months = st.multiselect(
-                    "选择查询月份",
-                    options=available_months,
-                    default=available_months[:3] if len(available_months) >= 3 else available_months
-                )
-                
-                report_type = st.selectbox(
-                    "选择报表类型",
-                    options=["应收未收金额", "完整门店报表"]
-                )
-            else:
-                st.warning("暂无可用报表数据")
-                selected_months = []
-                report_type = "应收未收金额"
             
             if st.button("退出登录"):
                 st.session_state.authenticated = False
@@ -496,18 +492,64 @@ database_name = "store_reports"
         # 主内容区域
         st.title(f"📊 {store_info['store_name']}")
         
-        if selected_months:
-            reports = get_report_data(store_info['_id'], selected_months, db)
+        # 自动获取所有可用月份的数据
+        available_months = get_available_months(store_info['_id'], db)
+        
+        if available_months:
+            reports = get_report_data(store_info['_id'], available_months, db)
             
             if reports:
-                if report_type == "应收未收金额":
-                    display_receivables_dashboard(reports)
-                elif report_type == "完整门店报表":
-                    display_complete_report(reports, store_info)
+                # 顶部：应收未收看板
+                display_receivables_dashboard(reports)
+                
+                st.divider()
+                
+                # 中部：完整门店报表
+                df = display_complete_report(reports, store_info)
+                
+                # 底部：下载功能
+                if df is not None and len(df) > 0:
+                    st.divider()
+                    st.subheader("📥 报表下载")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # CSV下载
+                        csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+                        st.download_button(
+                            label="📄 下载完整报表 (CSV)",
+                            data=csv_data,
+                            file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    
+                    with col2:
+                        # Excel下载
+                        try:
+                            if len(df) > 1000:
+                                st.info("数据量较大，建议使用CSV格式")
+                            
+                            import io
+                            excel_buffer = io.BytesIO()
+                            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                                df.to_excel(writer, sheet_name='门店报表', index=False)
+                            excel_data = excel_buffer.getvalue()
+                            
+                            st.download_button(
+                                label="📊 下载完整报表 (Excel)",
+                                data=excel_data,
+                                file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True
+                            )
+                        except Exception as e:
+                            st.error(f"Excel生成失败: {e}")
             else:
-                st.warning("选定月份暂无报表数据")
+                st.warning("暂无报表数据")
         else:
-            st.info("请在左侧选择要查询的月份")
+            st.info("该门店暂无可用报表数据")
 
 if __name__ == "__main__":
     main()
