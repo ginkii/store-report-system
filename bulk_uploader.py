@@ -143,8 +143,21 @@ class BulkReportUploader:
             if progress_callback:
                 progress_callback(10, "正在读取Excel文件...")
             
+            # 检查文件大小，防止内存溢出
+            file_buffer.seek(0, 2)  # 移到文件末尾
+            file_size = file_buffer.tell()
+            file_buffer.seek(0)  # 重置到开头
+            
+            if file_size > 50 * 1024 * 1024:  # 50MB限制
+                result['errors'].append("文件过大（超过50MB），请分批上传")
+                return result
+            
             excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl')
             total_sheets = len(excel_data)
+            
+            if total_sheets > 200:  # 限制工作表数量
+                result['errors'].append(f"工作表数量过多（{total_sheets}个），请分批上传（建议每次不超过200个）")
+                return result
             
             if progress_callback:
                 progress_callback(20, f"发现 {total_sheets} 个工作表，开始处理...")
@@ -215,10 +228,13 @@ class BulkReportUploader:
         """处理单个工作表的数据"""
         try:
             # 数据清洗和预处理
-            df = df.dropna(how='all').dropna(axis=1, how='all')
+            df_cleaned = df.dropna(how='all').dropna(axis=1, how='all')
             
-            if df.empty:
+            if df_cleaned.empty:
                 return None
+            
+            # 保存原始Excel数据（转换为可序列化的格式）
+            raw_excel_data = df_cleaned.to_dict('records')
             
             # 构建报表数据结构
             report_data = {
@@ -227,13 +243,14 @@ class BulkReportUploader:
                 'store_name': store['store_name'],
                 'report_month': report_month,
                 'sheet_name': sheet_name,
+                'raw_excel_data': raw_excel_data,  # 存储原始Excel数据
                 'financial_data': {},
                 'uploaded_at': datetime.now(),
                 'uploaded_by': 'bulk_upload'
             }
             
             # 解析财务数据 - 根据实际Excel格式调整
-            financial_data = self._extract_financial_data(df)
+            financial_data = self._extract_financial_data(df_cleaned)
             report_data['financial_data'] = financial_data
             
             return report_data
@@ -421,10 +438,48 @@ class BulkReportUploader:
         """关闭数据库连接"""
         self.client.close()
 
+# 管理员验证
+def verify_admin_password(password: str) -> bool:
+    """验证管理员密码"""
+    try:
+        # 从Streamlit secrets获取管理员密码
+        admin_password = st.secrets.get("security", {}).get("admin_password", "admin123")
+        return password == admin_password
+    except Exception:
+        return password == "admin123"  # 默认密码
+
 # Streamlit 上传界面
 def create_upload_interface():
     """创建上传界面"""
     st.title("📤 批量报表上传系统")
+    
+    # 检查管理员登录状态
+    if 'admin_authenticated' not in st.session_state:
+        st.session_state.admin_authenticated = False
+    
+    if not st.session_state.admin_authenticated:
+        # 管理员登录页面
+        st.subheader("🔐 管理员登录")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            admin_password = st.text_input(
+                "管理员密码", 
+                type="password", 
+                placeholder="请输入管理员密码"
+            )
+            
+            if st.button("登录", use_container_width=True):
+                if admin_password:
+                    if verify_admin_password(admin_password):
+                        st.session_state.admin_authenticated = True
+                        st.success("管理员登录成功！")
+                        st.rerun()
+                    else:
+                        st.error("管理员密码错误")
+                else:
+                    st.warning("请输入管理员密码")
+        return  # 未登录时直接返回，不显示上传界面
     
     # 初始化上传器
     uploader = BulkReportUploader()
@@ -524,6 +579,12 @@ def create_upload_interface():
                 st.dataframe(stores_df[['store_name', 'store_code', 'region']], use_container_width=True)
             else:
                 st.info("暂无门店数据")
+        
+        # 管理员退出登录
+        st.markdown("---")
+        if st.button("退出管理员登录", type="secondary"):
+            st.session_state.admin_authenticated = False
+            st.rerun()
     
     uploader.close_connection()
 
