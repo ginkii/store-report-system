@@ -105,7 +105,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
         amount = 0
         found = False
         
-        # 优先从原始Excel数据中查找第82行的合计列
+         # 优先从原始Excel数据中查找第80行的合计列
         raw_data = report.get('raw_excel_data', [])
         
         if raw_data and len(raw_data) >= 80:
@@ -126,9 +126,9 @@ def parse_receivables_amount(report: Dict) -> Dict:
                     except (ValueError, TypeError):
                         continue
             
-            # 如果第82行没找到合计列，在第82行上下范围（第80-84行）查找"应收-未收额"字段
+           # 如果第80行没找到合计列，在第80行上下范围（第78-82行）查找"应收-未收额"字段
             if not found:
-                search_range = range(max(0, 79), min(len(raw_data), 85))  # 第80-84行（索引79-84）
+                search_range = range(max(0, 77), min(len(raw_data), 83))  # 第78-82行（索引77-82）
                 
                 for row_idx in search_range:
                     if row_idx >= len(raw_data):
@@ -184,9 +184,9 @@ def parse_receivables_amount(report: Dict) -> Dict:
                     if found:
                         break
             
-            # 如果还是没找到，查找第82行中所有数值列，取最后一个非零值
+             # 如果还是没找到，查找第80行中所有数值列，取最后一个非零值
             if not found:
-                for key, value in row_82.items():
+                for key, value in row_80.items():
                     if value is None:
                         continue
                     try:
