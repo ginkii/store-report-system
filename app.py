@@ -27,7 +27,7 @@ def main():
         
         app_choice = st.selectbox(
             "选择应用",
-            ["门店查询系统", "批量上传系统"],
+            ["门店查询系统", "批量上传系统", "权限管理系统"],
             index=0
         )
         
@@ -36,6 +36,7 @@ def main():
         st.markdown("""
         - **门店查询系统**: 门店用户查询报表
         - **批量上传系统**: 管理员批量上传数据
+        - **权限管理系统**: 管理查询编号和门店权限
         """)
     
     # 根据选择加载对应的应用
@@ -48,6 +49,11 @@ def main():
         # 导入并运行批量上传应用
         from bulk_uploader import create_upload_interface
         create_upload_interface()
+        
+    elif app_choice == "权限管理系统":
+        # 导入并运行权限管理应用
+        from permission_manager import create_permission_interface
+        create_permission_interface()
 
 if __name__ == "__main__":
     main()
