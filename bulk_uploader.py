@@ -9,6 +9,7 @@ import os
 from typing import Dict, List, Tuple
 import hashlib
 import time
+import numpy as np
 
 class BulkReportUploader:
     def __init__(self, mongo_uri: str = None, db_name: str = None):
@@ -245,7 +246,29 @@ class BulkReportUploader:
                 return None
             
             # 保存原始Excel数据（转换为可序列化的格式）
-            raw_excel_data = df_cleaned.to_dict('records')
+            # 先将所有列名转换为字符串，避免datetime等类型作为键名
+            df_for_storage = df_cleaned.copy()
+            df_for_storage.columns = [str(col) for col in df_for_storage.columns]
+            
+            # 将所有数据转换为JSON兼容格式
+            raw_excel_data = []
+            for _, row in df_for_storage.iterrows():
+                row_dict = {}
+                for col, value in row.items():
+                    # 确保键是字符串
+                    key = str(col)
+                    # 处理各种数据类型
+                    if pd.isna(value):
+                        row_dict[key] = None
+                    elif isinstance(value, (pd.Timestamp, datetime, np.datetime64)):
+                        row_dict[key] = str(value)
+                    elif isinstance(value, (int, float, str, bool)):
+                        row_dict[key] = value
+                    elif isinstance(value, (np.integer, np.floating)):
+                        row_dict[key] = float(value) if isinstance(value, np.floating) else int(value)
+                    else:
+                        row_dict[key] = str(value)
+                raw_excel_data.append(row_dict)
             
             # 构建报表数据结构
             report_data = {
