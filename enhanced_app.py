@@ -103,39 +103,119 @@ def parse_receivables_amount(report: Dict) -> Dict:
     """从报表数据中解析应收未收金额（第82行合计列）"""
     try:
         amount = 0
+        found = False
         
         # 优先从原始Excel数据中查找第82行的合计列
         raw_data = report.get('raw_excel_data', [])
-        if raw_data and len(raw_data) >= 82:  # 确保有第82行数据
+        
+        if raw_data and len(raw_data) >= 82:
             # 查找第82行数据（索引为81）
             row_82 = raw_data[81] if len(raw_data) > 81 else {}
             
-            # 在第82行中查找"合计"列或相关列
+            # 在第82行中查找"合计"列
             for key, value in row_82.items():
-                key_str = str(key).lower()
-                if '合计' in key_str or 'total' in key_str or '小计' in key_str:
+                if value is None:
+                    continue
+                
+                key_str = str(key)
+                if '合计' in key_str or 'total' in key_str.lower() or '小计' in key_str:
                     try:
-                        amount = float(value) if value is not None else 0
+                        amount = float(value)
+                        found = True
                         break
+                    except (ValueError, TypeError):
+                        continue
+            
+            # 如果第82行没找到合计列，在第82行上下范围（第80-84行）查找"应收-未收额"字段
+            if not found:
+                search_range = range(max(0, 79), min(len(raw_data), 85))  # 第80-84行（索引79-84）
+                
+                for row_idx in search_range:
+                    if row_idx >= len(raw_data):
+                        continue
+                        
+                    row_data = raw_data[row_idx]
+                    
+                    # 查找"应收-未收额"或相关字段
+                    for key, value in row_data.items():
+                        if value is None:
+                            continue
+                            
+                        key_str = str(key)
+                        # 查找包含"应收"和"未收"的列名
+                        if ('应收' in key_str and '未收' in key_str) or '应收-未收' in key_str:
+                            try:
+                                amount = float(value)
+                                found = True
+                                break
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # 也查找行数据中第一列如果包含"应收-未收额"等关键字
+                        first_col_value = list(row_data.values())[0] if row_data else None
+                        if first_col_value and isinstance(first_col_value, str):
+                            if ('应收' in first_col_value and '未收' in first_col_value) or '应收-未收' in first_col_value:
+                                # 找到标识行，取该行的合计列或最后一个数值列
+                                for col_key, col_value in row_data.items():
+                                    if col_value is None or col_key == list(row_data.keys())[0]:
+                                        continue
+                                    col_key_str = str(col_key)
+                                    if '合计' in col_key_str or 'total' in col_key_str.lower():
+                                        try:
+                                            amount = float(col_value)
+                                            found = True
+                                            break
+                                        except (ValueError, TypeError):
+                                            continue
+                                
+                                # 如果没找到合计列，取最后一个数值
+                                if not found:
+                                    for col_key, col_value in reversed(list(row_data.items())):
+                                        if col_key == list(row_data.keys())[0]:  # 跳过第一列（标题列）
+                                            continue
+                                        try:
+                                            amount = float(col_value)
+                                            if amount != 0:
+                                                found = True
+                                                break
+                                        except (ValueError, TypeError):
+                                            continue
+                    
+                    if found:
+                        break
+            
+            # 如果还是没找到，查找第82行中所有数值列，取最后一个非零值
+            if not found:
+                for key, value in row_82.items():
+                    if value is None:
+                        continue
+                    try:
+                        temp_amount = float(value)
+                        if temp_amount != 0:
+                            amount = temp_amount
+                            found = True
                     except (ValueError, TypeError):
                         continue
         
         # 如果原始数据中没找到，从financial_data中获取
-        if amount == 0:
+        if not found:
             financial_data = report.get('financial_data', {})
             receivables = financial_data.get('receivables', {})
             
-            if 'net_amount' in receivables:
+            if 'net_amount' in receivables and receivables['net_amount'] != 0:
                 amount = receivables['net_amount']
-            elif 'accounts_receivable' in receivables:
+                found = True
+            elif 'accounts_receivable' in receivables and receivables['accounts_receivable'] != 0:
                 amount = receivables['accounts_receivable']
+                found = True
             else:
-                # 从other_metrics中查找
+                # 从other_metrics中查找第82行合计
                 other_metrics = financial_data.get('other_metrics', {})
                 for key, value in other_metrics.items():
-                    if '第82行' in key and '合计' in key:
+                    if '82' in key and ('合计' in key or 'total' in key.lower()):
                         try:
                             amount = float(value)
+                            found = True
                             break
                         except (ValueError, TypeError):
                             continue
@@ -164,7 +244,6 @@ def parse_receivables_amount(report: Dict) -> Dict:
             }
     
     except Exception as e:
-        st.error(f"解析应收未收金额失败: {e}")
         return {
             'amount': 0,
             'type': '数据异常',
@@ -203,6 +282,8 @@ def display_receivables_dashboard(reports: List[Dict]):
                 label="💳 门店应付",
                 value=f"¥{total_should_pay:,.2f}"
             )
+        else:
+            st.metric(label="💳 门店应付", value="¥0.00")
     
     with col2:
         if total_should_return > 0:
@@ -210,6 +291,8 @@ def display_receivables_dashboard(reports: List[Dict]):
                 label="💰 总部应退",
                 value=f"¥{total_should_return:,.2f}"
             )
+        else:
+            st.metric(label="💰 总部应退", value="¥0.00")
 
 # 显示完整门店报表（原始Excel数据）
 def display_complete_report(reports: List[Dict], store_info: Dict):
