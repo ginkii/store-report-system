@@ -7,7 +7,6 @@ import pandas as pd
 import pymongo
 from pymongo import MongoClient
 from typing import List, Dict, Optional
-import io
 from config_manager import ConfigManager
 
 class PermissionManager:
@@ -29,10 +28,31 @@ class PermissionManager:
             else:
                 return {"success": False, "message": "不支持的文件格式，请上传Excel(.xlsx/.xls)或CSV文件"}
             
-            # 验证必要的列
-            required_columns = ['查询编号', '门店名称']
-            if not all(col in df.columns for col in required_columns):
-                return {"success": False, "message": f"权限表必须包含以下列: {', '.join(required_columns)}"}
+            # 自动识别列名（支持中英文和不同格式）
+            query_code_col = None
+            store_name_col = None
+            
+            # 查找查询编号列
+            for col in df.columns:
+                col_str = str(col).lower().strip()
+                if any(keyword in col_str for keyword in ['查询编号', 'query', 'code', '编号', '代码', '查询码']):
+                    query_code_col = col
+                    break
+            
+            # 查找门店名称列  
+            for col in df.columns:
+                col_str = str(col).lower().strip()
+                if any(keyword in col_str for keyword in ['门店名称', 'store', '门店', '名称', 'name', 'shop']):
+                    store_name_col = col
+                    break
+            
+            # 如果没找到，使用前两列
+            if not query_code_col or not store_name_col:
+                if len(df.columns) >= 2:
+                    query_code_col = df.columns[0]
+                    store_name_col = df.columns[1]
+                else:
+                    return {"success": False, "message": "文件至少需要两列数据"}
             
             # 处理权限数据
             results = {
@@ -40,14 +60,22 @@ class PermissionManager:
                 "processed": 0,
                 "created": 0,
                 "updated": 0,
-                "errors": []
+                "errors": [],
+                "detected_columns": {
+                    "query_code": str(query_code_col),
+                    "store_name": str(store_name_col)
+                }
             }
             
             # 处理每行权限数据（一对一关系）
             for _, row in df.iterrows():
                 try:
-                    query_code = str(row['查询编号']).strip()
-                    store_name = str(row['门店名称']).strip()
+                    query_code = str(row[query_code_col]).strip()
+                    store_name = str(row[store_name_col]).strip()
+                    
+                    # 跳过空行
+                    if not query_code or not store_name or query_code == 'nan' or store_name == 'nan':
+                        continue
                     
                     # 查找门店
                     store = self._find_store_by_name(store_name)
@@ -141,22 +169,6 @@ class PermissionManager:
             st.error(f"删除权限配置失败: {e}")
             return False
     
-    def create_sample_permission_table(self) -> bytes:
-        """创建示例权限表（一对一关系）"""
-        sample_data = {
-            '查询编号': ['QC001', 'QC002', 'QC003', 'QC004'],
-            '门店名称': ['犀牛百货滨江店', '犀牛百货西湖店', '犀牛百货萧山店', '犀牛百货余杭店'],
-            '说明': ['滨江店查询编号', '西湖店查询编号', '萧山店查询编号', '余杭店查询编号']
-        }
-        
-        df = pd.DataFrame(sample_data)
-        
-        # 创建Excel文件
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='权限表', index=False)
-        
-        return output.getvalue()
 
 def create_permission_interface():
     """创建权限管理界面"""
@@ -182,7 +194,7 @@ def create_permission_interface():
     permission_manager = PermissionManager(db)
     
     # 创建标签页
-    tab1, tab2, tab3 = st.tabs(["📤 上传权限表", "📋 权限配置", "📥 下载模板"])
+    tab1, tab2 = st.tabs(["📤 上传权限表", "📋 权限配置"])
     
     with tab1:
         st.subheader("上传权限表")
@@ -191,7 +203,7 @@ def create_permission_interface():
         uploaded_file = st.file_uploader(
             "选择权限表文件",
             type=['xlsx', 'xls', 'csv'],
-            help="文件必须包含'查询编号'和'门店名称'两列"
+            help="文件应包含查询编号和门店名称两列，系统会自动识别列名"
         )
         
         if uploaded_file is not None:
@@ -215,20 +227,29 @@ def create_permission_interface():
                     if result["success"]:
                         st.success("权限表上传成功！")
                         
-                        col1, col2, col3 = st.columns(3)
+                        # 显示检测到的列名
+                        if "detected_columns" in result:
+                            cols = result["detected_columns"]
+                            st.info(f"✅ 自动识别列名：查询编号列='{cols['query_code']}'，门店名称列='{cols['store_name']}'")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
-                            st.metric("处理记录数", result["processed"])
+                            st.metric("📊 处理记录数", result["processed"])
                         with col2:
-                            st.metric("新建权限", result["created"])
+                            st.metric("✅ 成功上传", result["created"] + result["updated"])
                         with col3:
-                            st.metric("更新权限", result["updated"])
+                            st.metric("🆕 新建权限", result["created"])
+                        with col4:
+                            st.metric("🔄 更新权限", result["updated"])
                         
                         if result["errors"]:
-                            st.warning("处理过程中出现以下问题：")
+                            st.warning(f"⚠️ 处理过程中出现 {len(result['errors'])} 个问题：")
                             for error in result["errors"]:
-                                st.write(f"- {error}")
+                                st.write(f"• {error}")
+                        else:
+                            st.success("🎉 所有记录处理成功，无错误！")
                     else:
-                        st.error(f"上传失败: {result['message']}")
+                        st.error(f"❌ 上传失败: {result['message']}")
                         
             except Exception as e:
                 st.error(f"文件预览失败: {e}")
@@ -255,31 +276,28 @@ def create_permission_interface():
         else:
             st.info("暂无权限配置")
     
-    with tab3:
-        st.subheader("下载权限表模板")
-        st.info("下载示例权限表模板，了解正确的文件格式")
-        
-        if st.button("生成模板文件"):
-            sample_file = permission_manager.create_sample_permission_table()
-            st.download_button(
-                label="📥 下载权限表模板",
-                data=sample_file,
-                file_name="权限表模板.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        st.subheader("文件格式说明")
+        # 文件格式说明
+        st.markdown("---")
+        st.subheader("📋 文件格式说明")
         st.markdown("""
-        权限表应包含以下列：
-        - **查询编号**: 用户输入的查询编号
-        - **门店名称**: 对应的门店名称
-        - **说明** (可选): 权限说明
+        **权限表文件要求：**
+        - 📄 支持Excel(.xlsx/.xls)和CSV格式
+        - 📊 至少包含两列数据：查询编号和门店名称
+        - 🔍 系统会自动识别列名（支持中英文）
+        - 🔗 一个查询编号只对应一个门店（一对一关系）
+        - 🔄 如果查询编号重复，新记录会覆盖旧记录
         
-        **注意事项:**
-        - 一个查询编号只能对应一个门店（一对一关系）
-        - 门店名称必须与系统中的门店名称完全匹配
-        - 支持Excel(.xlsx/.xls)和CSV格式
-        - 如果查询编号重复，后面的记录会覆盖前面的记录
+        **示例格式：**
+        ```
+        查询编号    门店名称
+        QC001      犀牛百货滨江店
+        QC002      犀牛百货西湖店
+        QC003      犀牛百货萧山店
+        ```
+        
+        **支持的列名关键词：**
+        - 查询编号列：查询编号、query、code、编号、代码、查询码
+        - 门店名称列：门店名称、store、门店、名称、name、shop
         """)
 
 if __name__ == "__main__":
