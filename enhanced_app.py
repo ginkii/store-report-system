@@ -12,13 +12,14 @@ from typing import Dict, List, Optional
 import numpy as np
 from config_manager import ConfigManager
 
-# 页面配置
-st.set_page_config(
-    page_title="门店报表查询系统",
-    page_icon="🏪",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# 页面配置（仅在直接运行时设置）
+if __name__ == "__main__":
+    st.set_page_config(
+        page_title="门店报表查询系统",
+        page_icon="🏪",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
 
 # MongoDB连接配置
 @st.cache_resource
@@ -424,7 +425,9 @@ def display_profit_report(reports: List[Dict]):
 
 # 主函数
 def main():
-    st.title("🏪 门店报表查询系统")
+    # 只在独立运行时显示标题
+    if __name__ == "__main__":
+        st.title("🏪 门店报表查询系统")
     
     # 验证配置
     if not ConfigManager.validate_config():
@@ -437,7 +440,7 @@ database_name = "store_reports"
     
     # 初始化数据库连接
     db = init_mongodb()
-    if not db:
+    if db is None:
         st.stop()
     
     # 检查是否已登录
