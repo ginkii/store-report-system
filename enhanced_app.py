@@ -102,26 +102,43 @@ def get_available_months(store_id: str, db) -> List[str]:
 def parse_receivables_amount(report: Dict) -> Dict:
     """从报表数据中解析应收未收金额（第82行合计列）"""
     try:
-        # 从financial_data中获取应收未收金额
-        financial_data = report.get('financial_data', {})
-        receivables = financial_data.get('receivables', {})
+        amount = 0
         
-        # 如果有直接存储的应收未收金额
-        if 'net_amount' in receivables:
-            amount = receivables['net_amount']
-        elif 'accounts_receivable' in receivables:
-            amount = receivables['accounts_receivable']
-        else:
-            # 如果没有直接数据，尝试从other_metrics中查找
-            other_metrics = financial_data.get('other_metrics', {})
-            amount = 0
-            for key, value in other_metrics.items():
-                if '第82行' in key or '合计' in key or '应收' in key or '未收' in key:
+        # 优先从原始Excel数据中查找第82行的合计列
+        raw_data = report.get('raw_excel_data', [])
+        if raw_data and len(raw_data) >= 82:  # 确保有第82行数据
+            # 查找第82行数据（索引为81）
+            row_82 = raw_data[81] if len(raw_data) > 81 else {}
+            
+            # 在第82行中查找"合计"列或相关列
+            for key, value in row_82.items():
+                key_str = str(key).lower()
+                if '合计' in key_str or 'total' in key_str or '小计' in key_str:
                     try:
-                        amount = float(value)
+                        amount = float(value) if value is not None else 0
                         break
                     except (ValueError, TypeError):
                         continue
+        
+        # 如果原始数据中没找到，从financial_data中获取
+        if amount == 0:
+            financial_data = report.get('financial_data', {})
+            receivables = financial_data.get('receivables', {})
+            
+            if 'net_amount' in receivables:
+                amount = receivables['net_amount']
+            elif 'accounts_receivable' in receivables:
+                amount = receivables['accounts_receivable']
+            else:
+                # 从other_metrics中查找
+                other_metrics = financial_data.get('other_metrics', {})
+                for key, value in other_metrics.items():
+                    if '第82行' in key and '合计' in key:
+                        try:
+                            amount = float(value)
+                            break
+                        except (ValueError, TypeError):
+                            continue
         
         # 根据金额正负判断类型
         if amount < 0:
@@ -164,23 +181,34 @@ def display_receivables_dashboard(reports: List[Dict]):
         st.warning("暂无数据")
         return
     
-    # 解析所有月份的应收未收数据
-    receivables_data = []
+    # 解析所有报表的应收未收数据并累计
+    total_should_pay = 0  # 门店应付总额
+    total_should_return = 0  # 总部应退总额
+    
     for report in reports:
         receivables_info = parse_receivables_amount(report)
-        receivables_data.append({
-            'month': report['report_month'],
-            'amount': receivables_info['amount'],
-            'type': receivables_info['type'],
-            'icon': receivables_info['icon']
-        })
+        
+        # 累计总额
+        if receivables_info['type'] == '门店应付':
+            total_should_pay += receivables_info['amount']
+        elif receivables_info['type'] == '总部应退':
+            total_should_return += receivables_info['amount']
     
-    # 显示每月的应收未收金额
-    for data in receivables_data:
-        if data['type'] in ['门店应付', '总部应退']:
+    # 显示汇总金额
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if total_should_pay > 0:
             st.metric(
-                label=f"{data['icon']} {data['month']} - {data['type']}",
-                value=f"¥{data['amount']:,.2f}"
+                label="💳 门店应付",
+                value=f"¥{total_should_pay:,.2f}"
+            )
+    
+    with col2:
+        if total_should_return > 0:
+            st.metric(
+                label="💰 总部应退",
+                value=f"¥{total_should_return:,.2f}"
             )
 
 # 显示完整门店报表（原始Excel数据）
@@ -192,70 +220,52 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         st.warning("暂无报表数据")
         return None
     
-    all_dataframes = []
+    # 直接显示最新报表的原始Excel数据
+    # 按月份倒序排列，显示最新的报表
+    reports_sorted = sorted(reports, key=lambda x: x['report_month'], reverse=True)
+    latest_report = reports_sorted[0]
     
-    for report in reports:
-        month = report['report_month']
-        
-        # 显示月份标题
-        st.markdown(f"### 📅 {month} 月报表")
-        
-        # 获取原始Excel数据
-        raw_data = report.get('raw_excel_data')
-        
-        if raw_data and isinstance(raw_data, list):
-            # 如果有原始Excel数据（records格式），直接显示
-            try:
-                df = pd.DataFrame(raw_data)
-                st.dataframe(df, use_container_width=True)
-                
-                # 添加月份信息到DataFrame
-                df_with_month = df.copy()
-                df_with_month.insert(0, '报表月份', month)
-                df_with_month.insert(0, '门店名称', store_info['store_name'])
-                all_dataframes.append(df_with_month)
-                
-            except Exception as e:
-                st.error(f"显示{month}月数据时出错: {e}")
-                # 如果原始数据有问题，使用备选方案
-                df_backup = create_fallback_dataframe(report, store_info, month)
-                if df_backup is not None:
-                    st.dataframe(df_backup, use_container_width=True)
-                    all_dataframes.append(df_backup)
-        elif raw_data and isinstance(raw_data, dict):
-            # 兼容旧的dict格式
-            try:
-                df = pd.DataFrame(raw_data)
-                st.dataframe(df, use_container_width=True)
-                
-                # 添加月份信息到DataFrame
-                df_with_month = df.copy()
-                df_with_month.insert(0, '报表月份', month)
-                df_with_month.insert(0, '门店名称', store_info['store_name'])
-                all_dataframes.append(df_with_month)
-                
-            except Exception as e:
-                st.error(f"显示{month}月数据时出错: {e}")
-                # 如果原始数据有问题，使用备选方案
-                df_backup = create_fallback_dataframe(report, store_info, month)
-                if df_backup is not None:
-                    st.dataframe(df_backup, use_container_width=True)
-                    all_dataframes.append(df_backup)
-        else:
-            # 如果没有原始数据，创建备选显示
-            df_backup = create_fallback_dataframe(report, store_info, month)
+    # 获取原始Excel数据
+    raw_data = latest_report.get('raw_excel_data')
+    
+    if raw_data and isinstance(raw_data, list):
+        # 直接显示原始Excel数据，不添加额外列
+        try:
+            df = pd.DataFrame(raw_data)
+            st.dataframe(df, use_container_width=True)
+            return df
+            
+        except Exception as e:
+            st.error(f"显示报表数据时出错: {e}")
+            # 使用备选方案
+            df_backup = create_fallback_dataframe(latest_report, store_info, latest_report['report_month'])
             if df_backup is not None:
                 st.dataframe(df_backup, use_container_width=True)
-                all_dataframes.append(df_backup)
-            else:
-                st.warning(f"{month}月暂无详细数据")
-    
-    # 合并所有月份的数据供下载
-    if all_dataframes:
-        combined_df = pd.concat(all_dataframes, ignore_index=True)
-        return combined_df
-    
-    return None
+                return df_backup
+            
+    elif raw_data and isinstance(raw_data, dict):
+        # 兼容旧的dict格式
+        try:
+            df = pd.DataFrame(raw_data)
+            st.dataframe(df, use_container_width=True)
+            return df
+            
+        except Exception as e:
+            st.error(f"显示报表数据时出错: {e}")
+            # 使用备选方案
+            df_backup = create_fallback_dataframe(latest_report, store_info, latest_report['report_month'])
+            if df_backup is not None:
+                st.dataframe(df_backup, use_container_width=True)
+                return df_backup
+    else:
+        # 如果没有原始数据，创建备选显示
+        df_backup = create_fallback_dataframe(latest_report, store_info, latest_report['report_month'])
+        if df_backup is not None:
+            st.dataframe(df_backup, use_container_width=True)
+            return df_backup
+        else:
+            st.warning("暂无详细数据")
+            return None
 
 def create_fallback_dataframe(report: Dict, store_info: Dict, month: str) -> pd.DataFrame:
     """创建备选数据框（当原始Excel数据不可用时）"""
@@ -520,7 +530,7 @@ database_name = "store_reports"
                         st.download_button(
                             label="📄 下载完整报表 (CSV)",
                             data=csv_data,
-                            file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.csv",
+                            file_name=f"{store_info['store_name']}_报表.csv",
                             mime="text/csv",
                             use_container_width=True
                         )
@@ -540,7 +550,7 @@ database_name = "store_reports"
                             st.download_button(
                                 label="📊 下载完整报表 (Excel)",
                                 data=excel_data,
-                                file_name=f"{store_info['store_name']}_报表_{min(df['报表月份'])}_至_{max(df['报表月份'])}.xlsx",
+                                file_name=f"{store_info['store_name']}_报表.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True
                             )
