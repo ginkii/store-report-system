@@ -1,5 +1,6 @@
 """
-门店报表查询系统 - Streamlit Cloud 部署入口
+门店报表查询系统 - 主入口文件
+包含查询编号认证、批量上传、权限管理等完整功能
 """
 
 import streamlit as st
