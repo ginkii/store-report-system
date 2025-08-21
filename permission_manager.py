@@ -170,9 +170,48 @@ class PermissionManager:
             return False
     
 
+# 管理员验证
+def verify_admin_password(password: str) -> bool:
+    """验证管理员密码"""
+    try:
+        # 从Streamlit secrets获取管理员密码
+        admin_password = st.secrets.get("security", {}).get("admin_password", "admin123")
+        return password == admin_password
+    except Exception:
+        return password == "admin123"  # 默认密码
+
 def create_permission_interface():
     """创建权限管理界面"""
     st.title("🔐 权限管理系统")
+    
+    # 检查管理员登录状态
+    if 'admin_authenticated_perm' not in st.session_state:
+        st.session_state.admin_authenticated_perm = False
+    
+    if not st.session_state.admin_authenticated_perm:
+        # 管理员登录页面
+        st.subheader("🔐 管理员登录")
+        
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            admin_password = st.text_input(
+                "管理员密码", 
+                type="password", 
+                placeholder="请输入管理员密码",
+                key="perm_admin_password"
+            )
+            
+            if st.button("登录", use_container_width=True, key="perm_admin_login"):
+                if admin_password:
+                    if verify_admin_password(admin_password):
+                        st.session_state.admin_authenticated_perm = True
+                        st.success("管理员登录成功！")
+                        st.rerun()
+                    else:
+                        st.error("管理员密码错误")
+                else:
+                    st.warning("请输入管理员密码")
+        return  # 未登录时直接返回
     
     # 初始化数据库连接
     @st.cache_resource
@@ -299,6 +338,12 @@ def create_permission_interface():
         - 查询编号列：查询编号、query、code、编号、代码、查询码
         - 门店名称列：门店名称、store、门店、名称、name、shop
         """)
+        
+        # 管理员退出登录
+        st.markdown("---")
+        if st.button("退出管理员登录", type="secondary"):
+            st.session_state.admin_authenticated_perm = False
+            st.rerun()
 
 if __name__ == "__main__":
     create_permission_interface()
