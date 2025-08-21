@@ -109,10 +109,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
         raw_data = report.get('raw_excel_data', [])
         
         if raw_data and len(raw_data) >= 80:
-            # 查找第82行数据（索引为81）
-            row_80 = raw_data[80] if len(raw_data) > 80 else {}
+            # 查找第80行数据（索引为79）
+            row_80 = raw_data[79] if len(raw_data) > 79 else {}
             
-            # 在第82行中查找"合计"列
+            # 在第80行中查找"合计"列
             for key, value in row_80.items():
                 if value is None:
                     continue
