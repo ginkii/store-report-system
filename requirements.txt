@@ -3,3 +3,5 @@
   pymongo>=4.5.0
   plotly>=5.17.0
   python-dotenv>=1.0.0
+  openpyxl>=3.0.0
+  xlsxwriter>=3.0.0
