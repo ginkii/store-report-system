@@ -39,18 +39,22 @@ def init_mongodb():
         st.error(f"数据库连接失败: {e}")
         return None
 
-# 密码验证
-def verify_password(store_code: str, password: str, db) -> bool:
-    """验证门店密码"""
+# 查询码验证
+def verify_query_code(query_code: str, db) -> Optional[Dict]:
+    """验证查询码并返回对应的门店（一对一关系）"""
     try:
-        stores_collection = db['stores']
-        store = stores_collection.find_one({'store_code': store_code})
-        if store:
-            return store.get('password') == password
-        return False
+        permissions_collection = db['permissions']
+        permission = permissions_collection.find_one({'query_code': query_code})
+        if permission:
+            store_id = permission.get('store_id')
+            if store_id:
+                stores_collection = db['stores']
+                store = stores_collection.find_one({'_id': store_id})
+                return store
+        return None
     except Exception as e:
         st.error(f"验证失败: {e}")
-        return False
+        return None
 
 # 获取门店信息
 def get_store_info(store_code: str, db) -> Optional[Dict]:
@@ -448,38 +452,37 @@ database_name = "store_reports"
         st.session_state.authenticated = False
     
     if not st.session_state.authenticated:
-        # 登录页面
-        st.subheader("🔐 门店登录")
+        # 查询码登录页面
+        st.subheader("🔐 门店查询系统")
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            store_code = st.text_input("门店代码", placeholder="请输入门店代码")
-            password = st.text_input("查询密码", type="password", placeholder="请输入查询密码")
+            query_code = st.text_input("查询编号", placeholder="请输入查询编号")
             
-            if st.button("登录", use_container_width=True):
-                if store_code and password:
-                    if verify_password(store_code, password, db):
-                        store_info = get_store_info(store_code, db)
-                        if store_info:
-                            st.session_state.authenticated = True
-                            st.session_state.store_info = store_info
-                            st.success("登录成功！")
-                            st.rerun()
-                        else:
-                            st.error("获取门店信息失败")
+            if st.button("查询", use_container_width=True):
+                if query_code:
+                    store = verify_query_code(query_code, db)
+                    if store:
+                        st.session_state.authenticated = True
+                        st.session_state.store_info = store
+                        st.session_state.query_code = query_code
+                        st.success(f"验证成功！进入 {store['store_name']} 报表系统")
+                        st.rerun()
                     else:
-                        st.error("门店代码或密码错误")
+                        st.error("查询编号无效")
                 else:
-                    st.warning("请输入门店代码和密码")
+                    st.warning("请输入查询编号")
     
     else:
         # 已登录，显示报表页面
         store_info = st.session_state.store_info
+        query_code = st.session_state.query_code
         
         # 侧边栏
         with st.sidebar:
-            st.subheader(f"欢迎 {store_info['store_name']}")
-            st.write(f"门店代码: {store_info['store_code']}")
+            st.subheader(f"查询编号: {query_code}")
+            st.info(f"当前门店: {store_info['store_name']}")
+            st.write(f"门店代码: {store_info.get('store_code', 'N/A')}")
             st.write(f"区域: {store_info.get('region', '未知')}")
             
             # 获取可用月份
@@ -505,9 +508,13 @@ database_name = "store_reports"
             if st.button("退出登录"):
                 st.session_state.authenticated = False
                 st.session_state.store_info = None
+                st.session_state.query_code = None
                 st.rerun()
         
         # 主内容区域
+        st.subheader(f"📊 {store_info['store_name']} 报表分析")
+        st.write(f"门店代码: {store_info.get('store_code', 'N/A')} | 区域: {store_info.get('region', '未知')}")
+        
         if selected_months:
             reports = get_report_data(store_info['_id'], selected_months, db)
             
