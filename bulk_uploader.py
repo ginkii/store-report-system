@@ -5,6 +5,7 @@ import streamlit as st
 from datetime import datetime
 import json
 import re
+import os
 from typing import Dict, List, Tuple
 import hashlib
 import time
@@ -59,11 +60,11 @@ class BulkReportUploader:
         name = re.sub(r'\s+', '', name)  # 移除所有空格
         return name
     
-    def find_store_by_name(self, sheet_name: str) -> Dict:
-        """通过sheet名称查找门店"""
+    def find_or_create_store(self, sheet_name: str) -> Dict:
+        """通过sheet名称查找门店，如果不存在则创建"""
         normalized_name = self.normalize_store_name(sheet_name)
         
-        # 尝试多种匹配方式
+        # 首先尝试查找现有门店
         search_patterns = [
             sheet_name,  # 完全匹配
             normalized_name,  # 标准化后匹配
@@ -82,7 +83,48 @@ class BulkReportUploader:
             if store:
                 return store
         
-        return None
+        # 如果没有找到，创建新门店
+        return self._create_store_from_sheet_name(sheet_name)
+    
+    def _create_store_from_sheet_name(self, sheet_name: str) -> Dict:
+        """从工作表名称创建新门店"""
+        try:
+            normalized_name = self.normalize_store_name(sheet_name)
+            
+            # 生成门店代码（使用标准化名称的拼音首字母或数字）
+            store_code = self._generate_store_code(normalized_name)
+            
+            store_data = {
+                '_id': f"store_{store_code}_{int(time.time())}",
+                'store_name': sheet_name.strip(),  # 使用原始名称
+                'store_code': store_code,
+                'region': '未分类',
+                'manager': '待设置',
+                'aliases': [sheet_name.strip(), normalized_name],
+                'created_at': datetime.now(),
+                'created_by': 'auto_upload',
+                'status': 'active'
+            }
+            
+            # 插入到数据库
+            self.stores_collection.insert_one(store_data)
+            return store_data
+            
+        except Exception as e:
+            print(f"创建门店失败: {e}")
+            return None
+    
+    def _generate_store_code(self, store_name: str) -> str:
+        """生成门店代码"""
+        try:
+            import hashlib
+            # 使用门店名称生成短码
+            hash_obj = hashlib.md5(store_name.encode('utf-8'))
+            short_hash = hash_obj.hexdigest()[:6].upper()
+            return f"AUTO_{short_hash}"
+        except Exception:
+            # 如果出错，使用时间戳
+            return f"AUTO_{int(time.time()) % 100000}"
     
     def process_excel_file(self, file_buffer, report_month: str, progress_callback=None) -> Dict:
         """处理Excel文件并上传报表数据"""
@@ -117,12 +159,13 @@ class BulkReportUploader:
                     if progress_callback:
                         progress_callback(progress, f"正在处理: {sheet_name}")
                     
-                    # 查找对应门店
-                    store = self.find_store_by_name(sheet_name)
+                    # 查找或创建对应门店
+                    store = self.find_or_create_store(sheet_name)
                     
                     if not store:
                         result['unmatched_sheets'].append(sheet_name)
                         result['failed_count'] += 1
+                        result['errors'].append(f"{sheet_name}: 无法创建门店记录")
                         continue
                     
                     # 处理报表数据
