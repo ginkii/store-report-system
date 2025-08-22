@@ -100,7 +100,7 @@ def get_available_months(store_id: str, db) -> List[str]:
 
 # 解析应收未收金额
 def parse_receivables_amount(report: Dict) -> Dict:
-    """从报表数据中解析应收金额（第1行找合计列，第80行取数值）"""
+    """从报表数据中解析应收金额（第1行找合计列，第81行取数值）"""
     try:
         amount = 0
         found = False
@@ -108,7 +108,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
         # 从原始Excel数据中查找合计列
         raw_data = report.get('raw_excel_data', [])
         
-        if raw_data and len(raw_data) > 79:  # 确保有第80行数据
+        if raw_data and len(raw_data) > 80:  # 确保有第81行数据
             # 第一步：在第1行（表头）找到"合计"列的位置
             total_column_key = None
             if len(raw_data) > 0:
@@ -131,11 +131,11 @@ def parse_receivables_amount(report: Dict) -> Dict:
                             total_column_key = key
                             break
             
-            # 第二步：如果找到了合计列，到第80行取该列的数值
-            if total_column_key is not None and len(raw_data) > 79:
-                row_80 = raw_data[79]  # 第80行（索引79）
-                if total_column_key in row_80:
-                    value = row_80[total_column_key]
+            # 第二步：如果找到了合计列，到第81行取该列的数值
+            if total_column_key is not None and len(raw_data) > 80:
+                row_81 = raw_data[80]  # 第81行（索引80）
+                if total_column_key in row_81:
+                    value = row_81[total_column_key]
                     if value is not None:
                         try:
                             amount = float(value)
@@ -143,10 +143,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
                         except (ValueError, TypeError):
                             pass
             
-            # 备选方案：如果没找到合计列，在第80行找任何包含"合计"的列
+            # 备选方案：如果没找到合计列，在第81行找任何包含"合计"的列
             if not found:
-                row_80 = raw_data[79]  # 第80行（索引79）
-                for key, value in row_80.items():
+                row_81 = raw_data[80]  # 第81行（索引80）
+                for key, value in row_81.items():
                     if value is None:
                         continue
                     
@@ -159,10 +159,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
                         except (ValueError, TypeError):
                             continue
             
-            # 最后备选：取第80行最后一个数值列
+            # 最后备选：取第81行最后一个数值列
             if not found:
-                row_80 = raw_data[79]  # 第80行（索引79）
-                for key, value in reversed(list(row_80.items())):
+                row_81 = raw_data[80]  # 第81行（索引80）
+                for key, value in reversed(list(row_81.items())):
                     if value is None:
                         continue
                     try:
@@ -288,10 +288,10 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     raw_data = latest_report.get('raw_excel_data')
     
     if raw_data and isinstance(raw_data, list):
-        # 跳过前两行，从第3行开始显示报表
+        # 跳过第1行，从第2行开始显示报表
         try:
-            # 跳过前两行（索引0和1），从第3行（索引2）开始
-            display_data = raw_data[2:] if len(raw_data) > 2 else raw_data
+            # 跳过第1行（索引0），从第2行（索引1）开始
+            display_data = raw_data[1:] if len(raw_data) > 1 else raw_data
             df = pd.DataFrame(display_data)
             st.dataframe(df, use_container_width=True)
             return df
