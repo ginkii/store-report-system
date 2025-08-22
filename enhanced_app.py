@@ -338,30 +338,6 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         try:
             df = pd.DataFrame(raw_data)
             
-            # 数据清理：过滤掉完全空的行和重复行
-            filtered_data = []
-            seen_rows = set()
-            
-            for i, row in enumerate(raw_data):
-                # 检查行是否完全为空
-                has_content = any(
-                    value is not None and str(value).strip() != '' and str(value).strip().lower() != 'null'
-                    for value in row.values()
-                )
-                
-                if has_content:
-                    # 创建行的hash用于去重
-                    row_str = str(sorted(row.items()))
-                    if row_str not in seen_rows:
-                        seen_rows.add(row_str)
-                        filtered_data.append(row)
-            
-            # 使用过滤后的数据重新创建DataFrame
-            if len(filtered_data) != len(raw_data):
-                df = pd.DataFrame(filtered_data)
-            else:
-                df = pd.DataFrame(raw_data)
-            
             # 格式化数值为2位小数（与下载功能保持一致）
             df_display = df.copy()
             for col in df_display.columns:
@@ -376,24 +352,7 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                     except:
                         pass
             
-            # 更精确地处理None值，只替换真正的None/NaN，保留有效的文字字段
-            for col in df_display.columns:
-                df_display[col] = df_display[col].apply(
-                    lambda x: '' if (pd.isna(x) or x is None or str(x).lower() == 'none' or str(x).lower() == 'null') 
-                    else x
-                )
-            
-            # 设置显示选项，确保月份和平台等信息完全显示
-            st.dataframe(
-                df_display, 
-                use_container_width=True,
-                column_config={
-                    col: st.column_config.TextColumn(
-                        width="medium"
-                    ) for col in df_display.columns
-                },
-                height=600
-            )
+            st.dataframe(df_display, use_container_width=True)
             return df
             
         except Exception as e:
@@ -423,24 +382,7 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                     except:
                         pass
             
-            # 更精确地处理None值，只替换真正的None/NaN，保留有效的文字字段
-            for col in df_display.columns:
-                df_display[col] = df_display[col].apply(
-                    lambda x: '' if (pd.isna(x) or x is None or str(x).lower() == 'none' or str(x).lower() == 'null') 
-                    else x
-                )
-            
-            # 设置显示选项，确保月份和平台等信息完全显示
-            st.dataframe(
-                df_display, 
-                use_container_width=True,
-                column_config={
-                    col: st.column_config.TextColumn(
-                        width="medium"
-                    ) for col in df_display.columns
-                },
-                height=600
-            )
+            st.dataframe(df_display, use_container_width=True)
             return df
             
         except Exception as e:
