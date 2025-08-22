@@ -597,7 +597,8 @@ database_name = "store_reports"
     
     if not st.session_state.authenticated:
         # 查询码登录页面
-        st.subheader("🔐 门店查询系统")
+        # 居中显示标题
+        st.markdown("<h2 style='text-align: center;'>🔐 门店查询系统</h2>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -725,4 +726,3 @@ database_name = "store_reports"
 
 if __name__ == "__main__":
     main()
-    
