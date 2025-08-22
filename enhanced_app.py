@@ -108,7 +108,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
         # 从原始Excel数据中查找合计列
         raw_data = report.get('raw_excel_data', [])
         
-        if raw_data and len(raw_data) > 80:  # 确保有第81行数据
+        if raw_data and len(raw_data) > 81:  # 确保有第82行数据
             # 第一步：在第1行（表头）找到"合计"列的位置
             total_column_key = None
             if len(raw_data) > 0:
@@ -131,11 +131,11 @@ def parse_receivables_amount(report: Dict) -> Dict:
                             total_column_key = key
                             break
             
-            # 第二步：如果找到了合计列，到第81行取该列的数值
-            if total_column_key is not None and len(raw_data) > 80:
-                row_81 = raw_data[80]  # 第81行（索引80）
-                if total_column_key in row_81:
-                    value = row_81[total_column_key]
+            # 第二步：如果找到了合计列，到第82行取该列的数值
+            if total_column_key is not None and len(raw_data) > 81:
+                row_82 = raw_data[81]  # 第82行（索引81）
+                if total_column_key in row_82:
+                    value = row_82[total_column_key]
                     if value is not None:
                         try:
                             amount = float(value)
@@ -143,10 +143,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
                         except (ValueError, TypeError):
                             pass
             
-            # 备选方案：如果没找到合计列，在第81行找任何包含"合计"的列
+            # 备选方案：如果没找到合计列，在第82行找任何包含"合计"的列
             if not found:
-                row_81 = raw_data[80]  # 第81行（索引80）
-                for key, value in row_81.items():
+                row_82 = raw_data[81]  # 第82行（索引81）
+                for key, value in row_82.items():
                     if value is None:
                         continue
                     
@@ -159,10 +159,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
                         except (ValueError, TypeError):
                             continue
             
-            # 最后备选：取第81行最后一个数值列
+            # 最后备选：取第82行最后一个数值列
             if not found:
-                row_81 = raw_data[80]  # 第81行（索引80）
-                for key, value in reversed(list(row_81.items())):
+                row_82 = raw_data[81]  # 第82行（索引81）
+                for key, value in reversed(list(row_82.items())):
                     if value is None:
                         continue
                     try:
