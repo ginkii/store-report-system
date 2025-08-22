@@ -222,33 +222,20 @@ def display_receivables_dashboard(reports: List[Dict]):
         st.warning("暂无数据")
         return
     
-    # 解析所有报表的应收金额并累计
-    total_amount = 0
+    # 解析最新报表的应收金额（不累计，只取一个报表的数据）
     display_type = "已结清"
     display_icon = "✅"
+    display_amount = 0
     
-    for report in reports:
-        receivables_info = parse_receivables_amount(report)
+    if reports:
+        # 取最新的报表（按月份倒序排列后取第一个）
+        latest_report = sorted(reports, key=lambda x: x['report_month'], reverse=True)[0]
+        receivables_info = parse_receivables_amount(latest_report)
         
-        # 累计金额（保持正负号）
-        if receivables_info['type'] == '门店应付':
-            total_amount += receivables_info['amount']
-        elif receivables_info['type'] == '总部应退':
-            total_amount -= receivables_info['amount']  # 总部应退作为负数累计
-    
-    # 根据累计后的金额确定显示类型
-    if total_amount < 0:
-        display_type = "总部应退"
-        display_icon = "💰"
-        display_amount = abs(total_amount)
-    elif total_amount > 0:
-        display_type = "门店应付"
-        display_icon = "💳"
-        display_amount = total_amount
-    else:
-        display_type = "已结清"
-        display_icon = "✅"
-        display_amount = 0
+        # 直接使用解析结果
+        display_type = receivables_info['type']
+        display_icon = receivables_info['icon']
+        display_amount = receivables_info['amount']
     
     # 显示大字体的金额指标
     if display_amount > 0:
