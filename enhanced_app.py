@@ -353,7 +353,17 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
             # 将None值替换为空字符串，避免显示"None"
             df_display = df_display.fillna('')
             
-            st.dataframe(df_display, use_container_width=True)
+            # 设置显示选项，确保月份和平台等信息完全显示
+            st.dataframe(
+                df_display, 
+                use_container_width=True,
+                column_config={
+                    col: st.column_config.TextColumn(
+                        width="medium"
+                    ) for col in df_display.columns
+                },
+                height=600
+            )
             return df
             
         except Exception as e:
@@ -386,7 +396,17 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
             # 将None值替换为空字符串，避免显示"None"
             df_display = df_display.fillna('')
             
-            st.dataframe(df_display, use_container_width=True)
+            # 设置显示选项，确保月份和平台等信息完全显示
+            st.dataframe(
+                df_display, 
+                use_container_width=True,
+                column_config={
+                    col: st.column_config.TextColumn(
+                        width="medium"
+                    ) for col in df_display.columns
+                },
+                height=600
+            )
             return df
             
         except Exception as e:
