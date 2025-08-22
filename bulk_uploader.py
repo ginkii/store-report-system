@@ -239,8 +239,8 @@ class BulkReportUploader:
     def _process_sheet_data(self, df: pd.DataFrame, store: Dict, report_month: str, sheet_name: str) -> Dict:
         """处理单个工作表的数据"""
         try:
-            # 数据清洗和预处理
-            df_cleaned = df.dropna(how='all').dropna(axis=1, how='all')
+            # 数据清洗和预处理 - 保留所有行，只删除完全空的列
+            df_cleaned = df.dropna(axis=1, how='all')
             
             if df_cleaned.empty:
                 return None
