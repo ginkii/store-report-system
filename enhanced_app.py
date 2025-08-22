@@ -338,6 +338,9 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         try:
             df = pd.DataFrame(raw_data)
             
+            # 调试：查看原始数据的前3行
+            st.expander("🔍 原始数据前3行", expanded=False).write(df.head(3).to_dict())
+            
             # 格式化数值为2位小数并处理空值
             df_display = df.copy()
             for col in df_display.columns:
@@ -352,8 +355,14 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                     except:
                         pass
             
+            # 调试：查看数值格式化后的前3行
+            st.expander("🔍 数值格式化后前3行", expanded=False).write(df_display.head(3).to_dict())
+            
             # 将空值显示为空白而不是None
             df_display = df_display.fillna('')
+            
+            # 调试：查看fillna后的前3行
+            st.expander("🔍 fillna后前3行", expanded=False).write(df_display.head(3).to_dict())
             
             st.dataframe(df_display, use_container_width=True)
             return df
