@@ -112,7 +112,13 @@ def parse_receivables_amount(report: Dict) -> Dict:
             # 第一步：在第2行（表头，跳过第1行）找到"合计"列的位置
             total_column_key = None
             if len(raw_data) > 1:
+                # 跳过第1行（索引0），使用第2行（索引1）作为表头
                 header_row = raw_data[1]  # 第2行作为表头（索引1）
+                
+                # 临时调试：显示使用的表头行
+                st.write(f"调试 - 使用第2行作为表头: {header_row}")
+                st.write(f"调试 - 找到的合计列键: {total_column_key}")
+                
                 # 优先查找列值包含"合计"的
                 for key, value in header_row.items():
                     if value is not None:
