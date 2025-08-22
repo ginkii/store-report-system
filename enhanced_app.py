@@ -199,7 +199,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
                 'amount': amount,
                 'type': '门店应付',
                 'color': 'orange',
-                'icon': '📤'
+                'icon': '💰'
             }
         else:
             return {
@@ -239,54 +239,76 @@ def display_receivables_dashboard(reports: List[Dict]):
         display_icon = receivables_info['icon']
         display_amount = receivables_info['amount']
     
-    # 显示大字体的金额指标
+    # 显示大字体的金额指标，带背景渐变
     if display_amount > 0:
-        # 使用Streamlit的metric组件确保emoji正确显示
-        st.markdown(f"""
-        <div style="text-align: center; padding: 20px;">
-        </div>
-        """, unsafe_allow_html=True)
-        
         if display_type == '总部应退':
             st.markdown(f"""
-            <div style="text-align: center;">
-                <h1 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0; font-size: 2.5rem; font-weight: bold;">
+            <div style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                border-radius: 15px;
+                padding: 30px;
+                margin: 20px 0;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
+            ">
+                <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
                     💰 总部应退
                 </h1>
-                <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
                     ¥{display_amount:,.2f}
                 </h2>
             </div>
             """, unsafe_allow_html=True)
         elif display_type == '门店应付':
             st.markdown(f"""
-            <div style="text-align: center;">
-                <h1 style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0; font-size: 2.5rem; font-weight: bold;">
-                    📤 门店应付
+            <div style="
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                border-radius: 15px;
+                padding: 30px;
+                margin: 20px 0;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(245, 87, 108, 0.3);
+            ">
+                <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
+                    💰 门店应付
                 </h1>
-                <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
                     ¥{display_amount:,.2f}
                 </h2>
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
-            <div style="text-align: center;">
-                <h1 style="color: #00cc88; margin: 0; font-size: 2.5rem; font-weight: bold;">
+            <div style="
+                background: linear-gradient(135deg, #00cc88 0%, #00a86b 100%);
+                border-radius: 15px;
+                padding: 30px;
+                margin: 20px 0;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(0, 204, 136, 0.3);
+            ">
+                <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
                     ✅ 已结清
                 </h1>
-                <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
                     ¥{display_amount:,.2f}
                 </h2>
             </div>
             """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
-        <div style="text-align: center; padding: 20px;">
-            <h1 style="color: #00cc88; margin: 0; font-size: 2.5rem; font-weight: bold;">
+        <div style="
+            background: linear-gradient(135deg, #00cc88 0%, #00a86b 100%);
+            border-radius: 15px;
+            padding: 30px;
+            margin: 20px 0;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 204, 136, 0.3);
+        ">
+            <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
                 ✅ 已结清
             </h1>
-            <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+            <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
                 ¥0.00
             </h2>
         </div>
