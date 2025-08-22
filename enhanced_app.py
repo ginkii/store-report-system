@@ -332,10 +332,25 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     raw_data = latest_report.get('raw_excel_data')
     
     if raw_data and isinstance(raw_data, list):
-        # 直接显示完整的原始Excel数据
+        # 直接显示完整的原始Excel数据，格式化数值为2位小数
         try:
             df = pd.DataFrame(raw_data)
-            st.dataframe(df, use_container_width=True)
+            
+            # 格式化数值为2位小数（与下载功能保持一致）
+            df_display = df.copy()
+            for col in df_display.columns:
+                if df_display[col].dtype in ['float64', 'float32']:
+                    df_display[col] = df_display[col].round(2)
+                else:
+                    # 尝试将可转换的字符串转为数值并格式化
+                    try:
+                        numeric_series = pd.to_numeric(df_display[col], errors='coerce')
+                        if not numeric_series.isna().all():  # 如果有数值
+                            df_display[col] = numeric_series.round(2)
+                    except:
+                        pass
+            
+            st.dataframe(df_display, use_container_width=True)
             return df
             
         except Exception as e:
@@ -347,10 +362,25 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                 return df_backup
             
     elif raw_data and isinstance(raw_data, dict):
-        # 兼容旧的dict格式
+        # 兼容旧的dict格式，格式化数值为2位小数
         try:
             df = pd.DataFrame(raw_data)
-            st.dataframe(df, use_container_width=True)
+            
+            # 格式化数值为2位小数（与下载功能保持一致）
+            df_display = df.copy()
+            for col in df_display.columns:
+                if df_display[col].dtype in ['float64', 'float32']:
+                    df_display[col] = df_display[col].round(2)
+                else:
+                    # 尝试将可转换的字符串转为数值并格式化
+                    try:
+                        numeric_series = pd.to_numeric(df_display[col], errors='coerce')
+                        if not numeric_series.isna().all():  # 如果有数值
+                            df_display[col] = numeric_series.round(2)
+                    except:
+                        pass
+            
+            st.dataframe(df_display, use_container_width=True)
             return df
             
         except Exception as e:
@@ -695,3 +725,4 @@ database_name = "store_reports"
 
 if __name__ == "__main__":
     main()
+    
