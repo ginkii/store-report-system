@@ -100,7 +100,7 @@ def get_available_months(store_id: str, db) -> List[str]:
 
 # 解析应收未收金额
 def parse_receivables_amount(report: Dict) -> Dict:
-    """从报表数据中解析应收金额（第2行找合计列，第80行取数值）"""
+    """从报表数据中解析应收金额（第1行找合计列，第80行取数值）"""
     try:
         amount = 0
         found = False
@@ -109,15 +109,11 @@ def parse_receivables_amount(report: Dict) -> Dict:
         raw_data = report.get('raw_excel_data', [])
         
         if raw_data and len(raw_data) > 79:  # 确保有第80行数据
-            # 第一步：在第2行（表头，跳过第1行）找到"合计"列的位置
+            # 第一步：在第1行（表头）找到"合计"列的位置
             total_column_key = None
-            if len(raw_data) > 1:
-                # 跳过第1行（索引0），使用第2行（索引1）作为表头
-                header_row = raw_data[1]  # 第2行作为表头（索引1）
-                
-                # 临时调试：显示使用的表头行
-                st.write(f"调试 - 使用第2行作为表头: {header_row}")
-                st.write(f"调试 - 找到的合计列键: {total_column_key}")
+            if len(raw_data) > 0:
+                # 使用第1行（索引0）作为表头查找合计列
+                header_row = raw_data[0]  # 第1行作为表头（索引0）
                 
                 # 优先查找列值包含"合计"的
                 for key, value in header_row.items():
@@ -292,9 +288,11 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     raw_data = latest_report.get('raw_excel_data')
     
     if raw_data and isinstance(raw_data, list):
-        # 直接显示原始Excel数据，不添加额外列
+        # 跳过前两行，从第3行开始显示报表
         try:
-            df = pd.DataFrame(raw_data)
+            # 跳过前两行（索引0和1），从第3行（索引2）开始
+            display_data = raw_data[2:] if len(raw_data) > 2 else raw_data
+            df = pd.DataFrame(display_data)
             st.dataframe(df, use_container_width=True)
             return df
             
