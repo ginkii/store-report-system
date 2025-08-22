@@ -288,11 +288,27 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     raw_data = latest_report.get('raw_excel_data')
     
     if raw_data and isinstance(raw_data, list):
-        # 跳过第1行，从第2行开始显示报表
+        # 从第1行开始显示报表，使用第2行作为表头，索引从1开始
         try:
-            # 跳过第1行（索引0），从第2行（索引1）开始
-            display_data = raw_data[1:] if len(raw_data) > 1 else raw_data
-            df = pd.DataFrame(display_data)
+            df = pd.DataFrame(raw_data)
+            
+            # 如果有第2行数据，用第2行作为列名
+            if len(raw_data) > 1:
+                # 获取第2行数据作为新的列名
+                new_columns = []
+                row_2 = raw_data[1]  # 第2行（索引1）
+                for i, (key, value) in enumerate(row_2.items()):
+                    if value is not None and str(value).strip():
+                        new_columns.append(str(value).strip())
+                    else:
+                        new_columns.append(f"列{i+1}")  # 如果第2行为空，使用默认列名
+                
+                # 设置新的列名
+                if len(new_columns) == len(df.columns):
+                    df.columns = new_columns
+            
+            # 设置索引从1开始而不是0
+            df.index = df.index + 1
             st.dataframe(df, use_container_width=True)
             return df
             
