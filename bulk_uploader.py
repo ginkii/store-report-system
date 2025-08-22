@@ -240,7 +240,9 @@ class BulkReportUploader:
         """处理单个工作表的数据"""
         try:
             # 数据清洗和预处理 - 保留所有行，只删除完全空的列
+            print(f"原始数据行数: {len(df)}")
             df_cleaned = df.dropna(axis=1, how='all')
+            print(f"清洗后行数: {len(df_cleaned)}")
             
             if df_cleaned.empty:
                 return None
@@ -269,6 +271,11 @@ class BulkReportUploader:
                     else:
                         row_dict[key] = str(value)
                 raw_excel_data.append(row_dict)
+            
+            print(f"最终存储行数: {len(raw_excel_data)}")
+            if len(raw_excel_data) > 0:
+                print(f"第一行keys: {list(raw_excel_data[0].keys())}")
+                print(f"第一行内容: {raw_excel_data[0]}")
             
             # 构建报表数据结构
             report_data = {
