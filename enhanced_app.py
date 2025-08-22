@@ -628,8 +628,22 @@ database_name = "store_reports"
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        # CSV下载
-                        csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+                        # CSV下载 - 格式化数值为2位小数
+                        df_formatted = df.copy()
+                        # 遍历所有列，对数值列保留2位小数
+                        for col in df_formatted.columns:
+                            if df_formatted[col].dtype in ['float64', 'float32']:
+                                df_formatted[col] = df_formatted[col].round(2)
+                            else:
+                                # 尝试将可转换的字符串转为数值并格式化
+                                try:
+                                    numeric_series = pd.to_numeric(df_formatted[col], errors='coerce')
+                                    if not numeric_series.isna().all():  # 如果有数值
+                                        df_formatted[col] = numeric_series.round(2)
+                                except:
+                                    pass
+                        
+                        csv_data = df_formatted.to_csv(index=False, encoding='utf-8-sig')
                         st.download_button(
                             label="📄 下载完整报表 (CSV)",
                             data=csv_data,
@@ -639,15 +653,30 @@ database_name = "store_reports"
                         )
                     
                     with col2:
-                        # Excel下载
+                        # Excel下载 - 格式化数值为2位小数
                         try:
                             if len(df) > 1000:
                                 st.info("数据量较大，建议使用CSV格式")
                             
+                            # 格式化数值为2位小数（与CSV下载保持一致）
+                            df_formatted_excel = df.copy()
+                            # 遍历所有列，对数值列保留2位小数
+                            for col in df_formatted_excel.columns:
+                                if df_formatted_excel[col].dtype in ['float64', 'float32']:
+                                    df_formatted_excel[col] = df_formatted_excel[col].round(2)
+                                else:
+                                    # 尝试将可转换的字符串转为数值并格式化
+                                    try:
+                                        numeric_series = pd.to_numeric(df_formatted_excel[col], errors='coerce')
+                                        if not numeric_series.isna().all():  # 如果有数值
+                                            df_formatted_excel[col] = numeric_series.round(2)
+                                    except:
+                                        pass
+                            
                             import io
                             excel_buffer = io.BytesIO()
                             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                                df.to_excel(writer, sheet_name='门店报表', index=False)
+                                df_formatted_excel.to_excel(writer, sheet_name='门店报表', index=False)
                             excel_data = excel_buffer.getvalue()
                             
                             st.download_button(
