@@ -350,6 +350,9 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                     except:
                         pass
             
+            # 将None值替换为空字符串，避免显示"None"
+            df_display = df_display.fillna('')
+            
             st.dataframe(df_display, use_container_width=True)
             return df
             
@@ -379,6 +382,9 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                             df_display[col] = numeric_series.round(2)
                     except:
                         pass
+            
+            # 将None值替换为空字符串，避免显示"None"
+            df_display = df_display.fillna('')
             
             st.dataframe(df_display, use_container_width=True)
             return df
