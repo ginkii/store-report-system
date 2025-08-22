@@ -113,13 +113,19 @@ def parse_receivables_amount(report: Dict) -> Dict:
             total_column_key = None
             if len(raw_data) > 0:
                 header_row = raw_data[0]
+                # 优先查找列值包含"合计"的
                 for key, value in header_row.items():
                     if value is not None:
-                        key_str = str(key)
-                        value_str = str(value)
-                        # 检查列名或列值是否包含"合计"
-                        if '合计' in key_str or 'total' in key_str.lower() or '小计' in key_str or \
-                           '合计' in value_str or 'total' in value_str.lower() or '小计' in value_str:
+                        value_str = str(value).strip()
+                        if '合计' in value_str or 'total' in value_str.lower() or '小计' in value_str:
+                            total_column_key = key
+                            break
+                
+                # 如果没找到，再查找列名包含"合计"的
+                if total_column_key is None:
+                    for key, value in header_row.items():
+                        key_str = str(key).strip()
+                        if '合计' in key_str or 'total' in key_str.lower() or '小计' in key_str:
                             total_column_key = key
                             break
             
@@ -212,8 +218,6 @@ def parse_receivables_amount(report: Dict) -> Dict:
 # 显示应收未收看板
 def display_receivables_dashboard(reports: List[Dict]):
     """显示应收未收金额看板（简化版）"""
-    st.subheader("💰 应收未收金额")
-    
     if not reports:
         st.warning("暂无数据")
         return
@@ -246,11 +250,36 @@ def display_receivables_dashboard(reports: List[Dict]):
         display_icon = "✅"
         display_amount = 0
     
-    # 显示单一金额指标
-    st.metric(
-        label=f"{display_icon} {display_type}",
-        value=f"¥{display_amount:,.2f}" if display_amount > 0 else "¥0.00"
-    )
+    # 显示大字体的金额指标
+    if display_amount > 0:
+        if display_type == '总部应退':
+            gradient_style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"
+        elif display_type == '门店应付':
+            gradient_style = "background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"
+        else:
+            gradient_style = "color: #00cc88;"
+        
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px;">
+            <h1 style="{gradient_style} margin: 0; font-size: 2.5rem; font-weight: bold;">
+                {display_icon} {display_type}
+            </h1>
+            <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                ¥{display_amount:,.2f}
+            </h2>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px;">
+            <h1 style="color: #00cc88; margin: 0; font-size: 2.5rem; font-weight: bold;">
+                {display_icon} {display_type}
+            </h1>
+            <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                ¥0.00
+            </h2>
+        </div>
+        """, unsafe_allow_html=True)
 
 # 显示完整门店报表（原始Excel数据）
 def display_complete_report(reports: List[Dict], store_info: Dict):
