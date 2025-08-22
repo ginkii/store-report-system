@@ -288,24 +288,9 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     raw_data = latest_report.get('raw_excel_data')
     
     if raw_data and isinstance(raw_data, list):
-        # 从第2行开始显示报表数据，使用第2行作为表头
+        # 直接显示完整的原始Excel数据
         try:
-            if len(raw_data) > 1:
-                # 使用第2行（索引1）的值作为列名
-                header_row = raw_data[1]
-                column_names = [str(value) if value is not None else f"列{i+1}" 
-                              for i, (key, value) in enumerate(header_row.items())]
-                
-                # 从第2行开始显示（索引1往后）
-                display_data = raw_data[1:]  # 第2行往后所有数据
-                df = pd.DataFrame(display_data)
-                df.columns = column_names[:len(df.columns)]  # 设置列名
-                df.index = range(2, len(display_data) + 2)  # 索引从2开始（对应第2行）
-            else:
-                # 如果数据不够，直接显示
-                df = pd.DataFrame(raw_data)
-                df.index = df.index + 1
-            
+            df = pd.DataFrame(raw_data)
             st.dataframe(df, use_container_width=True)
             return df
             
