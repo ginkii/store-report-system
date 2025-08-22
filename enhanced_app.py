@@ -100,7 +100,7 @@ def get_available_months(store_id: str, db) -> List[str]:
 
 # 解析应收未收金额
 def parse_receivables_amount(report: Dict) -> Dict:
-    """从报表数据中解析应收金额（第0行找合计列，第80行取数值）"""
+    """从报表数据中解析应收金额（第2行找合计列，第80行取数值）"""
     try:
         amount = 0
         found = False
@@ -109,10 +109,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
         raw_data = report.get('raw_excel_data', [])
         
         if raw_data and len(raw_data) > 79:  # 确保有第80行数据
-            # 第一步：在第0行（表头）找到"合计"列的位置
+            # 第一步：在第2行（表头，跳过第1行）找到"合计"列的位置
             total_column_key = None
-            if len(raw_data) > 0:
-                header_row = raw_data[0]
+            if len(raw_data) > 1:
+                header_row = raw_data[1]  # 第2行作为表头（索引1）
                 # 优先查找列值包含"合计"的
                 for key, value in header_row.items():
                     if value is not None:
@@ -131,7 +131,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
             
             # 第二步：如果找到了合计列，到第80行取该列的数值
             if total_column_key is not None and len(raw_data) > 79:
-                row_80 = raw_data[79]
+                row_80 = raw_data[79]  # 第80行（索引79）
                 if total_column_key in row_80:
                     value = row_80[total_column_key]
                     if value is not None:
@@ -143,7 +143,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
             
             # 备选方案：如果没找到合计列，在第80行找任何包含"合计"的列
             if not found:
-                row_80 = raw_data[79]
+                row_80 = raw_data[79]  # 第80行（索引79）
                 for key, value in row_80.items():
                     if value is None:
                         continue
@@ -159,7 +159,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
             
             # 最后备选：取第80行最后一个数值列
             if not found:
-                row_80 = raw_data[79]
+                row_80 = raw_data[79]  # 第80行（索引79）
                 for key, value in reversed(list(row_80.items())):
                     if value is None:
                         continue
