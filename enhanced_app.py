@@ -100,35 +100,46 @@ def get_available_months(store_id: str, db) -> List[str]:
 
 # 解析应收未收金额
 def parse_receivables_amount(report: Dict) -> Dict:
-    """从报表数据中解析应收未收金额（第82行合计列）"""
+    """从报表数据中解析应收未收金额（第80行合计列）"""
     try:
         amount = 0
         found = False
         
-         # 优先从原始Excel数据中查找第80行的合计列
+        # 从原始Excel数据中查找应收未收金额
         raw_data = report.get('raw_excel_data', [])
         
-        if raw_data and len(raw_data) >= 80:
-            # 查找第80行数据（索引为79）
-            row_81 = raw_data[80] if len(raw_data) > 80 else {}
+        if raw_data:
+            # 同时查找第80行和第82行的合计列（原始表第82行对应展示表第80行）
+            target_rows = []
+            if len(raw_data) > 79:  # 第80行（索引79）
+                target_rows.append((79, raw_data[79]))
+            if len(raw_data) > 81:  # 第82行（索引81） 
+                target_rows.append((81, raw_data[81]))
             
-            # 在第80行中查找"合计"列
-            for key, value in row_81.items():
-                if value is None:
+            # 在目标行中查找"合计"列
+            for row_idx, row_data in target_rows:
+                if not row_data:
                     continue
-                
-                key_str = str(key)
-                if '合计' in key_str or 'total' in key_str.lower() or '小计' in key_str:
-                    try:
-                        amount = float(value)
-                        found = True
-                        break
-                    except (ValueError, TypeError):
+                    
+                for key, value in row_data.items():
+                    if value is None:
                         continue
+                    
+                    key_str = str(key)
+                    if '合计' in key_str or 'total' in key_str.lower() or '小计' in key_str:
+                        try:
+                            amount = float(value)
+                            found = True
+                            break
+                        except (ValueError, TypeError):
+                            continue
+                
+                if found:
+                    break
             
-           # 如果第80行没找到合计列，在第80行上下范围（第78-82行）查找"应收-未收额"字段
+            # 如果没找到合计列，在第78-84行范围查找"应收-未收额"字段
             if not found:
-                search_range = range(max(0, 77), min(len(raw_data), 83))  # 第78-82行（索引77-82）
+                search_range = range(max(0, 77), min(len(raw_data), 85))  # 第78-84行（索引77-84）
                 
                 for row_idx in search_range:
                     if row_idx >= len(raw_data):
@@ -184,18 +195,23 @@ def parse_receivables_amount(report: Dict) -> Dict:
                     if found:
                         break
             
-             # 如果还是没找到，查找第80行中所有数值列，取最后一个非零值
+            # 如果还是没找到，在目标行中查找所有数值列，取最后一个非零值
             if not found:
-                for key, value in row_80.items():
-                    if value is None:
+                for row_idx, row_data in target_rows:
+                    if not row_data:
                         continue
-                    try:
-                        temp_amount = float(value)
-                        if temp_amount != 0:
-                            amount = temp_amount
-                            found = True
-                    except (ValueError, TypeError):
-                        continue
+                    for key, value in row_data.items():
+                        if value is None:
+                            continue
+                        try:
+                            temp_amount = float(value)
+                            if temp_amount != 0:
+                                amount = temp_amount
+                                found = True
+                        except (ValueError, TypeError):
+                            continue
+                    if found:
+                        break
         
         # 如果原始数据中没找到，从financial_data中获取
         if not found:
@@ -266,6 +282,14 @@ def display_receivables_dashboard(reports: List[Dict]):
     
     for report in reports:
         receivables_info = parse_receivables_amount(report)
+        
+        # 临时调试：显示第80和82行的数据
+        raw_data = report.get('raw_excel_data', [])
+        if raw_data:
+            if len(raw_data) > 79:
+                st.text(f"第80行数据: {raw_data[79]}")
+            if len(raw_data) > 81:
+                st.text(f"第82行数据: {raw_data[81]}")
         
         # 累计总额
         if receivables_info['type'] == '门店应付':
