@@ -336,10 +336,18 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         try:
             df = pd.DataFrame(raw_data)
             
-            # 调试信息：显示数据结构
+            # 调试信息：显示数据结构和前几行内容
             st.info(f"📊 数据调试信息：共 {len(raw_data)} 行，{len(df.columns)} 列")
             if len(raw_data) > 0:
                 st.info(f"🔍 前两行预览：第0行有 {len(raw_data[0])} 个字段，第1行有 {len(raw_data[1]) if len(raw_data) > 1 else 0} 个字段")
+                
+                # 显示前5行的详细内容
+                st.expander("🔍 前5行详细内容", expanded=False).write({
+                    f"第{i}行": raw_data[i] for i in range(min(5, len(raw_data)))
+                })
+                
+                # 显示DataFrame的前5行
+                st.expander("📋 DataFrame前5行", expanded=False).dataframe(df.head(5))
             
             # 格式化数值为2位小数（与下载功能保持一致）
             df_display = df.copy()
