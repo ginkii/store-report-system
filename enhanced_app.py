@@ -199,7 +199,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
                 'amount': amount,
                 'type': '门店应付',
                 'color': 'orange',
-                'icon': '💳'
+                'icon': '💰'
             }
         else:
             return {
@@ -239,32 +239,76 @@ def display_receivables_dashboard(reports: List[Dict]):
         display_icon = receivables_info['icon']
         display_amount = receivables_info['amount']
     
-    # 显示大字体的金额指标
+    # 显示大字体的金额指标，带背景渐变
     if display_amount > 0:
         if display_type == '总部应退':
-            gradient_style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                border-radius: 15px;
+                padding: 30px;
+                margin: 20px 0;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
+            ">
+                <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
+                    💰 总部应退
+                </h1>
+                <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
+                    ¥{display_amount:,.2f}
+                </h2>
+            </div>
+            """, unsafe_allow_html=True)
         elif display_type == '门店应付':
-            gradient_style = "background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                border-radius: 15px;
+                padding: 30px;
+                margin: 20px 0;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(245, 87, 108, 0.3);
+            ">
+                <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
+                    💰 门店应付
+                </h1>
+                <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
+                    ¥{display_amount:,.2f}
+                </h2>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            gradient_style = "color: #00cc88;"
-        
-        st.markdown(f"""
-        <div style="text-align: center; padding: 20px;">
-            <h1 style="{gradient_style} margin: 0; font-size: 2.5rem; font-weight: bold;">
-                {display_icon} {display_type}
-            </h1>
-            <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
-                ¥{display_amount:,.2f}
-            </h2>
-        </div>
-        """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="
+                background: linear-gradient(135deg, #00cc88 0%, #00a86b 100%);
+                border-radius: 15px;
+                padding: 30px;
+                margin: 20px 0;
+                text-align: center;
+                box-shadow: 0 8px 32px rgba(0, 204, 136, 0.3);
+            ">
+                <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
+                    ✅ 已结清
+                </h1>
+                <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
+                    ¥{display_amount:,.2f}
+                </h2>
+            </div>
+            """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
-        <div style="text-align: center; padding: 20px;">
-            <h1 style="color: #00cc88; margin: 0; font-size: 2.5rem; font-weight: bold;">
-                {display_icon} {display_type}
+        <div style="
+            background: linear-gradient(135deg, #00cc88 0%, #00a86b 100%);
+            border-radius: 15px;
+            padding: 30px;
+            margin: 20px 0;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 204, 136, 0.3);
+        ">
+            <h1 style="color: white; margin: 0; font-size: 2.5rem; font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
+                ✅ 已结清
             </h1>
-            <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+            <h2 style="margin: 15px 0 0 0; color: white; font-size: 2.2rem; text-shadow: 1px 1px 2px rgba(0,0,0,0.3);">
                 ¥0.00
             </h2>
         </div>
@@ -279,6 +323,7 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         st.warning("暂无报表数据")
         return None
     
+    
     # 直接显示最新报表的原始Excel数据
     # 按月份倒序排列，显示最新的报表
     reports_sorted = sorted(reports, key=lambda x: x['report_month'], reverse=True)
@@ -287,29 +332,30 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     # 获取原始Excel数据
     raw_data = latest_report.get('raw_excel_data')
     
+    
     if raw_data and isinstance(raw_data, list):
-        # 从第1行开始显示报表，使用第2行作为表头，索引从1开始
+        # 直接显示完整的原始Excel数据，格式化数值为2位小数
         try:
             df = pd.DataFrame(raw_data)
             
-            # 如果有第2行数据，用第2行作为列名
-            if len(raw_data) > 1:
-                # 获取第2行数据作为新的列名
-                new_columns = []
-                row_2 = raw_data[1]  # 第2行（索引1）
-                for i, (key, value) in enumerate(row_2.items()):
-                    if value is not None and str(value).strip():
-                        new_columns.append(str(value).strip())
-                    else:
-                        new_columns.append(f"列{i+1}")  # 如果第2行为空，使用默认列名
-                
-                # 设置新的列名
-                if len(new_columns) == len(df.columns):
-                    df.columns = new_columns
+            # 格式化数值为2位小数并处理空值
+            df_display = df.copy()
+            for col in df_display.columns:
+                if df_display[col].dtype in ['float64', 'float32']:
+                    df_display[col] = df_display[col].round(2)
+                else:
+                    # 尝试将可转换的字符串转为数值并格式化
+                    try:
+                        numeric_series = pd.to_numeric(df_display[col], errors='coerce')
+                        if not numeric_series.isna().all():  # 如果有数值
+                            df_display[col] = numeric_series.round(2)
+                    except:
+                        pass
             
-            # 设置索引从1开始而不是0
-            df.index = df.index + 1
-            st.dataframe(df, use_container_width=True)
+            # 将空值显示为空白而不是None
+            df_display = df_display.fillna('')
+            
+            st.dataframe(df_display, use_container_width=True)
             return df
             
         except Exception as e:
@@ -321,10 +367,28 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                 return df_backup
             
     elif raw_data and isinstance(raw_data, dict):
-        # 兼容旧的dict格式
+        # 兼容旧的dict格式，格式化数值为2位小数
         try:
             df = pd.DataFrame(raw_data)
-            st.dataframe(df, use_container_width=True)
+            
+            # 格式化数值为2位小数并处理空值
+            df_display = df.copy()
+            for col in df_display.columns:
+                if df_display[col].dtype in ['float64', 'float32']:
+                    df_display[col] = df_display[col].round(2)
+                else:
+                    # 尝试将可转换的字符串转为数值并格式化
+                    try:
+                        numeric_series = pd.to_numeric(df_display[col], errors='coerce')
+                        if not numeric_series.isna().all():  # 如果有数值
+                            df_display[col] = numeric_series.round(2)
+                    except:
+                        pass
+            
+            # 将空值显示为空白而不是None
+            df_display = df_display.fillna('')
+            
+            st.dataframe(df_display, use_container_width=True)
             return df
             
         except Exception as e:
@@ -541,7 +605,8 @@ database_name = "store_reports"
     
     if not st.session_state.authenticated:
         # 查询码登录页面
-        st.subheader("🔐 门店查询系统")
+        # 居中显示标题
+        st.markdown("<h2 style='text-align: center;'>🔐 门店查询系统</h2>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -602,8 +667,22 @@ database_name = "store_reports"
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        # CSV下载
-                        csv_data = df.to_csv(index=False, encoding='utf-8-sig')
+                        # CSV下载 - 格式化数值为2位小数
+                        df_formatted = df.copy()
+                        # 遍历所有列，对数值列保留2位小数
+                        for col in df_formatted.columns:
+                            if df_formatted[col].dtype in ['float64', 'float32']:
+                                df_formatted[col] = df_formatted[col].round(2)
+                            else:
+                                # 尝试将可转换的字符串转为数值并格式化
+                                try:
+                                    numeric_series = pd.to_numeric(df_formatted[col], errors='coerce')
+                                    if not numeric_series.isna().all():  # 如果有数值
+                                        df_formatted[col] = numeric_series.round(2)
+                                except:
+                                    pass
+                        
+                        csv_data = df_formatted.to_csv(index=False, encoding='utf-8-sig')
                         st.download_button(
                             label="📄 下载完整报表 (CSV)",
                             data=csv_data,
@@ -613,15 +692,30 @@ database_name = "store_reports"
                         )
                     
                     with col2:
-                        # Excel下载
+                        # Excel下载 - 格式化数值为2位小数
                         try:
                             if len(df) > 1000:
                                 st.info("数据量较大，建议使用CSV格式")
                             
+                            # 格式化数值为2位小数（与CSV下载保持一致）
+                            df_formatted_excel = df.copy()
+                            # 遍历所有列，对数值列保留2位小数
+                            for col in df_formatted_excel.columns:
+                                if df_formatted_excel[col].dtype in ['float64', 'float32']:
+                                    df_formatted_excel[col] = df_formatted_excel[col].round(2)
+                                else:
+                                    # 尝试将可转换的字符串转为数值并格式化
+                                    try:
+                                        numeric_series = pd.to_numeric(df_formatted_excel[col], errors='coerce')
+                                        if not numeric_series.isna().all():  # 如果有数值
+                                            df_formatted_excel[col] = numeric_series.round(2)
+                                    except:
+                                        pass
+                            
                             import io
                             excel_buffer = io.BytesIO()
                             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                                df.to_excel(writer, sheet_name='门店报表', index=False)
+                                df_formatted_excel.to_excel(writer, sheet_name='门店报表', index=False)
                             excel_data = excel_buffer.getvalue()
                             
                             st.download_button(
