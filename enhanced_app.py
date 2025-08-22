@@ -323,6 +323,7 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         st.warning("暂无报表数据")
         return None
     
+    
     # 直接显示最新报表的原始Excel数据
     # 按月份倒序排列，显示最新的报表
     reports_sorted = sorted(reports, key=lambda x: x['report_month'], reverse=True)
@@ -331,23 +332,35 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
     # 获取原始Excel数据
     raw_data = latest_report.get('raw_excel_data')
     
+    
     if raw_data and isinstance(raw_data, list):
         # 直接显示完整的原始Excel数据，格式化数值为2位小数
         try:
             df = pd.DataFrame(raw_data)
             
-            # 调试信息：显示数据结构和前几行内容
-            st.info(f"📊 数据调试信息：共 {len(raw_data)} 行，{len(df.columns)} 列")
-            if len(raw_data) > 0:
-                st.info(f"🔍 前两行预览：第0行有 {len(raw_data[0])} 个字段，第1行有 {len(raw_data[1]) if len(raw_data) > 1 else 0} 个字段")
+            # 数据清理：过滤掉完全空的行和重复行
+            filtered_data = []
+            seen_rows = set()
+            
+            for i, row in enumerate(raw_data):
+                # 检查行是否完全为空
+                has_content = any(
+                    value is not None and str(value).strip() != '' and str(value).strip().lower() != 'null'
+                    for value in row.values()
+                )
                 
-                # 显示前5行的详细内容
-                st.expander("🔍 前5行详细内容", expanded=False).write({
-                    f"第{i}行": raw_data[i] for i in range(min(5, len(raw_data)))
-                })
-                
-                # 显示DataFrame的前5行
-                st.expander("📋 DataFrame前5行", expanded=False).dataframe(df.head(5))
+                if has_content:
+                    # 创建行的hash用于去重
+                    row_str = str(sorted(row.items()))
+                    if row_str not in seen_rows:
+                        seen_rows.add(row_str)
+                        filtered_data.append(row)
+            
+            # 使用过滤后的数据重新创建DataFrame
+            if len(filtered_data) != len(raw_data):
+                df = pd.DataFrame(filtered_data)
+            else:
+                df = pd.DataFrame(raw_data)
             
             # 格式化数值为2位小数（与下载功能保持一致）
             df_display = df.copy()
@@ -363,8 +376,12 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                     except:
                         pass
             
-            # 将None值替换为空字符串，避免显示"None"
-            df_display = df_display.fillna('')
+            # 更精确地处理None值，只替换真正的None/NaN，保留有效的文字字段
+            for col in df_display.columns:
+                df_display[col] = df_display[col].apply(
+                    lambda x: '' if (pd.isna(x) or x is None or str(x).lower() == 'none' or str(x).lower() == 'null') 
+                    else x
+                )
             
             # 设置显示选项，确保月份和平台等信息完全显示
             st.dataframe(
@@ -406,8 +423,12 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                     except:
                         pass
             
-            # 将None值替换为空字符串，避免显示"None"
-            df_display = df_display.fillna('')
+            # 更精确地处理None值，只替换真正的None/NaN，保留有效的文字字段
+            for col in df_display.columns:
+                df_display[col] = df_display[col].apply(
+                    lambda x: '' if (pd.isna(x) or x is None or str(x).lower() == 'none' or str(x).lower() == 'null') 
+                    else x
+                )
             
             # 设置显示选项，确保月份和平台等信息完全显示
             st.dataframe(
