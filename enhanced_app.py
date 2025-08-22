@@ -199,7 +199,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
                 'amount': amount,
                 'type': '门店应付',
                 'color': 'orange',
-                'icon': '💳'
+                'icon': '📤'
             }
         else:
             return {
@@ -241,28 +241,50 @@ def display_receivables_dashboard(reports: List[Dict]):
     
     # 显示大字体的金额指标
     if display_amount > 0:
-        if display_type == '总部应退':
-            gradient_style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"
-        elif display_type == '门店应付':
-            gradient_style = "background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;"
-        else:
-            gradient_style = "color: #00cc88;"
-        
+        # 使用Streamlit的metric组件确保emoji正确显示
         st.markdown(f"""
         <div style="text-align: center; padding: 20px;">
-            <h1 style="{gradient_style} margin: 0; font-size: 2.5rem; font-weight: bold;">
-                {display_icon} {display_type}
-            </h1>
-            <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
-                ¥{display_amount:,.2f}
-            </h2>
         </div>
         """, unsafe_allow_html=True)
+        
+        if display_type == '总部应退':
+            st.markdown(f"""
+            <div style="text-align: center;">
+                <h1 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0; font-size: 2.5rem; font-weight: bold;">
+                    💰 总部应退
+                </h1>
+                <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                    ¥{display_amount:,.2f}
+                </h2>
+            </div>
+            """, unsafe_allow_html=True)
+        elif display_type == '门店应付':
+            st.markdown(f"""
+            <div style="text-align: center;">
+                <h1 style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0; font-size: 2.5rem; font-weight: bold;">
+                    📤 门店应付
+                </h1>
+                <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                    ¥{display_amount:,.2f}
+                </h2>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="text-align: center;">
+                <h1 style="color: #00cc88; margin: 0; font-size: 2.5rem; font-weight: bold;">
+                    ✅ 已结清
+                </h1>
+                <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
+                    ¥{display_amount:,.2f}
+                </h2>
+            </div>
+            """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
         <div style="text-align: center; padding: 20px;">
             <h1 style="color: #00cc88; margin: 0; font-size: 2.5rem; font-weight: bold;">
-                {display_icon} {display_type}
+                ✅ 已结清
             </h1>
             <h2 style="margin: 10px 0; color: #333; font-size: 2rem;">
                 ¥0.00
