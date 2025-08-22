@@ -338,31 +338,32 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
         try:
             df = pd.DataFrame(raw_data)
             
-            # 调试：查看原始数据的前3行
-            st.expander("🔍 原始数据前3行", expanded=False).write(df.head(3).to_dict())
-            
             # 格式化数值为2位小数并处理空值
             df_display = df.copy()
             for col in df_display.columns:
                 if df_display[col].dtype in ['float64', 'float32']:
                     df_display[col] = df_display[col].round(2)
                 else:
-                    # 尝试将可转换的字符串转为数值并格式化
+                    # 更智能地处理混合类型列，只格式化纯数值，保留文字
                     try:
-                        numeric_series = pd.to_numeric(df_display[col], errors='coerce')
-                        if not numeric_series.isna().all():  # 如果有数值
-                            df_display[col] = numeric_series.round(2)
+                        # 创建一个副本用于测试数值转换
+                        test_series = pd.to_numeric(df_display[col], errors='coerce')
+                        
+                        # 只有当列中有数值且不全是NaN时才进行格式化
+                        if not test_series.isna().all():
+                            # 对每个值单独处理，保留文字，格式化数值
+                            new_values = []
+                            for original_val, numeric_val in zip(df_display[col], test_series):
+                                if pd.notna(numeric_val):  # 如果可以转换为数值
+                                    new_values.append(round(numeric_val, 2))
+                                else:  # 如果是文字或其他类型，保留原值
+                                    new_values.append(original_val)
+                            df_display[col] = new_values
                     except:
                         pass
             
-            # 调试：查看数值格式化后的前3行
-            st.expander("🔍 数值格式化后前3行", expanded=False).write(df_display.head(3).to_dict())
-            
             # 将空值显示为空白而不是None
             df_display = df_display.fillna('')
-            
-            # 调试：查看fillna后的前3行
-            st.expander("🔍 fillna后前3行", expanded=False).write(df_display.head(3).to_dict())
             
             st.dataframe(df_display, use_container_width=True)
             return df
@@ -386,11 +387,21 @@ def display_complete_report(reports: List[Dict], store_info: Dict):
                 if df_display[col].dtype in ['float64', 'float32']:
                     df_display[col] = df_display[col].round(2)
                 else:
-                    # 尝试将可转换的字符串转为数值并格式化
+                    # 更智能地处理混合类型列，只格式化纯数值，保留文字
                     try:
-                        numeric_series = pd.to_numeric(df_display[col], errors='coerce')
-                        if not numeric_series.isna().all():  # 如果有数值
-                            df_display[col] = numeric_series.round(2)
+                        # 创建一个副本用于测试数值转换
+                        test_series = pd.to_numeric(df_display[col], errors='coerce')
+                        
+                        # 只有当列中有数值且不全是NaN时才进行格式化
+                        if not test_series.isna().all():
+                            # 对每个值单独处理，保留文字，格式化数值
+                            new_values = []
+                            for original_val, numeric_val in zip(df_display[col], test_series):
+                                if pd.notna(numeric_val):  # 如果可以转换为数值
+                                    new_values.append(round(numeric_val, 2))
+                                else:  # 如果是文字或其他类型，保留原值
+                                    new_values.append(original_val)
+                            df_display[col] = new_values
                     except:
                         pass
             
