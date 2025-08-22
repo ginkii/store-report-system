@@ -153,7 +153,7 @@ class BulkReportUploader:
                 result['errors'].append("文件过大（超过50MB），请分批上传")
                 return result
             
-            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=None)
+            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl')
             total_sheets = len(excel_data)
             
             if total_sheets > 200:  # 限制工作表数量
