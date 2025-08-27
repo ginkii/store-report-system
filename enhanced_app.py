@@ -108,7 +108,7 @@ def parse_receivables_amount(report: Dict) -> Dict:
         # 从原始Excel数据中查找合计列
         raw_data = report.get('raw_excel_data', [])
         
-        if raw_data and len(raw_data) > 81:  # 确保有第82行数据
+        if raw_data and len(raw_data) > 0:  # 确保有数据
             # 第一步：在第1行（表头）找到"合计"列的位置
             total_column_key = None
             if len(raw_data) > 0:
@@ -131,22 +131,54 @@ def parse_receivables_amount(report: Dict) -> Dict:
                             total_column_key = key
                             break
             
-            # 第二步：如果找到了合计列，到第82行取该列的数值
-            if total_column_key is not None and len(raw_data) > 81:
-                row_82 = raw_data[81]  # 第82行（索引81）
-                if total_column_key in row_82:
-                    value = row_82[total_column_key]
-                    if value is not None:
-                        try:
-                            amount = float(value)
-                            found = True
-                        except (ValueError, TypeError):
-                            pass
+            # 第二步：如果找到了合计列，从最后一行向前查找该列的有效数值
+            if total_column_key is not None:
+                # 从最后一行开始向前查找
+                for row_index in range(len(raw_data) - 1, -1, -1):
+                    row = raw_data[row_index]
+                    if total_column_key in row:
+                        value = row[total_column_key]
+                        if value is not None and str(value).strip() != '':
+                            try:
+                                temp_amount = float(value)
+                                if temp_amount != 0:  # 如果金额不为0，使用该值
+                                    amount = temp_amount
+                                    found = True
+                                    break
+                            except (ValueError, TypeError):
+                                continue
             
-            # 备选方案：如果没找到合计列，在第82行找任何包含"合计"的列
-            if not found:
-                row_82 = raw_data[81]  # 第82行（索引81）
-                for key, value in row_82.items():
+            # 第三步：如果合计列为0或没找到，查找"应收-未收额"字段
+            if not found or amount == 0:
+                # 查找包含"应收-未收额"的列
+                receivable_column_key = None
+                for row_index, row in enumerate(raw_data):
+                    for key, value in row.items():
+                        if value is not None:
+                            value_str = str(value).strip()
+                            if '应收-未收额' in value_str or '应收未收额' in value_str:
+                                receivable_column_key = key
+                                # 从找到"应收-未收额"字段的下一行开始查找数值
+                                for search_row_index in range(row_index + 1, len(raw_data)):
+                                    search_row = raw_data[search_row_index]
+                                    if receivable_column_key in search_row:
+                                        search_value = search_row[receivable_column_key]
+                                        if search_value is not None and str(search_value).strip() != '':
+                                            try:
+                                                amount = float(search_value)
+                                                found = True
+                                                break
+                                            except (ValueError, TypeError):
+                                                continue
+                                if found:
+                                    break
+                    if found:
+                        break
+            
+            # 备选方案：如果没找到合计列，在最后一行找任何包含"合计"的列
+            if not found and len(raw_data) > 0:
+                last_row = raw_data[-1]  # 最后一行
+                for key, value in last_row.items():
                     if value is None:
                         continue
                     
@@ -159,10 +191,10 @@ def parse_receivables_amount(report: Dict) -> Dict:
                         except (ValueError, TypeError):
                             continue
             
-            # 最后备选：取第82行最后一个数值列
-            if not found:
-                row_82 = raw_data[81]  # 第82行（索引81）
-                for key, value in reversed(list(row_82.items())):
+            # 最后备选：取最后一行最后一个数值列
+            if not found and len(raw_data) > 0:
+                last_row = raw_data[-1]  # 最后一行
+                for key, value in reversed(list(last_row.items())):
                     if value is None:
                         continue
                     try:
