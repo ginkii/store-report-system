@@ -77,12 +77,6 @@ class PermissionManager:
                     if not query_code or not store_name or query_code == 'nan' or store_name == 'nan':
                         continue
                     
-                    # 查找门店
-                    store = self._find_store_by_name(store_name)
-                    if not store:
-                        results["errors"].append(f"未找到门店: {store_name}")
-                        continue
-                    
                     # 检查查询编号是否已被使用
                     existing = self.permissions_collection.find_one({'query_code': query_code})
                     
@@ -90,8 +84,7 @@ class PermissionManager:
                         # 更新现有记录
                         permission_doc = {
                             'query_code': query_code,
-                            'store_id': store['_id'],
-                            'store_name': store['store_name'],
+                            'store_name': store_name,  # 直接使用Excel中的门店名称
                             'created_at': existing.get('created_at', pd.Timestamp.now()),
                             'updated_at': pd.Timestamp.now()
                         }
@@ -105,8 +98,7 @@ class PermissionManager:
                         # 创建新记录
                         permission_doc = {
                             'query_code': query_code,
-                            'store_id': store['_id'],
-                            'store_name': store['store_name'],
+                            'store_name': store_name,  # 直接使用Excel中的门店名称
                             'created_at': pd.Timestamp.now(),
                             'updated_at': pd.Timestamp.now()
                         }
@@ -124,32 +116,6 @@ class PermissionManager:
         except Exception as e:
             return {"success": False, "message": f"处理文件时出错: {str(e)}"}
     
-    def _find_store_by_name(self, store_name: str) -> Optional[Dict]:
-        """根据门店名称查找门店"""
-        try:
-            # 精确匹配门店名称
-            store = self.stores_collection.find_one({'store_name': store_name})
-            if store:
-                return store
-            
-            # 模糊匹配（去掉可能的前缀后缀）
-            clean_name = store_name.replace('犀牛百货', '').replace('门店', '').replace('店', '').strip()
-            if clean_name:
-                # 使用正则表达式进行模糊匹配
-                stores = list(self.stores_collection.find({
-                    '$or': [
-                        {'store_name': {'$regex': clean_name, '$options': 'i'}},
-                        {'aliases': {'$in': [store_name, clean_name]}}
-                    ]
-                }))
-                if stores:
-                    return stores[0]  # 返回第一个匹配的
-            
-            return None
-            
-        except Exception as e:
-            st.error(f"查找门店时出错: {e}")
-            return None
     
     def get_all_permissions(self) -> List[Dict]:
         """获取所有权限配置"""
@@ -302,7 +268,7 @@ def create_permission_interface():
             for perm in permissions:
                 with st.expander(f"查询编号: {perm['query_code']} → {perm['store_name']}"):
                     st.write(f"**门店名称:** {perm['store_name']}")
-                    st.write(f"**门店ID:** {perm['store_id']}")
+                    st.write(f"**查询编号:** {perm['query_code']}")
                     st.write(f"**创建时间:** {perm.get('created_at', 'N/A')}")
                     st.write(f"**更新时间:** {perm.get('updated_at', 'N/A')}")
                     
