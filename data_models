@@ -1,0 +1,137 @@
+# data_models.py - 统一数据模型
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+import pandas as pd
+
+class StoreModel:
+    """门店数据模型"""
+    
+    @staticmethod
+    def create_store_document(store_name: str, store_code: str = None, **kwargs) -> Dict:
+        """创建标准门店文档"""
+        return {
+            '_id': kwargs.get('_id', f"store_{store_code or store_name}_{int(datetime.now().timestamp())}"),
+            'store_name': store_name.strip(),
+            'store_code': store_code or StoreModel._generate_store_code(store_name),
+            'region': kwargs.get('region', '未分类'),
+            'manager': kwargs.get('manager', '待设置'),
+            'aliases': kwargs.get('aliases', [store_name.strip()]),
+            'created_at': kwargs.get('created_at', datetime.now()),
+            'created_by': kwargs.get('created_by', 'system'),
+            'status': kwargs.get('status', 'active')
+        }
+    
+    @staticmethod
+    def _generate_store_code(store_name: str) -> str:
+        """生成门店代码"""
+        import hashlib
+        try:
+            # 标准化门店名称
+            normalized = store_name.replace('犀牛百货', '').replace('门店', '').replace('店', '').strip()
+            hash_obj = hashlib.md5(normalized.encode('utf-8'))
+            return f"AUTO_{hash_obj.hexdigest()[:6].upper()}"
+        except Exception:
+            return f"AUTO_{int(datetime.now().timestamp()) % 100000}"
+
+class ReportModel:
+    """报表数据模型"""
+    
+    @staticmethod
+    def create_report_document(store_data: Dict, report_month: str, excel_data: List[Dict], **kwargs) -> Dict:
+        """创建标准报表文档，兼容新旧格式"""
+        return {
+            'store_id': store_data['_id'],
+            'store_code': store_data['store_code'],
+            'store_name': store_data['store_name'],
+            'report_month': report_month,
+            'sheet_name': kwargs.get('sheet_name', store_data['store_name']),
+            'raw_excel_data': ReportModel._standardize_excel_data(excel_data),
+            'financial_data': kwargs.get('financial_data', {}),
+            'created_at': kwargs.get('created_at', datetime.now()),
+            'updated_at': datetime.now(),
+            'uploaded_by': kwargs.get('uploaded_by', 'system')
+        }
+    
+    @staticmethod
+    def _standardize_excel_data(excel_data: Any) -> List[Dict]:
+        """标准化Excel数据格式，统一为col_0, col_1格式"""
+        if not excel_data:
+            return []
+        
+        # 如果已经是标准格式，直接返回
+        if isinstance(excel_data, list) and excel_data and isinstance(excel_data[0], dict):
+            if all(key.startswith('col_') for key in excel_data[0].keys()):
+                return excel_data
+        
+        # 如果是DataFrame，转换为标准格式
+        if isinstance(excel_data, pd.DataFrame):
+            return ReportModel._dataframe_to_standard_format(excel_data)
+        
+        # 如果是其他格式的列表，尝试转换
+        if isinstance(excel_data, list):
+            return ReportModel._list_to_standard_format(excel_data)
+        
+        return []
+    
+    @staticmethod
+    def _dataframe_to_standard_format(df: pd.DataFrame) -> List[Dict]:
+        """将DataFrame转换为标准格式"""
+        result = []
+        for index, row in df.iterrows():
+            row_dict = {}
+            for col_idx, value in enumerate(row):
+                col_key = f"col_{col_idx}"
+                if pd.isna(value):
+                    row_dict[col_key] = ""
+                elif isinstance(value, (int, float)):
+                    row_dict[col_key] = float(value) if not pd.isna(value) else 0.0
+                else:
+                    row_dict[col_key] = str(value)
+            result.append(row_dict)
+        return result
+    
+    @staticmethod
+    def _list_to_standard_format(data: List[Dict]) -> List[Dict]:
+        """将列表格式转换为标准格式"""
+        if not data or not isinstance(data[0], dict):
+            return []
+        
+        # 获取所有可能的列名
+        all_keys = set()
+        for row in data:
+            all_keys.update(row.keys())
+        
+        # 按键名排序，确保一致性
+        sorted_keys = sorted(all_keys)
+        
+        result = []
+        for row in data:
+            row_dict = {}
+            for col_idx, key in enumerate(sorted_keys):
+                col_key = f"col_{col_idx}"
+                value = row.get(key, "")
+                if pd.isna(value):
+                    row_dict[col_key] = ""
+                elif isinstance(value, (int, float)):
+                    row_dict[col_key] = float(value) if not pd.isna(value) else 0.0
+                else:
+                    row_dict[col_key] = str(value)
+            result.append(row_dict)
+        return result
+
+class PermissionModel:
+    """权限数据模型"""
+    
+    @staticmethod
+    def create_permission_document(query_code: str, store_data: Dict, **kwargs) -> Dict:
+        """创建标准权限文档"""
+        return {
+            'query_code': query_code.strip(),
+            'store_id': store_data['_id'],
+            'store_name': store_data['store_name'],
+            'store_code': store_data['store_code'],
+            'created_at': kwargs.get('created_at', datetime.now()),
+            'updated_at': datetime.now(),
+            'created_by': kwargs.get('created_by', 'system'),
+            'status': kwargs.get('status', 'active')
+        }
