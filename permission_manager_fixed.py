@@ -1,21 +1,22 @@
+# permission_manager_fixed.py - 修复版权限管理器
 """
-权限管理器 - 管理查询编号和门店访问权限
+权限管理器 - 管理查询编号和门店访问权限（兼容版本）
 """
 
 import streamlit as st
 import pandas as pd
-import pymongo
-from pymongo import MongoClient
 from typing import List, Dict, Optional
-from config_manager import ConfigManager
+from database_manager import get_database
+from data_models import StoreModel, PermissionModel
+from config import ConfigManager
 
 class PermissionManager:
-    """权限管理器"""
+    """权限管理器（兼容版本）"""
     
-    def __init__(self, db):
-        self.db = db
-        self.permissions_collection = db['permissions']
-        self.stores_collection = db['stores']
+    def __init__(self, db=None):
+        self.db = db or get_database()
+        self.permissions_collection = self.db['permissions']
+        self.stores_collection = self.db['stores']
     
     def upload_permission_table(self, uploaded_file) -> Dict:
         """上传权限表"""
@@ -77,10 +78,10 @@ class PermissionManager:
                     if not query_code or not store_name or query_code == 'nan' or store_name == 'nan':
                         continue
                     
-                    # 查找门店
-                    store = self._find_store_by_name(store_name)
+                    # 查找或创建门店
+                    store = self._find_or_create_store(store_name)
                     if not store:
-                        results["errors"].append(f"未找到门店: {store_name}")
+                        results["errors"].append(f"无法处理门店: {store_name}")
                         continue
                     
                     # 检查查询编号是否已被使用
@@ -88,13 +89,12 @@ class PermissionManager:
                     
                     if existing:
                         # 更新现有记录
-                        permission_doc = {
-                            'query_code': query_code,
-                            'store_id': store['_id'],
-                            'store_name': store['store_name'],
-                            'created_at': existing.get('created_at', pd.Timestamp.now()),
-                            'updated_at': pd.Timestamp.now()
-                        }
+                        permission_doc = PermissionModel.create_permission_document(
+                            query_code=query_code,
+                            store_data=store,
+                            created_at=existing.get('created_at'),
+                            created_by=existing.get('created_by', 'upload')
+                        )
                         
                         self.permissions_collection.replace_one(
                             {'query_code': query_code},
@@ -103,13 +103,11 @@ class PermissionManager:
                         results["updated"] += 1
                     else:
                         # 创建新记录
-                        permission_doc = {
-                            'query_code': query_code,
-                            'store_id': store['_id'],
-                            'store_name': store['store_name'],
-                            'created_at': pd.Timestamp.now(),
-                            'updated_at': pd.Timestamp.now()
-                        }
+                        permission_doc = PermissionModel.create_permission_document(
+                            query_code=query_code,
+                            store_data=store,
+                            created_by='upload'
+                        )
                         
                         self.permissions_collection.insert_one(permission_doc)
                         results["created"] += 1
@@ -124,8 +122,8 @@ class PermissionManager:
         except Exception as e:
             return {"success": False, "message": f"处理文件时出错: {str(e)}"}
     
-    def _find_store_by_name(self, store_name: str) -> Optional[Dict]:
-        """根据门店名称查找门店"""
+    def _find_or_create_store(self, store_name: str) -> Optional[Dict]:
+        """根据门店名称查找门店，如果不存在则创建"""
         try:
             # 精确匹配门店名称
             store = self.stores_collection.find_one({'store_name': store_name})
@@ -145,10 +143,27 @@ class PermissionManager:
                 if stores:
                     return stores[0]  # 返回第一个匹配的
             
-            return None
+            # 如果没找到，创建新门店
+            return self._create_new_store(store_name)
             
         except Exception as e:
             st.error(f"查找门店时出错: {e}")
+            return None
+    
+    def _create_new_store(self, store_name: str) -> Optional[Dict]:
+        """创建新门店"""
+        try:
+            store_data = StoreModel.create_store_document(
+                store_name=store_name,
+                created_by='permission_upload'
+            )
+            
+            # 插入到数据库
+            self.stores_collection.insert_one(store_data)
+            return store_data
+            
+        except Exception as e:
+            st.error(f"创建门店失败: {e}")
             return None
     
     def get_all_permissions(self) -> List[Dict]:
@@ -168,17 +183,11 @@ class PermissionManager:
         except Exception as e:
             st.error(f"删除权限配置失败: {e}")
             return False
-    
 
 # 管理员验证
 def verify_admin_password(password: str) -> bool:
     """验证管理员密码"""
-    try:
-        # 从Streamlit secrets获取管理员密码
-        admin_password = st.secrets.get("security", {}).get("admin_password", "admin123")
-        return password == admin_password
-    except Exception:
-        return password == "admin123"  # 默认密码
+    return password == ConfigManager.get_admin_password()
 
 def create_permission_interface():
     """创建权限管理界面"""
@@ -214,20 +223,9 @@ def create_permission_interface():
         return  # 未登录时直接返回
     
     # 初始化数据库连接
-    @st.cache_resource
-    def init_mongodb():
-        try:
-            mongodb_config = ConfigManager.get_mongodb_config()
-            client = MongoClient(mongodb_config['uri'])
-            db = client[mongodb_config['database_name']]
-            db.command('ping')
-            return db
-        except Exception as e:
-            st.error(f"数据库连接失败: {e}")
-            return None
-    
-    db = init_mongodb()
+    db = get_database()
     if db is None:
+        st.error("数据库连接失败")
         st.stop()
     
     permission_manager = PermissionManager(db)
@@ -303,6 +301,7 @@ def create_permission_interface():
                 with st.expander(f"查询编号: {perm['query_code']} → {perm['store_name']}"):
                     st.write(f"**门店名称:** {perm['store_name']}")
                     st.write(f"**门店ID:** {perm['store_id']}")
+                    st.write(f"**门店代码:** {perm.get('store_code', 'N/A')}")
                     st.write(f"**创建时间:** {perm.get('created_at', 'N/A')}")
                     st.write(f"**更新时间:** {perm.get('updated_at', 'N/A')}")
                     
@@ -325,6 +324,7 @@ def create_permission_interface():
         - 🔍 系统会自动识别列名（支持中英文）
         - 🔗 一个查询编号只对应一个门店（一对一关系）
         - 🔄 如果查询编号重复，新记录会覆盖旧记录
+        - 🏪 如果门店不存在，系统会自动创建
         
         **示例格式：**
         ```
