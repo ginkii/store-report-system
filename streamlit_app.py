@@ -1,7 +1,8 @@
-# streamlit_app.py - Streamlit Cloud完整单文件版本
+# streamlit_app.py - 门店报表系统完整版
 """
 门店报表查询系统 - 完整功能单文件部署版本
 包含查询、上传、权限管理功能
+修复: 1.完全覆盖历史文件 2.修复表头消失问题 3.第41行第2个合计列应收金额
 """
 
 import streamlit as st
@@ -30,7 +31,6 @@ class ConfigManager:
     def get_mongodb_config():
         """获取MongoDB配置"""
         try:
-            # 优先从secrets获取
             if hasattr(st, 'secrets') and 'mongodb' in st.secrets:
                 return {
                     'uri': st.secrets["mongodb"]["uri"],
@@ -39,7 +39,6 @@ class ConfigManager:
         except Exception:
             pass
         
-        # 环境变量回退
         return {
             'uri': os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'),
             'database_name': os.getenv('DATABASE_NAME', 'store_reports')
@@ -110,6 +109,20 @@ class DatabaseManager:
     def is_connected(self):
         """检查数据库是否连接"""
         return self.db is not None
+    
+    def clear_all_data_and_upload(self, report_month: str):
+        """完全清除指定月份的所有数据"""
+        if not self.db:
+            return False
+        
+        try:
+            # 清除指定月份的所有报表数据
+            result = self.db['reports'].delete_many({'report_month': report_month})
+            st.info(f"清除了 {result.deleted_count} 条历史数据")
+            return True
+        except Exception as e:
+            st.error(f"清除历史数据失败: {e}")
+            return False
 
 # 全局数据库管理器
 @st.cache_resource
@@ -150,8 +163,8 @@ class ReportModel:
     """报表数据模型"""
     
     @staticmethod
-    def create_report_document(store_data: Dict, report_month: str, excel_data: List[Dict], **kwargs) -> Dict:
-        """创建标准报表文档"""
+    def create_report_document(store_data: Dict, report_month: str, excel_data: List[Dict], headers: List[str], **kwargs) -> Dict:
+        """创建标准报表文档，保存完整表头"""
         return {
             'store_id': store_data['_id'],
             'store_code': store_data['store_code'],
@@ -159,6 +172,7 @@ class ReportModel:
             'report_month': report_month,
             'sheet_name': kwargs.get('sheet_name', store_data['store_name']),
             'raw_excel_data': excel_data,
+            'table_headers': headers,  # 新增：保存表头信息
             'financial_data': kwargs.get('financial_data', {}),
             'created_at': kwargs.get('created_at', datetime.now()),
             'updated_at': datetime.now(),
@@ -166,8 +180,11 @@ class ReportModel:
         }
     
     @staticmethod
-    def dataframe_to_dict_list(df: pd.DataFrame) -> List[Dict]:
-        """将DataFrame转换为字典列表"""
+    def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
+        """将DataFrame转换为字典列表，保留表头信息"""
+        # 保存原始列名作为表头
+        headers = [str(col) for col in df.columns]
+        
         result = []
         for index, row in df.iterrows():
             row_dict = {}
@@ -180,7 +197,8 @@ class ReportModel:
                 else:
                     row_dict[col_key] = str(value)
             result.append(row_dict)
-        return result
+        
+        return result, headers
 
 class PermissionModel:
     """权限数据模型"""
@@ -254,7 +272,7 @@ class BulkReportUploader:
             st.error(f"创建门店失败: {e}")
             return None
     
-    def process_excel_file(self, file_buffer, report_month: str, progress_callback=None) -> Dict:
+    def process_excel_file(self, file_buffer, report_month: str, clear_history: bool = True, progress_callback=None) -> Dict:
         """处理Excel文件并上传报表数据"""
         start_time = time.time()
         result = {
@@ -263,15 +281,29 @@ class BulkReportUploader:
             'errors': [],
             'processed_stores': [],
             'failed_stores': [],
-            'total_time': 0
+            'total_time': 0,
+            'cleared_count': 0
         }
         
         try:
             if progress_callback:
-                progress_callback(10, "正在读取Excel文件...")
+                progress_callback(5, "准备上传，清理历史数据...")
             
-            # 读取Excel文件
-            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=None)
+            # 1. 完全清除历史数据
+            if clear_history:
+                try:
+                    clear_result = self.reports_collection.delete_many({'report_month': report_month})
+                    result['cleared_count'] = clear_result.deleted_count
+                    if progress_callback:
+                        progress_callback(10, f"已清除 {result['cleared_count']} 条历史数据")
+                except Exception as e:
+                    result['errors'].append(f"清除历史数据失败: {str(e)}")
+            
+            if progress_callback:
+                progress_callback(15, "正在读取Excel文件...")
+            
+            # 2. 读取Excel文件 - 保持原始表头
+            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=0)
             total_sheets = len(excel_data)
             
             if progress_callback:
@@ -295,7 +327,7 @@ class BulkReportUploader:
                         result['failed_count'] += 1
                         continue
                     
-                    # 处理数据
+                    # 3. 处理数据 - 保持完整表头
                     df_cleaned = df.dropna(axis=1, how='all')
                     if df_cleaned.empty:
                         result['failed_stores'].append({
@@ -305,33 +337,23 @@ class BulkReportUploader:
                         result['failed_count'] += 1
                         continue
                     
-                    # 转换数据格式
-                    excel_data_dict = ReportModel.dataframe_to_dict_list(df_cleaned)
-                    financial_data = self._extract_financial_data(df_cleaned)
+                    # 4. 转换数据格式，保存表头
+                    excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_cleaned)
+                    financial_data = self._extract_financial_data_v2(df_cleaned)
                     
-                    # 创建报表文档
+                    # 5. 创建报表文档
                     report_data = ReportModel.create_report_document(
                         store_data=store,
                         report_month=report_month,
                         excel_data=excel_data_dict,
+                        headers=headers,  # 保存表头
                         sheet_name=sheet_name,
                         financial_data=financial_data,
                         uploaded_by='bulk_upload'
                     )
                     
-                    # 保存到数据库
-                    existing_report = self.reports_collection.find_one({
-                        'store_id': store['_id'],
-                        'report_month': report_month
-                    })
-                    
-                    if existing_report:
-                        self.reports_collection.replace_one(
-                            {'_id': existing_report['_id']},
-                            report_data
-                        )
-                    else:
-                        self.reports_collection.insert_one(report_data)
+                    # 6. 保存到数据库（不检查existing，因为已经清空）
+                    self.reports_collection.insert_one(report_data)
                     
                     result['success_count'] += 1
                     result['processed_stores'].append({
@@ -357,8 +379,8 @@ class BulkReportUploader:
         result['total_time'] = time.time() - start_time
         return result
     
-    def _extract_financial_data(self, df: pd.DataFrame) -> Dict:
-        """从DataFrame中提取财务数据"""
+    def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
+        """改进的财务数据提取 - 修复第41行第2个合计列问题"""
         financial_data = {
             'revenue': {},
             'cost': {},
@@ -368,44 +390,46 @@ class BulkReportUploader:
         }
         
         try:
-            # 提取第41行第2个合计列的应收未收金额
-            if len(df) >= 41:
-                target_row_index = 40
-                
-                # 查找合计列
-                total_col_indices = []
-                if len(df) > 0:
-                    for col_idx in range(len(df.columns)):
-                        try:
-                            header_value = str(df.iloc[0, col_idx]) if not pd.isna(df.iloc[0, col_idx]) else ""
-                            if '合计' in header_value or 'total' in header_value.lower():
-                                total_col_indices.append(col_idx)
-                        except:
-                            continue
-                
-                # 检查第41行
-                if len(df) > target_row_index:
-                    try:
-                        first_col_value = str(df.iloc[target_row_index, 0]) if not pd.isna(df.iloc[target_row_index, 0]) else ""
-                        keywords = ['总部应收未收金额', '应收未收金额', '应收-未收额', '应收未收额', '应收-未收', '应收未收']
-                        
-                        if any(keyword in first_col_value for keyword in keywords):
-                            target_col_idx = None
-                            if len(total_col_indices) >= 2:
-                                target_col_idx = total_col_indices[1]
-                            elif len(total_col_indices) == 1:
-                                target_col_idx = total_col_indices[0]
-                            
-                            if target_col_idx is not None:
-                                try:
-                                    row_41_value = float(df.iloc[target_row_index, target_col_idx])
-                                    financial_data['receivables']['net_amount'] = row_41_value
-                                except:
-                                    pass
-                    except:
-                        pass
+            # 1. 查找所有"合计"列的位置
+            total_col_indices = []
+            for col_idx, col_name in enumerate(df.columns):
+                col_str = str(col_name).lower()
+                if '合计' in col_str or 'total' in col_str or '总计' in col_str:
+                    total_col_indices.append(col_idx)
             
-            # 提取其他财务指标
+            # 2. 在第41行（索引40）查找应收未收金额
+            if len(df) >= 41 and len(total_col_indices) > 0:
+                target_row_index = 40  # 第41行
+                
+                try:
+                    # 检查第41行第一列的内容
+                    first_col_value = str(df.iloc[target_row_index, 0]).strip()
+                    
+                    # 应收未收关键词列表
+                    keywords = [
+                        '总部应收未收金额', '应收未收金额', '应收-未收额', 
+                        '应收未收额', '应收-未收', '应收未收', '未收金额'
+                    ]
+                    
+                    # 如果第41行包含应收未收关键词
+                    if any(keyword in first_col_value for keyword in keywords):
+                        # 使用第2个合计列，如果没有第2个则使用第1个
+                        target_col_idx = total_col_indices[1] if len(total_col_indices) >= 2 else total_col_indices[0]
+                        
+                        try:
+                            # 提取第41行指定合计列的值
+                            row_41_value = pd.to_numeric(df.iloc[target_row_index, target_col_idx], errors='coerce')
+                            if not pd.isna(row_41_value):
+                                financial_data['receivables']['net_amount'] = float(row_41_value)
+                                financial_data['other_metrics']['第41行应收未收'] = float(row_41_value)
+                                financial_data['other_metrics']['提取位置'] = f"第41行第{len(total_col_indices) >= 2 and 2 or 1}个合计列"
+                        except (ValueError, TypeError, IndexError):
+                            pass
+                    
+                except (IndexError, Exception):
+                    pass
+            
+            # 3. 提取其他财务指标
             for idx, row in df.iterrows():
                 try:
                     if len(row) < 2:
@@ -415,20 +439,34 @@ class BulkReportUploader:
                     if not metric_name:
                         continue
                     
-                    # 查找数值
+                    # 查找数值（优先从合计列取值）
                     value = None
-                    for col_idx in range(1, len(row)):
-                        try:
-                            if pd.notna(row.iloc[col_idx]):
-                                value = float(row.iloc[col_idx])
-                                break
-                        except:
-                            continue
+                    
+                    # 先从合计列查找
+                    for col_idx in total_col_indices:
+                        if col_idx < len(row):
+                            try:
+                                if pd.notna(row.iloc[col_idx]):
+                                    value = float(row.iloc[col_idx])
+                                    break
+                            except:
+                                continue
+                    
+                    # 如果合计列没有值，从其他列查找
+                    if value is None:
+                        for col_idx in range(1, len(row)):
+                            if col_idx not in total_col_indices:  # 跳过合计列
+                                try:
+                                    if pd.notna(row.iloc[col_idx]):
+                                        value = float(row.iloc[col_idx])
+                                        break
+                                except:
+                                    continue
                     
                     if value is None:
                         value = 0
                     
-                    # 分类存储
+                    # 4. 分类存储财务指标
                     if any(keyword in metric_name for keyword in ['收入', '营收', '销售额', '营业收入']):
                         if '线上' in metric_name:
                             financial_data['revenue']['online_revenue'] = value
@@ -451,7 +489,9 @@ class BulkReportUploader:
                         elif '净利' in metric_name:
                             financial_data['profit']['net_profit'] = value
                     
-                    financial_data['other_metrics'][f"{idx+1}行_{metric_name}"] = value
+                    # 保存所有指标到other_metrics用于调试
+                    if metric_name and value != 0:
+                        financial_data['other_metrics'][f"第{idx+1}行_{metric_name}"] = value
                 
                 except:
                     continue
@@ -606,6 +646,31 @@ class PermissionManager:
             st.error(f"删除权限配置失败: {e}")
             return False
 
+# 报表数据处理工具
+def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> pd.DataFrame:
+    """根据保存的表头重建DataFrame，解决表头消失问题"""
+    if not raw_data or not headers:
+        return pd.DataFrame()
+    
+    try:
+        # 重建数据矩阵
+        data_matrix = []
+        for row_data in raw_data:
+            row_values = []
+            for col_idx in range(len(headers)):
+                col_key = f"col_{col_idx}"
+                value = row_data.get(col_key, "")
+                row_values.append(value)
+            data_matrix.append(row_values)
+        
+        # 使用保存的表头创建DataFrame
+        df = pd.DataFrame(data_matrix, columns=headers)
+        return df.fillna('')
+    
+    except Exception as e:
+        st.error(f"重建表格失败: {e}")
+        return pd.DataFrame()
+
 # 应用界面
 def create_query_app():
     """门店查询应用"""
@@ -674,47 +739,61 @@ def create_query_app():
                     receivables = latest_report.get('financial_data', {}).get('receivables', {})
                     amount = receivables.get('net_amount', 0)
                     
-                    if amount > 0:
-                        st.error(f"💰 门店应付: ¥{amount:,.2f}")
-                    elif amount < 0:
-                        st.success(f"💚 总部应退: ¥{abs(amount):,.2f}")
-                    else:
-                        st.info("✅ 已结清: ¥0.00")
+                    # 显示提取位置信息
+                    other_metrics = latest_report.get('financial_data', {}).get('other_metrics', {})
+                    extract_position = other_metrics.get('提取位置', '未知位置')
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        if amount > 0:
+                            st.error(f"💰 门店应付: ¥{amount:,.2f}")
+                        elif amount < 0:
+                            st.success(f"💚 总部应退: ¥{abs(amount):,.2f}")
+                        else:
+                            st.info("✅ 已结清: ¥0.00")
+                    
+                    with col2:
+                        st.caption(f"数据来源: {extract_position}")
+                        
                 except Exception:
                     st.info("暂无应收数据")
                 
-                # 报表数据
+                # 报表数据展示 - 修复表头问题
                 st.subheader("📋 报表数据")
                 
                 try:
                     latest_report = reports[0]
                     raw_data = latest_report.get('raw_excel_data', [])
+                    headers = latest_report.get('table_headers', [])
                     
-                    if raw_data and len(raw_data) > 0:
-                        # 重建DataFrame
-                        max_cols = max(len(row) for row in raw_data) if raw_data else 0
+                    if raw_data and headers:
+                        # 使用保存的表头重建DataFrame
+                        df = rebuild_dataframe_with_headers(raw_data, headers)
                         
-                        data_matrix = []
-                        for row_data in raw_data:
-                            row_values = []
-                            for col_idx in range(max_cols):
-                                col_key = f"col_{col_idx}"
-                                value = row_data.get(col_key, "") if isinstance(row_data, dict) else ""
-                                row_values.append(value)
-                            data_matrix.append(row_values)
-                        
-                        if len(data_matrix) > 1:
-                            # 使用第一行作为列名
-                            df = pd.DataFrame(data_matrix[1:], columns=data_matrix[0])
-                            df = df.fillna('')
+                        if not df.empty:
+                            # 显示表格
                             st.dataframe(df, use_container_width=True)
+                            
+                            # 提供下载功能 - 保持表头
+                            csv_data = df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 下载完整报表 (CSV)",
+                                data=csv_data,
+                                file_name=f"{store_info['store_name']}_{latest_report['report_month']}_报表.csv",
+                                mime="text/csv"
+                            )
                         else:
-                            st.info("暂无详细数据")
+                            st.info("报表数据格式错误")
                     else:
                         st.info("暂无报表数据")
                         
                 except Exception as e:
                     st.error(f"数据显示错误: {e}")
+                    
+                    # 显示调试信息
+                    with st.expander("调试信息"):
+                        st.write("原始数据预览:", latest_report.get('raw_excel_data', [])[:5])
+                        st.write("表头信息:", latest_report.get('table_headers', []))
             else:
                 st.info("暂无报表数据")
         except Exception as e:
@@ -766,6 +845,16 @@ def create_upload_app():
                 help="格式：YYYY-MM，例如：2024-12"
             )
             
+            # 清除历史数据选项
+            clear_history = st.checkbox(
+                "🗑️ 完全覆盖历史数据", 
+                value=True,
+                help="勾选后将清除该月份的所有历史数据，确保数据一致性"
+            )
+            
+            if clear_history:
+                st.warning("⚠️ 将清除该月份所有历史数据，上传的新文件将完全替换旧数据")
+            
             # 文件上传
             uploaded_file = st.file_uploader(
                 "选择Excel文件",
@@ -787,29 +876,47 @@ def create_upload_app():
                     result = uploader.process_excel_file(
                         uploaded_file, 
                         report_month, 
+                        clear_history=clear_history,
                         progress_callback=update_progress
                     )
                     
                     # 显示结果
                     st.subheader("📊 上传结果")
                     
-                    col_success, col_failed, col_time = st.columns(3)
+                    # 结果统计
+                    col_cleared, col_success, col_failed, col_time = st.columns(4)
+                    with col_cleared:
+                        st.metric("🗑️ 清理历史", result['cleared_count'])
                     with col_success:
-                        st.metric("成功上传", result['success_count'])
+                        st.metric("✅ 成功上传", result['success_count'])
                     with col_failed:
-                        st.metric("失败数量", result['failed_count'])
+                        st.metric("❌ 失败数量", result['failed_count'])
                     with col_time:
-                        st.metric("耗时(秒)", f"{result['total_time']:.2f}")
+                        st.metric("⏱️ 总耗时", f"{result['total_time']:.2f}s")
                     
-                    if result['processed_stores']:
-                        st.subheader("✅ 成功上传的门店")
-                        success_df = pd.DataFrame(result['processed_stores'])
-                        st.dataframe(success_df, use_container_width=True)
+                    # 成功信息
+                    if result['success_count'] > 0:
+                        st.success(f"✅ 成功处理 {result['success_count']} 个门店的数据")
+                        
+                        if result['processed_stores']:
+                            with st.expander("查看成功上传的门店"):
+                                success_df = pd.DataFrame(result['processed_stores'])
+                                st.dataframe(success_df, use_container_width=True)
                     
-                    if result['failed_stores']:
-                        st.subheader("❌ 上传失败")
-                        failed_df = pd.DataFrame(result['failed_stores'])
-                        st.dataframe(failed_df, use_container_width=True)
+                    # 失败信息
+                    if result['failed_count'] > 0:
+                        st.error(f"❌ {result['failed_count']} 个门店上传失败")
+                        
+                        if result['failed_stores']:
+                            with st.expander("查看失败详情"):
+                                failed_df = pd.DataFrame(result['failed_stores'])
+                                st.dataframe(failed_df, use_container_width=True)
+                    
+                    # 错误信息
+                    if result['errors']:
+                        with st.expander("查看错误详情"):
+                            for error in result['errors']:
+                                st.error(error)
                     
                     progress_bar.empty()
                     status_text.empty()
@@ -822,9 +929,15 @@ def create_upload_app():
                 reports_count = db['reports'].count_documents({})
                 permissions_count = db['permissions'].count_documents({})
                 
-                st.metric("门店数量", stores_count)
-                st.metric("报表数量", reports_count)
-                st.metric("权限数量", permissions_count)
+                st.metric("🏪 门店总数", stores_count)
+                st.metric("📋 报表总数", reports_count)
+                st.metric("🔑 权限总数", permissions_count)
+                
+                # 当月统计
+                current_month_reports = db['reports'].count_documents({
+                    'report_month': datetime.now().strftime("%Y-%m")
+                })
+                st.metric("📅 本月报表", current_month_reports)
                 
                 st.subheader("🏪 门店管理")
                 if st.button("查看门店列表"):
@@ -995,6 +1108,7 @@ def main():
     # 侧边栏
     with st.sidebar:
         st.title("🏪 门店报表系统")
+        st.caption("完整功能版 v2.0")
         
         app_choice = st.selectbox(
             "选择功能模块",
@@ -1012,6 +1126,30 @@ def main():
         else:
             st.error("❌ 数据库连接失败")
             st.info("请检查MongoDB配置")
+        
+        # 新功能说明
+        st.markdown("---")
+        st.markdown("### 🆕 最新功能")
+        st.success("✅ 完全覆盖历史数据")
+        st.success("✅ 修复表头消失问题") 
+        st.success("✅ 第41行第2个合计列")
+        
+        with st.expander("功能说明"):
+            st.markdown("""
+            **1. 完全覆盖模式**
+            - 上传时可选择清除历史数据
+            - 确保新数据完全替换旧数据
+            
+            **2. 表头完整保存**
+            - 自动保存Excel原始表头
+            - 下载和查看时表头完整
+            - 不再出现unnamed列名
+            
+            **3. 精确应收金额**
+            - 第41行定位应收未收金额
+            - 使用第2个合计列数据
+            - 提供提取位置信息
+            """)
     
     # 主界面
     try:
