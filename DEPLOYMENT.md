@@ -1,198 +1,95 @@
-# 🚀 Streamlit Cloud 部署指南
+# Streamlit Cloud 部署指南
 
-## 准备工作
+## 🚀 快速部署
 
-### 1. GitHub 仓库准备
+### 1. 必需文件
+确保您的仓库包含以下文件：
+- `streamlit_app.py` (主入口文件)
+- `requirements_cloud.txt` (依赖包列表)
+- `.streamlit/config.toml` (Streamlit配置)
 
-将项目推送到GitHub仓库：
+### 2. 部署步骤
 
-```bash
-# 初始化Git仓库
-git init
+#### 在Streamlit Cloud：
+1. 访问 [share.streamlit.io](https://share.streamlit.io)
+2. 连接您的GitHub仓库
+3. 选择分支和主文件：`streamlit_app.py`
+4. 配置Secrets（见下方）
 
-# 添加文件（.gitignore会自动排除敏感文件）
-git add .
+### 3. Secrets配置
 
-# 提交代码
-git commit -m "初始化门店报表查询系统"
-
-# 添加远程仓库
-git remote add origin https://github.com/your-username/store-report-system.git
-
-# 推送到GitHub
-git push -u origin main
-```
-
-### 2. 重要文件清单
-
-确保以下文件已包含在仓库中：
-
-- ✅ `main.py` - 主入口文件
-- ✅ `enhanced_app.py` - 门店查询应用
-- ✅ `bulk_uploader.py` - 批量上传应用
-- ✅ `config_manager.py` - 配置管理器
-- ✅ `requirements.txt` - 依赖包列表
-- ✅ `.streamlit/config.toml` - Streamlit配置
-- ✅ `.gitignore` - Git忽略文件
-
-## Streamlit Cloud 部署步骤
-
-### 第一步：访问 Streamlit Cloud
-
-1. 访问 https://share.streamlit.io/
-2. 使用GitHub账号登录
-
-### 第二步：部署应用
-
-1. 点击 **"New app"**
-2. 选择你的GitHub仓库
-3. 配置部署信息：
-   - **Repository**: `your-username/store-report-system`
-   - **Branch**: `main`
-   - **Main file path**: `main.py`
-   - **App URL**: 选择一个唯一的URL
-
-### 第三步：配置Secrets
-
-在Streamlit Cloud的应用设置中，添加以下secrets：
+在Streamlit Cloud App设置的Secrets部分添加：
 
 ```toml
 [mongodb]
-uri = "mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority"
+uri = "your_mongodb_connection_string"
 database_name = "store_reports"
 
-[app]
-secret_key = "your_production_secret_key"
-debug = false
-
 [security]
-admin_password = "your_admin_password"
+admin_password = "admin123"
+
+[app]
+secret_key = "your_secret_key"
+debug = false
 session_timeout = 14400
 ```
 
-### 第四步：部署应用
+### 4. MongoDB Atlas设置
 
-1. 点击 **"Deploy!"**
-2. 等待应用构建完成
-3. 访问生成的URL
+如果使用MongoDB Atlas：
+1. 创建MongoDB Atlas账户
+2. 创建集群
+3. 设置数据库用户和密码
+4. 配置网络访问（允许所有IP: 0.0.0.0/0）
+5. 获取连接字符串
 
-## 🔧 配置MongoDB Atlas（如果还没有）
+### 5. 功能说明
 
-### 1. 创建MongoDB Atlas账号
+#### 📍 当前版本功能：
+- ✅ 门店查询系统（基础版本）
+- ✅ 管理员登录验证
+- ✅ 数据库连接状态检查
+- ✅ 基础报表展示
+- ⚠️ 上传功能（简化版本）
+- ⚠️ 权限管理（基础版本）
 
-1. 访问 https://www.mongodb.com/atlas
-2. 注册免费账号
-3. 创建新的Cluster
+#### 🔧 完整功能版本：
+如需完整功能，请确保所有模块文件都在仓库中：
+- `mongodb_store_system_fixed.py`
+- `bulk_uploader_fixed.py`
+- `permission_manager_fixed.py`
+- `database_manager.py`
+- `data_models.py`
+- `config.py`
 
-### 2. 配置数据库访问
+### 6. 常见问题
 
-1. **Database Access**: 创建数据库用户
-2. **Network Access**: 添加IP白名单（0.0.0.0/0 允许所有IP）
-3. **Connect**: 获取连接字符串
+#### Q: 应用无法启动
+A: 检查requirements.txt和主文件名是否正确
 
-### 3. 获取连接URI
+#### Q: 数据库连接失败
+A: 验证MongoDB连接字符串和网络设置
 
-连接字符串格式：
-```
-mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
-```
+#### Q: 模块导入错误
+A: 确保所有依赖文件都在仓库中
 
-## 📱 应用功能
+#### Q: Secrets配置无效
+A: 在Streamlit Cloud App设置中重新保存Secrets
 
-部署后的应用包含两个主要功能：
+### 7. 本地测试
 
-### 🏪 门店查询系统
-- 门店用户登录查询
-- 应收未收金额看板
-- 财务报表分析
-- 多月份数据对比
-
-### 📤 批量上传系统
-- 管理员批量上传Excel
-- 自动门店识别
-- 上传进度显示
-- 结果统计分析
-
-## 🔒 安全注意事项
-
-### 生产环境配置
-- ✅ 使用强密码
-- ✅ 设置复杂的secret_key
-- ✅ 限制MongoDB访问IP（可选）
-- ✅ 定期更换密码
-
-### 数据保护
-- ✅ secrets.toml不会被提交到Git
-- ✅ 敏感信息通过Streamlit Cloud Secrets管理
-- ✅ 数据库连接加密传输
-
-## 🐛 故障排除
-
-### 常见部署问题
-
-#### 1. 依赖包安装失败
-```
-ERROR: Could not install packages due to an EnvironmentError
-```
-**解决方案**: 检查requirements.txt中的包版本是否兼容
-
-#### 2. MongoDB连接失败
-```
-pymongo.errors.ServerSelectionTimeoutError
-```
-**解决方案**: 
-- 检查Secrets中的MongoDB URI
-- 确认网络访问白名单设置
-
-#### 3. 应用启动错误
-```
-ModuleNotFoundError: No module named 'config_manager'
-```
-**解决方案**: 确保所有Python文件都已推送到GitHub
-
-### 调试技巧
-
-1. **查看日志**: 在Streamlit Cloud应用页面查看详细日志
-2. **本地测试**: 部署前在本地测试所有功能
-3. **分步部署**: 先部署基础功能，再逐步添加复杂功能
-
-## 📊 性能优化
-
-### Streamlit Cloud限制
-- **内存**: 1GB RAM
-- **文件上传**: 最大200MB
-- **并发用户**: 适中规模
-
-### 优化建议
-- ✅ 使用 `@st.cache_resource` 缓存数据库连接
-- ✅ 使用 `@st.cache_data` 缓存查询结果
-- ✅ 分批处理大文件上传
-- ✅ 优化数据库查询索引
-
-## 🔄 更新部署
-
-更新应用只需：
-
-1. 修改代码并推送到GitHub
-2. Streamlit Cloud会自动重新部署
-3. 无需重新配置Secrets
-
+本地运行测试：
 ```bash
-# 更新代码
-git add .
-git commit -m "更新功能"
-git push origin main
+pip install -r requirements_cloud.txt
+streamlit run streamlit_app.py
 ```
 
-## 📞 支持
+### 8. 更新部署
 
-如遇到部署问题：
-
-1. 📖 查看本文档的故障排除部分
-2. 📝 检查Streamlit Cloud应用日志
-3. 🔍 确认MongoDB连接配置
-4. 💬 参考Streamlit Community论坛
+更新应用：
+1. 推送代码到GitHub
+2. Streamlit Cloud会自动重新部署
 
 ---
 
-🎉 **部署完成后，你将拥有一个完全云端化的门店报表查询系统！**
+🎯 **重要提示**：当前`streamlit_app.py`是简化版本，包含基础功能。如需完整功能，请使用完整的模块化版本。
