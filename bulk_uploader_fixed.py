@@ -1,54 +1,46 @@
+# bulk_uploader_fixed.py - 修复版批量上传器
 import pandas as pd
-import pymongo
-from pymongo import MongoClient
 import streamlit as st
 from datetime import datetime
-import json
-import re
-import os
-from typing import Dict, List, Tuple
-import hashlib
 import time
 import numpy as np
+from typing import Dict, List, Tuple
+from database_manager import get_database
+from data_models import StoreModel, ReportModel
+from config import ConfigManager
 
 class BulkReportUploader:
-    def __init__(self, mongo_uri: str = None, db_name: str = None):
-        """初始化批量上传器"""
-        # 优先使用传入参数，然后使用Streamlit secrets，最后使用默认值
-        if mongo_uri is None:
-            if hasattr(st, 'secrets') and 'mongodb' in st.secrets:
-                mongo_uri = st.secrets["mongodb"]["uri"]
-            else:
-                mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
-        
-        if db_name is None:
-            if hasattr(st, 'secrets') and 'mongodb' in st.secrets:
-                db_name = st.secrets["mongodb"]["database_name"]
-            else:
-                db_name = os.getenv('DATABASE_NAME', 'store_reports')
-        
-        self.client = MongoClient(mongo_uri)
-        self.db = self.client[db_name]
+    def __init__(self, db=None):
+        """初始化批量上传器（兼容版本）"""
+        self.db = db or get_database()
         self.stores_collection = self.db['stores']
         self.reports_collection = self.db['reports']
         
-        # 创建索引以提高查询性能
+        # 创建索引以提高查询性能（如果不存在）
         self._create_indexes()
     
     def _create_indexes(self):
         """创建数据库索引"""
         try:
-            # 门店集合索引
-            self.stores_collection.create_index([("store_code", 1)], unique=True)
-            self.stores_collection.create_index([("store_name", 1)])
+            # 这些索引可能已经在database_manager中创建，这里做防重复处理
+            try:
+                self.stores_collection.create_index([("store_code", 1)], unique=True, background=True)
+            except Exception:
+                pass  # 索引已存在
             
-            # 报表集合索引
-            self.reports_collection.create_index([
-                ("store_id", 1), 
-                ("report_month", -1)
-            ])
-            self.reports_collection.create_index([("store_code", 1)])
-            self.reports_collection.create_index([("report_month", -1)])
+            try:
+                self.stores_collection.create_index([("store_name", 1)], background=True)
+            except Exception:
+                pass
+            
+            try:
+                self.reports_collection.create_index([
+                    ("store_id", 1), 
+                    ("report_month", -1)
+                ], background=True)
+            except Exception:
+                pass
+                
         except Exception as e:
             print(f"创建索引时发生错误: {e}")
     
@@ -56,31 +48,25 @@ class BulkReportUploader:
         """标准化门店名称，去除特殊字符和空格"""
         # 移除常见的前缀和后缀
         name = sheet_name.strip()
-        name = re.sub(r'^(犀牛百货|门店|店铺)[\(（]?', '', name)
-        name = re.sub(r'[\)）]?店?$', '', name)
-        name = re.sub(r'\s+', '', name)  # 移除所有空格
+        name = name.replace('犀牛百货', '').replace('门店', '').replace('店', '')
+        name = name.replace('(', '').replace(')', '').replace('（', '').replace('）', '')
+        name = ''.join(name.split())  # 移除所有空格
         return name
     
     def find_or_create_store(self, sheet_name: str) -> Dict:
-        """通过sheet名称查找门店，如果不存在则创建"""
+        """通过sheet名称查找门店，如果不存在则创建（兼容版本）"""
         normalized_name = self.normalize_store_name(sheet_name)
         
         # 首先尝试查找现有门店
         search_patterns = [
-            sheet_name,  # 完全匹配
-            normalized_name,  # 标准化后匹配
-            f".*{normalized_name}.*",  # 包含匹配
-            f".*{sheet_name}.*"  # 原名包含匹配
+            {"store_name": sheet_name},  # 完全匹配
+            {"store_name": {"$regex": normalized_name, "$options": "i"}},  # 标准化后匹配
+            {"store_code": {"$regex": normalized_name, "$options": "i"}},  # 代码匹配
+            {"aliases": {"$in": [sheet_name, normalized_name]}},  # 别名匹配
         ]
         
         for pattern in search_patterns:
-            store = self.stores_collection.find_one({
-                "$or": [
-                    {"store_name": {"$regex": pattern, "$options": "i"}},
-                    {"store_code": {"$regex": pattern, "$options": "i"}},
-                    {"aliases": {"$regex": pattern, "$options": "i"}}
-                ]
-            })
+            store = self.stores_collection.find_one(pattern)
             if store:
                 return store
         
@@ -88,24 +74,14 @@ class BulkReportUploader:
         return self._create_store_from_sheet_name(sheet_name)
     
     def _create_store_from_sheet_name(self, sheet_name: str) -> Dict:
-        """从工作表名称创建新门店"""
+        """从工作表名称创建新门店（使用统一数据模型）"""
         try:
-            normalized_name = self.normalize_store_name(sheet_name)
-            
-            # 生成门店代码（使用标准化名称的拼音首字母或数字）
-            store_code = self._generate_store_code(normalized_name)
-            
-            store_data = {
-                '_id': f"store_{store_code}_{int(time.time())}",
-                'store_name': sheet_name.strip(),  # 使用原始名称
-                'store_code': store_code,
-                'region': '未分类',
-                'manager': '待设置',
-                'aliases': [sheet_name.strip(), normalized_name],
-                'created_at': datetime.now(),
-                'created_by': 'auto_upload',
-                'status': 'active'
-            }
+            # 使用统一的数据模型创建门店
+            store_data = StoreModel.create_store_document(
+                store_name=sheet_name.strip(),
+                aliases=[sheet_name.strip(), self.normalize_store_name(sheet_name)],
+                created_by='bulk_upload'
+            )
             
             # 插入到数据库
             self.stores_collection.insert_one(store_data)
@@ -115,27 +91,15 @@ class BulkReportUploader:
             print(f"创建门店失败: {e}")
             return None
     
-    def _generate_store_code(self, store_name: str) -> str:
-        """生成门店代码"""
-        try:
-            import hashlib
-            # 使用门店名称生成短码
-            hash_obj = hashlib.md5(store_name.encode('utf-8'))
-            short_hash = hash_obj.hexdigest()[:6].upper()
-            return f"AUTO_{short_hash}"
-        except Exception:
-            # 如果出错，使用时间戳
-            return f"AUTO_{int(time.time()) % 100000}"
-    
     def process_excel_file(self, file_buffer, report_month: str, progress_callback=None) -> Dict:
-        """处理Excel文件并上传报表数据"""
+        """处理Excel文件并上传报表数据（兼容版本）"""
         start_time = time.time()
         result = {
             'success_count': 0,
             'failed_count': 0,
             'errors': [],
             'processed_stores': [],
-            'failed_stores': [],  # 存储失败的门店信息
+            'failed_stores': [],
             'total_time': 0
         }
         
@@ -145,18 +109,18 @@ class BulkReportUploader:
                 progress_callback(10, "正在读取Excel文件...")
             
             # 检查文件大小，防止内存溢出
-            file_buffer.seek(0, 2)  # 移到文件末尾
+            file_buffer.seek(0, 2)
             file_size = file_buffer.tell()
-            file_buffer.seek(0)  # 重置到开头
+            file_buffer.seek(0)
             
             if file_size > 50 * 1024 * 1024:  # 50MB限制
                 result['errors'].append("文件过大（超过50MB），请分批上传")
                 return result
             
-            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl')
+            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=None)
             total_sheets = len(excel_data)
             
-            if total_sheets > 200:  # 限制工作表数量
+            if total_sheets > 200:
                 result['errors'].append(f"工作表数量过多（{total_sheets}个），请分批上传（建议每次不超过200个）")
                 return result
             
@@ -237,7 +201,7 @@ class BulkReportUploader:
         return result
     
     def _process_sheet_data(self, df: pd.DataFrame, store: Dict, report_month: str, sheet_name: str) -> Dict:
-        """处理单个工作表的数据"""
+        """处理单个工作表的数据（兼容版本）"""
         try:
             # 数据清洗和预处理 - 保留所有行，只删除完全空的列
             df_cleaned = df.dropna(axis=1, how='all')
@@ -245,47 +209,21 @@ class BulkReportUploader:
             if df_cleaned.empty:
                 return None
             
-            # 保存原始Excel数据（转换为可序列化的格式）
-            # 先将所有列名转换为字符串，避免datetime等类型作为键名
-            df_for_storage = df_cleaned.copy()
-            df_for_storage.columns = [str(col) for col in df_for_storage.columns]
+            # 使用统一的数据模型处理Excel数据
+            standardized_data = ReportModel._dataframe_to_standard_format(df_cleaned)
             
-            # 将所有数据转换为JSON兼容格式
-            raw_excel_data = []
-            for _, row in df_for_storage.iterrows():
-                row_dict = {}
-                for col, value in row.items():
-                    # 确保键是字符串
-                    key = str(col)
-                    # 处理各种数据类型
-                    if pd.isna(value):
-                        row_dict[key] = None
-                    elif isinstance(value, (pd.Timestamp, datetime, np.datetime64)):
-                        row_dict[key] = str(value)
-                    elif isinstance(value, (int, float, str, bool)):
-                        row_dict[key] = value
-                    elif isinstance(value, (np.integer, np.floating)):
-                        row_dict[key] = float(value) if isinstance(value, np.floating) else int(value)
-                    else:
-                        row_dict[key] = str(value)
-                raw_excel_data.append(row_dict)
-            
-            # 构建报表数据结构
-            report_data = {
-                'store_id': store['_id'],
-                'store_code': store['store_code'],
-                'store_name': store['store_name'],
-                'report_month': report_month,
-                'sheet_name': sheet_name,
-                'raw_excel_data': raw_excel_data,  # 存储原始Excel数据
-                'financial_data': {},
-                'uploaded_at': datetime.now(),
-                'uploaded_by': 'bulk_upload'
-            }
-            
-            # 解析财务数据 - 根据实际Excel格式调整
+            # 提取财务数据
             financial_data = self._extract_financial_data(df_cleaned)
-            report_data['financial_data'] = financial_data
+            
+            # 使用统一的数据模型创建报表文档
+            report_data = ReportModel.create_report_document(
+                store_data=store,
+                report_month=report_month,
+                excel_data=standardized_data,
+                sheet_name=sheet_name,
+                financial_data=financial_data,
+                uploaded_by='bulk_upload'
+            )
             
             return report_data
             
@@ -299,29 +237,44 @@ class BulkReportUploader:
             'revenue': {},
             'cost': {},
             'profit': {},
-            'receivables': {},  # 应收账款相关
+            'receivables': {},
             'other_metrics': {}
         }
         
         try:
-            # 提取第82行合计列的应收未收金额
-            row_82_value = None
-            if len(df) >= 82:  # 确保有第82行
-                # 查找"合计"列
-                total_col_idx = None
-                for col_idx, col_name in enumerate(df.columns):
-                    if '合计' in str(col_name) or 'total' in str(col_name).lower():
-                        total_col_idx = col_idx
-                        break
+            # 提取第41行第2个合计列的应收未收金额（适应新的查找逻辑）
+            row_41_value = None
+            if len(df) >= 41:  # 确保有第41行
+                target_row_index = 40  # 第41行的索引是40
                 
-                # 如果找到合计列，提取第82行的值
-                if total_col_idx is not None and len(df) > 81:  # 第82行的索引是81
-                    try:
-                        row_82_value = float(df.iloc[81, total_col_idx])
-                        financial_data['receivables']['net_amount'] = row_82_value
-                        financial_data['other_metrics']['第82行合计'] = row_82_value
-                    except (ValueError, TypeError, IndexError):
-                        pass
+                # 查找"合计"列
+                total_col_indices = []
+                for col_idx in range(len(df.columns)):
+                    if len(df) > 0:  # 检查是否有表头行
+                        header_value = df.iloc[0, col_idx] if not pd.isna(df.iloc[0, col_idx]) else ""
+                        if '合计' in str(header_value) or 'total' in str(header_value).lower():
+                            total_col_indices.append(col_idx)
+                
+                # 检查第41行是否包含应收未收关键词
+                if len(df) > target_row_index:
+                    first_col_value = str(df.iloc[target_row_index, 0]) if not pd.isna(df.iloc[target_row_index, 0]) else ""
+                    keywords = ['总部应收未收金额', '应收未收金额', '应收-未收额', '应收未收额', '应收-未收', '应收未收']
+                    
+                    if any(keyword in first_col_value for keyword in keywords):
+                        # 使用第2个合计列（如果存在）
+                        target_col_idx = None
+                        if len(total_col_indices) >= 2:
+                            target_col_idx = total_col_indices[1]  # 第2个合计列
+                        elif len(total_col_indices) == 1:
+                            target_col_idx = total_col_indices[0]  # 只有1个合计列
+                        
+                        if target_col_idx is not None:
+                            try:
+                                row_41_value = float(df.iloc[target_row_index, target_col_idx])
+                                financial_data['receivables']['net_amount'] = row_41_value
+                                financial_data['other_metrics']['第41行第2个合计列'] = row_41_value
+                            except (ValueError, TypeError, IndexError):
+                                pass
             
             # 遍历所有数据提取其他财务指标
             for idx, row in df.iterrows():
@@ -408,29 +361,10 @@ class BulkReportUploader:
             if total_revenue > 0 and total_cost > 0:
                 financial_data['profit']['profit_margin'] = (total_revenue - total_cost) / total_revenue
             
-            # 如果没有找到第82行的值，尝试从其他方式获取应收未收金额
-            if row_82_value is None:
-                for key, value in financial_data['other_metrics'].items():
-                    if ('82' in key and '合计' in key) or ('应收' in key and '合计' in key):
-                        financial_data['receivables']['net_amount'] = value
-                        break
-            
         except Exception as e:
             print(f"提取财务数据时出错: {e}")
         
         return financial_data
-    
-    def add_store_with_aliases(self, store_data: Dict, aliases: List[str] = None) -> bool:
-        """添加门店信息，包含别名"""
-        try:
-            if aliases:
-                store_data['aliases'] = aliases
-            
-            result = self.stores_collection.insert_one(store_data)
-            return True
-        except Exception as e:
-            print(f"添加门店失败: {e}")
-            return False
     
     def get_upload_statistics(self, report_month: str = None) -> Dict:
         """获取上传统计信息"""
@@ -467,20 +401,11 @@ class BulkReportUploader:
         except Exception as e:
             print(f"获取统计信息失败: {e}")
             return {}
-    
-    def close_connection(self):
-        """关闭数据库连接"""
-        self.client.close()
 
 # 管理员验证
 def verify_admin_password(password: str) -> bool:
     """验证管理员密码"""
-    try:
-        # 从Streamlit secrets获取管理员密码
-        admin_password = st.secrets.get("security", {}).get("admin_password", "admin123")
-        return password == admin_password
-    except Exception:
-        return password == "admin123"  # 默认密码
+    return password == ConfigManager.get_admin_password()
 
 # Streamlit 上传界面
 def create_upload_interface():
@@ -488,10 +413,10 @@ def create_upload_interface():
     st.title("📤 批量报表上传系统")
     
     # 检查管理员登录状态
-    if 'admin_authenticated' not in st.session_state:
-        st.session_state.admin_authenticated = False
+    if 'admin_authenticated_bulk' not in st.session_state:
+        st.session_state.admin_authenticated_bulk = False
     
-    if not st.session_state.admin_authenticated:
+    if not st.session_state.admin_authenticated_bulk:
         # 管理员登录页面
         st.subheader("🔐 管理员登录")
         
@@ -500,23 +425,25 @@ def create_upload_interface():
             admin_password = st.text_input(
                 "管理员密码", 
                 type="password", 
-                placeholder="请输入管理员密码"
+                placeholder="请输入管理员密码",
+                key="bulk_admin_password"
             )
             
-            if st.button("登录", use_container_width=True):
+            if st.button("登录", use_container_width=True, key="bulk_admin_login"):
                 if admin_password:
                     if verify_admin_password(admin_password):
-                        st.session_state.admin_authenticated = True
+                        st.session_state.admin_authenticated_bulk = True
                         st.success("管理员登录成功！")
                         st.rerun()
                     else:
                         st.error("管理员密码错误")
                 else:
                     st.warning("请输入管理员密码")
-        return  # 未登录时直接返回，不显示上传界面
+        return
     
     # 初始化上传器
-    uploader = BulkReportUploader()
+    db = get_database()
+    uploader = BulkReportUploader(db)
     
     col1, col2 = st.columns([2, 1])
     
@@ -603,7 +530,7 @@ def create_upload_interface():
         # 门店管理
         st.subheader("🏪 门店管理")
         if st.button("查看门店列表"):
-            stores = list(uploader.stores_collection.find({}, {'password': 0}))
+            stores = list(uploader.stores_collection.find({}, {'_id': 1, 'store_name': 1, 'store_code': 1, 'region': 1}))
             if stores:
                 stores_df = pd.DataFrame(stores)
                 st.dataframe(stores_df[['store_name', 'store_code', 'region']], use_container_width=True)
@@ -613,10 +540,8 @@ def create_upload_interface():
         # 管理员退出登录
         st.markdown("---")
         if st.button("退出管理员登录", type="secondary"):
-            st.session_state.admin_authenticated = False
+            st.session_state.admin_authenticated_bulk = False
             st.rerun()
-    
-    uploader.close_connection()
 
 if __name__ == "__main__":
     create_upload_interface()
