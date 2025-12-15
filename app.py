@@ -187,16 +187,11 @@ class ReportModel:
         headers = []
         for col in df.columns:
             col_str = str(col)
-            print(f"Debug - Processing column: '{col_str}'")  # 调试信息
-            # 将Unnamed列名替换为空字符串
-            if col_str.startswith('Unnamed:') or col_str.startswith('Unnamed '):
+            # 将Unnamed列名替换为空字符串（更宽泛的匹配）
+            if ('unnamed' in col_str.lower()) or col_str.lower().startswith('unnamed'):
                 headers.append("")
-                print(f"  -> Replaced with empty string")
             else:
                 headers.append(col_str)
-                print(f"  -> Kept as: '{col_str}'")
-        
-        print(f"Final headers: {headers}")  # 调试信息
         
         result = []
         for index, row in df.iterrows():
