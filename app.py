@@ -187,11 +187,16 @@ class ReportModel:
         headers = []
         for col in df.columns:
             col_str = str(col)
+            print(f"Debug - Processing column: '{col_str}'")  # 调试信息
             # 将Unnamed列名替换为空字符串
-            if col_str.startswith('Unnamed:'):
+            if col_str.startswith('Unnamed:') or col_str.startswith('Unnamed '):
                 headers.append("")
+                print(f"  -> Replaced with empty string")
             else:
                 headers.append(col_str)
+                print(f"  -> Kept as: '{col_str}'")
+        
+        print(f"Final headers: {headers}")  # 调试信息
         
         result = []
         for index, row in df.iterrows():
@@ -735,7 +740,8 @@ def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> 
 # 应用界面
 def create_query_app():
     """门店查询应用"""
-    st.title("🔍 门店查询系统")
+    # 居中显示标题
+    st.markdown("<h1 style='text-align: center;'>🔍 门店查询系统</h1>", unsafe_allow_html=True)
     
     db_manager = get_db_manager()
     if not db_manager.is_connected():
@@ -749,11 +755,12 @@ def create_query_app():
         st.session_state.authenticated = False
     
     if not st.session_state.authenticated:
-        st.subheader("🔐 查询编号登录")
+        # 居中显示登录区域
+        st.markdown("<h3 style='text-align: center;'>🔐 登录</h3>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            query_code = st.text_input("查询编号", placeholder="请输入查询编号")
+            query_code = st.text_input("", placeholder="请输入查询编号")
             
             if st.button("登录", use_container_width=True):
                 if query_code:
