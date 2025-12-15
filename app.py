@@ -1067,13 +1067,55 @@ def create_permission_app():
         with tab2:
             st.subheader("当前权限配置")
             
+            # 添加数据修复按钮
+            col1, col2 = st.columns([3, 1])
+            with col2:
+                if st.button("🔧 修复数据", help="修复缺少字段的权限数据"):
+                    try:
+                        permissions_raw = list(permission_manager.permissions_collection.find())
+                        fixed_count = 0
+                        
+                        for perm in permissions_raw:
+                            needs_fix = False
+                            updates = {}
+                            
+                            # 检查必需字段
+                            if 'store_id' not in perm:
+                                updates['store_id'] = 'unknown'
+                                needs_fix = True
+                            if 'store_name' not in perm:
+                                updates['store_name'] = 'Unknown Store'
+                                needs_fix = True
+                            if 'store_code' not in perm:
+                                updates['store_code'] = 'AUTO_UNKNOWN'
+                                needs_fix = True
+                            
+                            if needs_fix:
+                                permission_manager.permissions_collection.update_one(
+                                    {'_id': perm['_id']}, 
+                                    {'$set': updates}
+                                )
+                                fixed_count += 1
+                        
+                        if fixed_count > 0:
+                            st.success(f"已修复 {fixed_count} 条权限数据")
+                            st.rerun()
+                        else:
+                            st.info("所有权限数据完整，无需修复")
+                            
+                    except Exception as e:
+                        st.error(f"数据修复失败: {e}")
+            
+            with col1:
+                st.caption("权限配置列表")
+            
             permissions = permission_manager.get_all_permissions()
             
             if permissions:
                 for perm in permissions:
-                    with st.expander(f"查询编号: {perm['query_code']} → {perm['store_name']}"):
-                        st.write(f"**门店名称:** {perm['store_name']}")
-                        st.write(f"**门店ID:** {perm['store_id']}")
+                    with st.expander(f"查询编号: {perm['query_code']} → {perm.get('store_name', 'N/A')}"):
+                        st.write(f"**门店名称:** {perm.get('store_name', 'N/A')}")
+                        st.write(f"**门店ID:** {perm.get('store_id', 'N/A')}")
                         st.write(f"**门店代码:** {perm.get('store_code', 'N/A')}")
                         st.write(f"**创建时间:** {perm.get('created_at', 'N/A')}")
                         st.write(f"**更新时间:** {perm.get('updated_at', 'N/A')}")
@@ -1122,7 +1164,7 @@ def create_permission_app():
 错误类型: {type(e).__name__}
 错误消息: {str(e)}
 数据库状态: {'已连接' if db_manager.is_connected() else '未连接'}
-数据库对象: {type(db).__name__ if db else 'None'}
+数据库对象: {type(db).__name__ if db is not None else 'None'}
             """)
             
             # 显示配置状态
