@@ -801,20 +801,20 @@ def create_query_app():
                     
                     # 添加自定义CSS样式
                     if amount < 0:
-                        # 负数：总部应退 - 渐变绿色
+                        # 负数：总部应退 - 柔和绿色
                         abs_amount = abs(amount)
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #4CAF50, #8BC34A, #CDDC39);
+                            background: linear-gradient(135deg, #81C784, #A5D6A7, #C8E6C9);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(76, 175, 80, 0.3);
+                            box-shadow: 0 8px 25px rgba(129, 199, 132, 0.3);
                             margin: 20px 0;
-                            border: 3px solid #4CAF50;
+                            border: 3px solid #81C784;
                         ">
                             <div style="
-                                font-size: 28px;
+                                font-size: 36px;
                                 font-weight: bold;
                                 color: white;
                                 text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -824,7 +824,7 @@ def create_query_app():
                                 总部应退
                             </div>
                             <div style="
-                                font-size: 48px;
+                                font-size: 42px;
                                 font-weight: 900;
                                 color: white;
                                 text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
@@ -835,19 +835,19 @@ def create_query_app():
                         </div>
                         """, unsafe_allow_html=True)
                     elif amount > 0:
-                        # 正数：门店应返 - 渐变蓝色
+                        # 正数：门店应返 - 柔和蓝色
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #2196F3, #03A9F4, #00BCD4);
+                            background: linear-gradient(135deg, #64B5F6, #90CAF9, #BBDEFB);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(33, 150, 243, 0.3);
+                            box-shadow: 0 8px 25px rgba(100, 181, 246, 0.3);
                             margin: 20px 0;
-                            border: 3px solid #2196F3;
+                            border: 3px solid #64B5F6;
                         ">
                             <div style="
-                                font-size: 28px;
+                                font-size: 36px;
                                 font-weight: bold;
                                 color: white;
                                 text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -857,7 +857,7 @@ def create_query_app():
                                 门店应返
                             </div>
                             <div style="
-                                font-size: 48px;
+                                font-size: 42px;
                                 font-weight: 900;
                                 color: white;
                                 text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
@@ -868,19 +868,19 @@ def create_query_app():
                         </div>
                         """, unsafe_allow_html=True)
                     else:
-                        # 零：已结清 - 渐变灰色
+                        # 零：已结清 - 柔和灰色
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #9E9E9E, #BDBDBD, #E0E0E0);
+                            background: linear-gradient(135deg, #BDBDBD, #D4D4D4, #EEEEEE);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(158, 158, 158, 0.3);
+                            box-shadow: 0 8px 25px rgba(189, 189, 189, 0.3);
                             margin: 20px 0;
-                            border: 3px solid #9E9E9E;
+                            border: 3px solid #BDBDBD;
                         ">
                             <div style="
-                                font-size: 28px;
+                                font-size: 36px;
                                 font-weight: bold;
                                 color: white;
                                 text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -890,7 +890,7 @@ def create_query_app():
                                 已结清
                             </div>
                             <div style="
-                                font-size: 48px;
+                                font-size: 42px;
                                 font-weight: 900;
                                 color: white;
                                 text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
@@ -905,16 +905,16 @@ def create_query_app():
                     # 错误状态的看板
                     st.markdown(f"""
                     <div style="
-                        background: linear-gradient(135deg, #FF5722, #FF7043, #FF8A65);
+                        background: linear-gradient(135deg, #FFAB91, #FFCC80, #FFE0B2);
                         padding: 30px;
                         border-radius: 15px;
                         text-align: center;
-                        box-shadow: 0 8px 25px rgba(255, 87, 34, 0.3);
+                        box-shadow: 0 8px 25px rgba(255, 171, 145, 0.3);
                         margin: 20px 0;
-                        border: 3px solid #FF5722;
+                        border: 3px solid #FFAB91;
                     ">
                         <div style="
-                            font-size: 28px;
+                            font-size: 36px;
                             font-weight: bold;
                             color: white;
                             text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -924,7 +924,7 @@ def create_query_app():
                             暂无数据
                         </div>
                         <div style="
-                            font-size: 24px;
+                            font-size: 28px;
                             font-weight: 600;
                             color: white;
                             text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
