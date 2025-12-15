@@ -451,11 +451,17 @@ class BulkReportUploader:
                     
                     parsed_value = pd.to_numeric(raw_value, errors='coerce')
                     if not pd.isna(parsed_value):
+                        # 保存原始数值
                         financial_data['receivables']['net_amount'] = float(parsed_value)
                         financial_data['other_metrics']['总部应收未收金额'] = float(parsed_value)
+                        
+                        # 格式化为两位小数和千分位
+                        formatted_value = f"{parsed_value:,.2f}"
+                        financial_data['other_metrics']['格式化金额'] = formatted_value
+                        
                         financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
                         financial_data['other_metrics']['提取成功'] = True
-                        financial_data['other_metrics']['数值处理'] = "直接显示在可视化看板"
+                        financial_data['other_metrics']['数值处理'] = f"原始值: {parsed_value}, 格式化: {formatted_value}"
                     else:
                         financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
                         
