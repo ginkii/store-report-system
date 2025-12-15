@@ -182,7 +182,7 @@ class ReportModel:
     
     @staticmethod
     def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
-        """将DataFrame转换为字典列表，保留表头信息"""
+        """将DataFrame转换为字典列表，保留表头信息并修复#NAME?错误"""
         # 保存原始列名作为表头
         headers = [str(col) for col in df.columns]
         
@@ -196,7 +196,18 @@ class ReportModel:
                 elif isinstance(value, (int, float)):
                     row_dict[col_key] = float(value) if not pd.isna(value) else 0.0
                 else:
-                    row_dict[col_key] = str(value)
+                    # 修复CSV中的#NAME?错误
+                    value_str = str(value).strip()
+                    if value_str.startswith('='):
+                        # 处理Excel公式，特别是"=--平台内支出"这类
+                        if '平台内支出' in value_str:
+                            row_dict[col_key] = "--平台内支出"
+                        elif value_str.startswith('=--'):
+                            row_dict[col_key] = value_str[3:]  # 去除"=--"
+                        else:
+                            row_dict[col_key] = value_str[1:]  # 去除"="
+                    else:
+                        row_dict[col_key] = value_str
             result.append(row_dict)
         
         return result, headers
@@ -381,7 +392,7 @@ class BulkReportUploader:
         return result
     
     def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
-        """改进的财务数据提取 - 修复第41行第2个合计列问题"""
+        """改进的财务数据提取 - 修复第39行第2个合计列问题"""
         financial_data = {
             'revenue': {},
             'cost': {},
@@ -398,12 +409,12 @@ class BulkReportUploader:
                 if '合计' in col_str or 'total' in col_str or '总计' in col_str:
                     total_col_indices.append(col_idx)
             
-            # 2. 在第41行（索引40）查找应收未收金额
-            if len(df) >= 41 and len(total_col_indices) > 0:
-                target_row_index = 40  # 第41行
+            # 2. 在第39行（索引38）查找应收未收金额
+            if len(df) >= 39 and len(total_col_indices) >= 2:
+                target_row_index = 38  # 第39行
                 
                 try:
-                    # 检查第41行第一列的内容
+                    # 检查第39行第一列的内容
                     first_col_value = str(df.iloc[target_row_index, 0]).strip()
                     
                     # 应收未收关键词列表
@@ -412,18 +423,18 @@ class BulkReportUploader:
                         '应收未收额', '应收-未收', '应收未收', '未收金额'
                     ]
                     
-                    # 如果第41行包含应收未收关键词
+                    # 如果第39行包含应收未收关键词
                     if any(keyword in first_col_value for keyword in keywords):
-                        # 使用第2个合计列，如果没有第2个则使用第1个
-                        target_col_idx = total_col_indices[1] if len(total_col_indices) >= 2 else total_col_indices[0]
+                        # 强制使用第2个合计列
+                        target_col_idx = total_col_indices[1]
                         
                         try:
-                            # 提取第41行指定合计列的值
-                            row_41_value = pd.to_numeric(df.iloc[target_row_index, target_col_idx], errors='coerce')
-                            if not pd.isna(row_41_value):
-                                financial_data['receivables']['net_amount'] = float(row_41_value)
-                                financial_data['other_metrics']['第41行应收未收'] = float(row_41_value)
-                                financial_data['other_metrics']['提取位置'] = f"第41行第{len(total_col_indices) >= 2 and 2 or 1}个合计列"
+                            # 提取第39行第2个合计列的值
+                            row_39_value = pd.to_numeric(df.iloc[target_row_index, target_col_idx], errors='coerce')
+                            if not pd.isna(row_39_value):
+                                financial_data['receivables']['net_amount'] = float(row_39_value)
+                                financial_data['other_metrics']['第39行应收未收'] = float(row_39_value)
+                                financial_data['other_metrics']['提取位置'] = f"第39行第2个合计列"
                         except (ValueError, TypeError, IndexError):
                             pass
                     
@@ -675,8 +686,7 @@ def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> 
 # 应用界面
 def create_query_app():
     """门店查询应用"""
-    # 居中显示标题
-    st.markdown("<h1 style='text-align: center;'>🔍 门店查询系统</h1>", unsafe_allow_html=True)
+    st.title("🔍 门店查询系统")
     
     db_manager = get_db_manager()
     if not db_manager.is_connected():
@@ -690,8 +700,7 @@ def create_query_app():
         st.session_state.authenticated = False
     
     if not st.session_state.authenticated:
-        # 居中显示登录标题
-        st.markdown("<h2 style='text-align: center;'>🔐 查询编号登录</h2>", unsafe_allow_html=True)
+        st.subheader("🔐 查询编号登录")
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -727,8 +736,7 @@ def create_query_app():
                 st.session_state.authenticated = False
                 st.rerun()
         
-        # 居中显示门店标题
-        st.markdown(f"<h1 style='text-align: center;'>📊 {store_info['store_name']}</h1>", unsafe_allow_html=True)
+        st.title(f"📊 {store_info['store_name']}")
         
         # 获取报表数据
         try:
@@ -747,17 +755,12 @@ def create_query_app():
                     other_metrics = latest_report.get('financial_data', {}).get('other_metrics', {})
                     extract_position = other_metrics.get('提取位置', '未知位置')
                     
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        if amount > 0:
-                            st.error(f"💰 门店应付: ¥{amount:,.2f}")
-                        elif amount < 0:
-                            st.success(f"💚 总部应退: ¥{abs(amount):,.2f}")
-                        else:
-                            st.info("✅ 已结清: ¥0.00")
-                    
-                    with col2:
-                        st.caption(f"数据来源: {extract_position}")
+                    if amount > 0:
+                        st.error(f"💰 门店应付: ¥{amount:,.2f}")
+                    elif amount < 0:
+                        st.success(f"💚 总部应退: ¥{abs(amount):,.2f}")
+                    else:
+                        st.info("✅ 已结清: ¥0.00")
                         
                 except Exception:
                     st.info("暂无应收数据")
@@ -775,16 +778,19 @@ def create_query_app():
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
                         if not df.empty:
-                            # 显示表格
-                            st.dataframe(df, use_container_width=True)
+                            # 显示只读表格
+                            st.dataframe(df, use_container_width=True, height=400)
                             
-                            # 提供下载功能 - 保持表头
-                            csv_data = df.to_csv(index=False)
+                            # 提供Excel下载功能
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False, sheet_name=store_info['store_name'][:31])
+                            
                             st.download_button(
-                                label="📥 下载完整报表 (CSV)",
-                                data=csv_data,
-                                file_name=f"{store_info['store_name']}_{latest_report['report_month']}_报表.csv",
-                                mime="text/csv"
+                                label="📥 下载完整报表 (Excel)",
+                                data=buffer.getvalue(),
+                                file_name=f"{store_info['store_name']}_{latest_report['report_month']}_报表.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
                         else:
                             st.info("报表数据格式错误")
@@ -835,11 +841,6 @@ def create_upload_app():
     db = db_manager.get_database()
     
     try:
-        # 检查数据库连接是否有效
-        if db is None:
-            st.error("数据库连接失败，无法初始化上传器")
-            return
-            
         uploader = BulkReportUploader(db)
         
         col1, col2 = st.columns([2, 1])
@@ -1000,11 +1001,6 @@ def create_permission_app():
     db = db_manager.get_database()
     
     try:
-        # 检查数据库连接是否有效
-        if db is None:
-            st.error("数据库连接失败，无法初始化权限管理器")
-            return
-            
         permission_manager = PermissionManager(db)
         
         # 标签页
@@ -1067,55 +1063,13 @@ def create_permission_app():
         with tab2:
             st.subheader("当前权限配置")
             
-            # 添加数据修复按钮
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("🔧 修复数据", help="修复缺少字段的权限数据"):
-                    try:
-                        permissions_raw = list(permission_manager.permissions_collection.find())
-                        fixed_count = 0
-                        
-                        for perm in permissions_raw:
-                            needs_fix = False
-                            updates = {}
-                            
-                            # 检查必需字段
-                            if 'store_id' not in perm:
-                                updates['store_id'] = 'unknown'
-                                needs_fix = True
-                            if 'store_name' not in perm:
-                                updates['store_name'] = 'Unknown Store'
-                                needs_fix = True
-                            if 'store_code' not in perm:
-                                updates['store_code'] = 'AUTO_UNKNOWN'
-                                needs_fix = True
-                            
-                            if needs_fix:
-                                permission_manager.permissions_collection.update_one(
-                                    {'_id': perm['_id']}, 
-                                    {'$set': updates}
-                                )
-                                fixed_count += 1
-                        
-                        if fixed_count > 0:
-                            st.success(f"已修复 {fixed_count} 条权限数据")
-                            st.rerun()
-                        else:
-                            st.info("所有权限数据完整，无需修复")
-                            
-                    except Exception as e:
-                        st.error(f"数据修复失败: {e}")
-            
-            with col1:
-                st.caption("权限配置列表")
-            
             permissions = permission_manager.get_all_permissions()
             
             if permissions:
                 for perm in permissions:
-                    with st.expander(f"查询编号: {perm['query_code']} → {perm.get('store_name', 'N/A')}"):
-                        st.write(f"**门店名称:** {perm.get('store_name', 'N/A')}")
-                        st.write(f"**门店ID:** {perm.get('store_id', 'N/A')}")
+                    with st.expander(f"查询编号: {perm['query_code']} → {perm['store_name']}"):
+                        st.write(f"**门店名称:** {perm['store_name']}")
+                        st.write(f"**门店ID:** {perm['store_id']}")
                         st.write(f"**门店代码:** {perm.get('store_code', 'N/A')}")
                         st.write(f"**创建时间:** {perm.get('created_at', 'N/A')}")
                         st.write(f"**更新时间:** {perm.get('updated_at', 'N/A')}")
@@ -1157,25 +1111,6 @@ def create_permission_app():
     
     except Exception as e:
         st.error(f"初始化权限管理器失败: {e}")
-        
-        # 添加详细的调试信息
-        with st.expander("🔧 详细错误信息（仅管理员可见）"):
-            st.code(f"""
-错误类型: {type(e).__name__}
-错误消息: {str(e)}
-数据库状态: {'已连接' if db_manager.is_connected() else '未连接'}
-数据库对象: {type(db).__name__ if db is not None else 'None'}
-            """)
-            
-            # 显示配置状态
-            try:
-                config = ConfigManager.get_mongodb_config()
-                st.code(f"""
-MongoDB URI: {config['uri'][:50]}...
-数据库名: {config['database_name']}
-                """)
-            except Exception as config_err:
-                st.code(f"配置获取失败: {config_err}")
 
 def main():
     """主应用入口"""
@@ -1183,7 +1118,7 @@ def main():
     # 侧边栏
     with st.sidebar:
         st.title("🏪 门店报表系统")
-        st.caption("数据查询平台")
+        st.caption("完整功能版 v2.0")
         
         app_choice = st.selectbox(
             "选择功能模块",
@@ -1192,19 +1127,39 @@ def main():
         )
         
         st.markdown("---")
-        st.markdown("### 🔗 连接状态")
+        st.markdown("### 📊 系统状态")
         
         # 检查数据库连接
         db_manager = get_db_manager()
         if db_manager.is_connected():
-            st.success("✅ 系统正常")
+            st.success("✅ 数据库已连接")
         else:
-            st.error("❌ 连接异常")
+            st.error("❌ 数据库连接失败")
+            st.info("请检查MongoDB配置")
         
-        # 系统信息
+        # 新功能说明
         st.markdown("---")
-        st.markdown("### 📊 系统信息")
-        st.info("门店报表查询系统")
+        st.markdown("### 🆕 最新功能")
+        st.success("✅ 完全覆盖历史数据")
+        st.success("✅ 修复表头消失问题") 
+        st.success("✅ 第41行第2个合计列")
+        
+        with st.expander("功能说明"):
+            st.markdown("""
+            **1. 完全覆盖模式**
+            - 上传时可选择清除历史数据
+            - 确保新数据完全替换旧数据
+            
+            **2. 表头完整保存**
+            - 自动保存Excel原始表头
+            - 下载和查看时表头完整
+            - 不再出现unnamed列名
+            
+            **3. 精确应收金额**
+            - 第41行定位应收未收金额
+            - 使用第2个合计列数据
+            - 提供提取位置信息
+            """)
     
     # 主界面
     try:
