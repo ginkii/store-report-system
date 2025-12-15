@@ -6,14 +6,20 @@
 """
 
 import streamlit as st
-import traceback
-import os
 import pandas as pd
 import numpy as np
+import pymongo
+from pymongo import MongoClient
+import plotly.express as px
+import plotly.graph_objects as go
+import traceback
+import os
 import time
-from datetime import datetime
-from typing import Dict, List, Optional, Any
 import hashlib
+import re
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple
+import io
 
 # 页面配置
 st.set_page_config(
@@ -109,20 +115,6 @@ class DatabaseManager:
     def is_connected(self):
         """检查数据库是否连接"""
         return self.db is not None
-    
-    def clear_all_data_and_upload(self, report_month: str):
-        """完全清除指定月份的所有数据"""
-        if not self.db:
-            return False
-        
-        try:
-            # 清除指定月份的所有报表数据
-            result = self.db['reports'].delete_many({'report_month': report_month})
-            st.info(f"清除了 {result.deleted_count} 条历史数据")
-            return True
-        except Exception as e:
-            st.error(f"清除历史数据失败: {e}")
-            return False
 
 # 全局数据库管理器
 @st.cache_resource
@@ -180,7 +172,7 @@ class ReportModel:
         }
     
     @staticmethod
-    def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
+    def dataframe_to_dict_list(df: pd.DataFrame) -> Tuple[List[Dict], List[str]]:
         """将DataFrame转换为字典列表，保留表头信息"""
         # 保存原始列名作为表头
         headers = [str(col) for col in df.columns]
