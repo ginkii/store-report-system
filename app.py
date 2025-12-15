@@ -781,6 +781,22 @@ def create_query_app():
                     latest_report = reports[0]
                     receivables = latest_report.get('financial_data', {}).get('receivables', {})
                     amount = receivables.get('net_amount', 0)
+                    
+                    # 调试信息：显示从数据库读取到的值
+                    with st.expander("🔧 数据库读取调试信息"):
+                        st.write("**报表月份:**", latest_report.get('report_month', '未知'))
+                        st.write("**财务数据存在:**", 'financial_data' in latest_report)
+                        st.write("**应收数据存在:**", 'receivables' in latest_report.get('financial_data', {}))
+                        st.write("**原始金额值:**", amount)
+                        st.write("**金额类型:**", type(amount))
+                        
+                        # 显示完整的财务调试信息
+                        debug_info = latest_report.get('financial_data', {}).get('other_metrics', {})
+                        if debug_info:
+                            st.write("**完整调试信息:**")
+                            for key, value in debug_info.items():
+                                st.write(f"- **{key}:** {value}")
+                    
                     st.markdown("### 总部应收未收金额")
                     
                     # 添加自定义CSS样式
