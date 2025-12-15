@@ -1109,7 +1109,7 @@ def main():
     # 侧边栏
     with st.sidebar:
         st.title("🏪 门店报表系统")
-        st.caption("完整功能版 v2.0")
+        st.caption("数据查询平台")
         
         app_choice = st.selectbox(
             "选择功能模块",
@@ -1118,39 +1118,20 @@ def main():
         )
         
         st.markdown("---")
-        st.markdown("### 📊 系统状态")
+        st.markdown("### 🔗 连接状态")
         
         # 检查数据库连接
         db_manager = get_db_manager()
         if db_manager.is_connected():
-            st.success("✅ 数据库已连接")
+            st.success("✅ 系统正常")
         else:
-            st.error("❌ 数据库连接失败")
-            st.info("请检查MongoDB配置")
+            st.error("❌ 连接异常")
         
-        # 新功能说明
+        # 系统信息
         st.markdown("---")
-        st.markdown("### 🆕 最新功能")
-        st.success("✅ 完全覆盖历史数据")
-        st.success("✅ 修复表头消失问题") 
-        st.success("✅ 第41行第2个合计列")
-        
-        with st.expander("功能说明"):
-            st.markdown("""
-            **1. 完全覆盖模式**
-            - 上传时可选择清除历史数据
-            - 确保新数据完全替换旧数据
-            
-            **2. 表头完整保存**
-            - 自动保存Excel原始表头
-            - 下载和查看时表头完整
-            - 不再出现unnamed列名
-            
-            **3. 精确应收金额**
-            - 第41行定位应收未收金额
-            - 使用第2个合计列数据
-            - 提供提取位置信息
-            """)
+        st.markdown("### 📊 系统信息")
+        st.info("门店报表查询系统")
+        st.caption("安全 • 便捷 • 实时")
     
     # 主界面
     try:
