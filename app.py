@@ -314,16 +314,17 @@ class BulkReportUploader:
             if progress_callback:
                 progress_callback(15, "正在读取Excel文件...")
             
-            # 2. 读取Excel文件 - 以第4行为表头
-            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)  # header=3 表示第4行为表头
-            total_sheets = len(excel_data)
+            # 2. 读取Excel文件 - 以第2行为表头用于显示，同时读取第4行为表头用于财务提取
+            excel_data_display = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)  # header=1 表示第2行为表头用于显示
+            excel_data_financial = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)  # header=3 表示第4行为表头用于财务提取
+            total_sheets = len(excel_data_display)
             
             if progress_callback:
                 progress_callback(20, f"发现 {total_sheets} 个工作表，开始处理...")
             
             processed = 0
             
-            for sheet_name, df in excel_data.items():
+            for sheet_name in excel_data_display.keys():
                 try:
                     processed += 1
                     progress = 20 + (processed / total_sheets) * 70
@@ -339,32 +340,40 @@ class BulkReportUploader:
                         result['failed_count'] += 1
                         continue
                     
-                    # 3. 处理数据 - 保持完整表头
-                    df_cleaned = df.dropna(axis=1, how='all')
-                    if df_cleaned.empty:
+                    # 3. 处理显示数据 - 使用第2行为表头
+                    df_display = excel_data_display[sheet_name]
+                    df_display_cleaned = df_display.dropna(axis=1, how='all')
+                    
+                    # 4. 处理财务数据 - 使用第4行为表头
+                    df_financial = excel_data_financial[sheet_name]
+                    df_financial_cleaned = df_financial.dropna(axis=1, how='all')
+                    
+                    if df_display_cleaned.empty:
                         result['failed_stores'].append({
                             'store_name': sheet_name,
-                            'reason': '数据为空'
+                            'reason': '显示数据为空'
                         })
                         result['failed_count'] += 1
                         continue
                     
-                    # 4. 转换数据格式，保存表头
-                    excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_cleaned)
-                    financial_data = self._extract_financial_data_v2(df_cleaned)
+                    # 5. 转换显示数据格式，保存表头
+                    excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display_cleaned)
                     
-                    # 5. 创建报表文档
+                    # 6. 提取财务数据（使用第4行表头的数据）
+                    financial_data = self._extract_financial_data_v2(df_financial_cleaned)
+                    
+                    # 7. 创建报表文档
                     report_data = ReportModel.create_report_document(
                         store_data=store,
                         report_month=report_month,
                         excel_data=excel_data_dict,
-                        headers=headers,  # 保存表头
+                        headers=headers,  # 保存第2行表头用于显示
                         sheet_name=sheet_name,
                         financial_data=financial_data,
                         uploaded_by='bulk_upload'
                     )
                     
-                    # 6. 保存到数据库（不检查existing，因为已经清空）
+                    # 8. 保存到数据库（不检查existing，因为已经清空）
                     self.reports_collection.insert_one(report_data)
                     
                     result['success_count'] += 1
@@ -782,8 +791,6 @@ def create_query_app():
                     receivables = latest_report.get('financial_data', {}).get('receivables', {})
                     amount = receivables.get('net_amount', 0)
                     
-                    st.markdown("### 总部应收未收金额")
-                    
                     # 添加自定义CSS样式
                     if amount < 0:
                         # 负数：总部应退 - 高级紫色渐变
@@ -933,8 +940,33 @@ def create_query_app():
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
                         if not df.empty:
-                            # 显示只读表格
-                            st.dataframe(df, use_container_width=True, height=400)
+                            # 格式化数字列：两位小数和千分位
+                            df_display = df.copy()
+                            for col in df_display.columns:
+                                # 尝试将每列转换为数字并格式化
+                                try:
+                                    # 检查列是否包含数字
+                                    numeric_series = pd.to_numeric(df_display[col], errors='coerce')
+                                    # 如果超过30%的值是数字，就格式化这一列
+                                    if numeric_series.notna().sum() > len(df_display) * 0.3:
+                                        # 格式化数字列
+                                        formatted_values = []
+                                        for i, val in enumerate(df_display[col]):
+                                            try:
+                                                num_val = pd.to_numeric(val, errors='coerce')
+                                                if pd.notna(num_val):
+                                                    formatted_values.append(f"{num_val:,.2f}")
+                                                else:
+                                                    formatted_values.append(str(val) if pd.notna(val) else "")
+                                            except:
+                                                formatted_values.append(str(val) if pd.notna(val) else "")
+                                        df_display[col] = formatted_values
+                                except:
+                                    # 如果转换失败，保持原样
+                                    continue
+                            
+                            # 显示格式化后的只读表格
+                            st.dataframe(df_display, use_container_width=True, height=400)
                             
                             # 提供Excel下载功能
                             buffer = io.BytesIO()
