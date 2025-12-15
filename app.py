@@ -409,13 +409,19 @@ class BulkReportUploader:
                 if '合计' in col_str or 'total' in col_str or '总计' in col_str:
                     total_col_indices.append(col_idx)
             
-            # 2. 在第39行（索引38）查找应收未收金额
-            if len(df) >= 39 and len(total_col_indices) >= 2:
-                target_row_index = 38  # 第39行
+            # 调试信息：记录合计列位置
+            if total_col_indices:
+                financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
+                financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
+            
+            # 2. 在第41行（索引40）查找应收未收金额
+            if len(df) >= 41 and len(total_col_indices) >= 2:
+                target_row_index = 40  # 第41行
                 
                 try:
-                    # 检查第39行第一列的内容
+                    # 检查第41行第一列的内容
                     first_col_value = str(df.iloc[target_row_index, 0]).strip()
+                    financial_data['other_metrics']['第41行第一列内容'] = first_col_value
                     
                     # 应收未收关键词列表
                     keywords = [
@@ -423,23 +429,37 @@ class BulkReportUploader:
                         '应收未收额', '应收-未收', '应收未收', '未收金额'
                     ]
                     
-                    # 如果第39行包含应收未收关键词
+                    # 如果第41行包含应收未收关键词
                     if any(keyword in first_col_value for keyword in keywords):
                         # 强制使用第2个合计列
                         target_col_idx = total_col_indices[1]
+                        financial_data['other_metrics']['使用合计列索引'] = target_col_idx
                         
                         try:
-                            # 提取第39行第2个合计列的值
-                            row_39_value = pd.to_numeric(df.iloc[target_row_index, target_col_idx], errors='coerce')
-                            if not pd.isna(row_39_value):
-                                financial_data['receivables']['net_amount'] = float(row_39_value)
-                                financial_data['other_metrics']['第39行应收未收'] = float(row_39_value)
-                                financial_data['other_metrics']['提取位置'] = f"第39行第2个合计列"
-                        except (ValueError, TypeError, IndexError):
-                            pass
+                            # 提取第41行第2个合计列的值
+                            raw_value = df.iloc[target_row_index, target_col_idx]
+                            financial_data['other_metrics']['第41行第2个合计列原值'] = str(raw_value)
+                            
+                            row_41_value = pd.to_numeric(raw_value, errors='coerce')
+                            if not pd.isna(row_41_value):
+                                financial_data['receivables']['net_amount'] = float(row_41_value)
+                                financial_data['other_metrics']['第41行应收未收'] = float(row_41_value)
+                                financial_data['other_metrics']['提取位置'] = f"第41行第2个合计列"
+                                financial_data['other_metrics']['提取成功'] = True
+                            else:
+                                financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
+                        except (ValueError, TypeError, IndexError) as e:
+                            financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
+                    else:
+                        financial_data['other_metrics']['提取失败原因'] = "第41行不包含应收未收关键词"
                     
-                except (IndexError, Exception):
-                    pass
+                except (IndexError, Exception) as e:
+                    financial_data['other_metrics']['提取失败原因'] = f"行访问异常: {str(e)}"
+            else:
+                if len(df) < 41:
+                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足41行，实际{len(df)}行"
+                elif len(total_col_indices) < 2:
+                    financial_data['other_metrics']['提取失败原因'] = f"合计列数不足2列，实际{len(total_col_indices)}列"
             
             # 3. 提取其他财务指标
             for idx, row in df.iterrows():
@@ -751,10 +771,7 @@ def create_query_app():
                     receivables = latest_report.get('financial_data', {}).get('receivables', {})
                     amount = receivables.get('net_amount', 0)
                     
-                    # 显示提取位置信息
-                    other_metrics = latest_report.get('financial_data', {}).get('other_metrics', {})
-                    extract_position = other_metrics.get('提取位置', '未知位置')
-                    
+                    # 显示应收未收金额
                     if amount > 0:
                         st.error(f"💰 门店应付: ¥{amount:,.2f}")
                     elif amount < 0:
