@@ -107,7 +107,7 @@ class DatabaseManager:
     
     def _create_indexes(self):
         """创建索引"""
-        if not self.db:
+        if self.db is None:
             return
             
         try:
@@ -223,7 +223,7 @@ class BulkReportUploader:
     """批量报表上传器"""
     
     def __init__(self, db):
-        if not db:
+        if db is None:
             raise Exception("数据库连接失败")
         self.db = db
         self.stores_collection = self.db['stores']
@@ -507,7 +507,7 @@ class PermissionManager:
     """权限管理器"""
     
     def __init__(self, db):
-        if not db:
+        if db is None:
             raise Exception("数据库连接失败")
         self.db = db
         self.permissions_collection = self.db['permissions']
