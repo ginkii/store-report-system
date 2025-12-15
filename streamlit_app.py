@@ -21,13 +21,15 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 import io
 
-# 页面配置
-st.set_page_config(
-    page_title="门店报表系统",
-    page_icon="🏪",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# 页面配置 - 修复重复配置问题
+if "page_configured" not in st.session_state:
+    st.set_page_config(
+        page_title="门店报表系统",
+        page_icon="🏪",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    st.session_state.page_configured = True
 
 # 配置管理
 class ConfigManager:
@@ -92,7 +94,14 @@ class DatabaseManager:
             self._create_indexes()
             
         except Exception as e:
-            st.error(f"数据库连接失败: {e}")
+            # 更详细的错误信息
+            error_msg = f"数据库连接失败: {e}"
+            if "ServerSelectionTimeoutError" in str(type(e)):
+                error_msg += "\n💡 提示：请检查MongoDB URI和网络连接"
+            elif "Authentication" in str(e):
+                error_msg += "\n💡 提示：请检查数据库用户名和密码"
+            
+            st.error(error_msg)
             self.db = None
             self.client = None
     
@@ -172,7 +181,7 @@ class ReportModel:
         }
     
     @staticmethod
-    def dataframe_to_dict_list(df: pd.DataFrame) -> Tuple[List[Dict], List[str]]:
+    def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
         """将DataFrame转换为字典列表，保留表头信息"""
         # 保存原始列名作为表头
         headers = [str(col) for col in df.columns]
