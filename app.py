@@ -675,7 +675,8 @@ def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> 
 # 应用界面
 def create_query_app():
     """门店查询应用"""
-    st.title("🔍 门店查询系统")
+    # 居中显示标题
+    st.markdown("<h1 style='text-align: center;'>🔍 门店查询系统</h1>", unsafe_allow_html=True)
     
     db_manager = get_db_manager()
     if not db_manager.is_connected():
@@ -689,7 +690,8 @@ def create_query_app():
         st.session_state.authenticated = False
     
     if not st.session_state.authenticated:
-        st.subheader("🔐 查询编号登录")
+        # 居中显示登录标题
+        st.markdown("<h2 style='text-align: center;'>🔐 查询编号登录</h2>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -725,7 +727,8 @@ def create_query_app():
                 st.session_state.authenticated = False
                 st.rerun()
         
-        st.title(f"📊 {store_info['store_name']}")
+        # 居中显示门店标题
+        st.markdown(f"<h1 style='text-align: center;'>📊 {store_info['store_name']}</h1>", unsafe_allow_html=True)
         
         # 获取报表数据
         try:
@@ -1131,7 +1134,6 @@ def main():
         st.markdown("---")
         st.markdown("### 📊 系统信息")
         st.info("门店报表查询系统")
-        st.caption("安全 • 便捷 • 实时")
     
     # 主界面
     try:
