@@ -835,6 +835,11 @@ def create_upload_app():
     db = db_manager.get_database()
     
     try:
+        # 检查数据库连接是否有效
+        if db is None:
+            st.error("数据库连接失败，无法初始化上传器")
+            return
+            
         uploader = BulkReportUploader(db)
         
         col1, col2 = st.columns([2, 1])
@@ -995,6 +1000,11 @@ def create_permission_app():
     db = db_manager.get_database()
     
     try:
+        # 检查数据库连接是否有效
+        if db is None:
+            st.error("数据库连接失败，无法初始化权限管理器")
+            return
+            
         permission_manager = PermissionManager(db)
         
         # 标签页
@@ -1105,6 +1115,25 @@ def create_permission_app():
     
     except Exception as e:
         st.error(f"初始化权限管理器失败: {e}")
+        
+        # 添加详细的调试信息
+        with st.expander("🔧 详细错误信息（仅管理员可见）"):
+            st.code(f"""
+错误类型: {type(e).__name__}
+错误消息: {str(e)}
+数据库状态: {'已连接' if db_manager.is_connected() else '未连接'}
+数据库对象: {type(db).__name__ if db else 'None'}
+            """)
+            
+            # 显示配置状态
+            try:
+                config = ConfigManager.get_mongodb_config()
+                st.code(f"""
+MongoDB URI: {config['uri'][:50]}...
+数据库名: {config['database_name']}
+                """)
+            except Exception as config_err:
+                st.code(f"配置获取失败: {config_err}")
 
 def main():
     """主应用入口"""
