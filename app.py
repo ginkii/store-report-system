@@ -414,14 +414,14 @@ class BulkReportUploader:
                 financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
                 financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
             
-            # 2. 在第41行（索引40）查找应收未收金额
-            if len(df) >= 41 and len(total_col_indices) >= 2:
-                target_row_index = 40  # 第41行
+            # 2. 在第40行（索引39）查找应收未收金额
+            if len(df) >= 40 and len(total_col_indices) >= 2:
+                target_row_index = 39  # 第40行
                 
                 try:
-                    # 检查第41行第一列的内容
+                    # 检查第40行第一列的内容
                     first_col_value = str(df.iloc[target_row_index, 0]).strip()
-                    financial_data['other_metrics']['第41行第一列内容'] = first_col_value
+                    financial_data['other_metrics']['第40行第一列内容'] = first_col_value
                     
                     # 应收未收关键词列表
                     keywords = [
@@ -429,35 +429,35 @@ class BulkReportUploader:
                         '应收未收额', '应收-未收', '应收未收', '未收金额'
                     ]
                     
-                    # 如果第41行包含应收未收关键词
+                    # 如果第40行包含应收未收关键词
                     if any(keyword in first_col_value for keyword in keywords):
                         # 强制使用第2个合计列
                         target_col_idx = total_col_indices[1]
                         financial_data['other_metrics']['使用合计列索引'] = target_col_idx
                         
                         try:
-                            # 提取第41行第2个合计列的值
+                            # 提取第40行第2个合计列的值
                             raw_value = df.iloc[target_row_index, target_col_idx]
-                            financial_data['other_metrics']['第41行第2个合计列原值'] = str(raw_value)
+                            financial_data['other_metrics']['第40行第2个合计列原值'] = str(raw_value)
                             
-                            row_41_value = pd.to_numeric(raw_value, errors='coerce')
-                            if not pd.isna(row_41_value):
-                                financial_data['receivables']['net_amount'] = float(row_41_value)
-                                financial_data['other_metrics']['第41行应收未收'] = float(row_41_value)
-                                financial_data['other_metrics']['提取位置'] = f"第41行第2个合计列"
+                            row_40_value = pd.to_numeric(raw_value, errors='coerce')
+                            if not pd.isna(row_40_value):
+                                financial_data['receivables']['net_amount'] = float(row_40_value)
+                                financial_data['other_metrics']['第40行应收未收'] = float(row_40_value)
+                                financial_data['other_metrics']['提取位置'] = f"第40行第2个合计列"
                                 financial_data['other_metrics']['提取成功'] = True
                             else:
                                 financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
                         except (ValueError, TypeError, IndexError) as e:
                             financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
                     else:
-                        financial_data['other_metrics']['提取失败原因'] = "第41行不包含应收未收关键词"
+                        financial_data['other_metrics']['提取失败原因'] = "第40行不包含应收未收关键词"
                     
                 except (IndexError, Exception) as e:
                     financial_data['other_metrics']['提取失败原因'] = f"行访问异常: {str(e)}"
             else:
-                if len(df) < 41:
-                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足41行，实际{len(df)}行"
+                if len(df) < 40:
+                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足40行，实际{len(df)}行"
                 elif len(total_col_indices) < 2:
                     financial_data['other_metrics']['提取失败原因'] = f"合计列数不足2列，实际{len(total_col_indices)}列"
             
@@ -1135,7 +1135,7 @@ def main():
     # 侧边栏
     with st.sidebar:
         st.title("🏪 门店报表系统")
-        st.caption("完整功能版 v2.0")
+        st.caption("数据查询平台")
         
         app_choice = st.selectbox(
             "选择功能模块",
@@ -1144,39 +1144,14 @@ def main():
         )
         
         st.markdown("---")
-        st.markdown("### 📊 系统状态")
+        st.markdown("### 🔗 连接状态")
         
         # 检查数据库连接
         db_manager = get_db_manager()
         if db_manager.is_connected():
-            st.success("✅ 数据库已连接")
+            st.success("✅ 系统正常")
         else:
-            st.error("❌ 数据库连接失败")
-            st.info("请检查MongoDB配置")
-        
-        # 新功能说明
-        st.markdown("---")
-        st.markdown("### 🆕 最新功能")
-        st.success("✅ 完全覆盖历史数据")
-        st.success("✅ 修复表头消失问题") 
-        st.success("✅ 第41行第2个合计列")
-        
-        with st.expander("功能说明"):
-            st.markdown("""
-            **1. 完全覆盖模式**
-            - 上传时可选择清除历史数据
-            - 确保新数据完全替换旧数据
-            
-            **2. 表头完整保存**
-            - 自动保存Excel原始表头
-            - 下载和查看时表头完整
-            - 不再出现unnamed列名
-            
-            **3. 精确应收金额**
-            - 第41行定位应收未收金额
-            - 使用第2个合计列数据
-            - 提供提取位置信息
-            """)
+            st.error("❌ 连接异常")
     
     # 主界面
     try:
