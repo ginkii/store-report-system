@@ -314,8 +314,8 @@ class BulkReportUploader:
             if progress_callback:
                 progress_callback(15, "正在读取Excel文件...")
             
-            # 2. 读取Excel文件 - 以第2行为表头
-            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)  # header=1 表示第2行为表头
+            # 2. 读取Excel文件 - 以第4行为表头
+            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)  # header=3 表示第4行为表头
             total_sheets = len(excel_data)
             
             if progress_callback:
@@ -392,7 +392,7 @@ class BulkReportUploader:
         return result
     
     def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
-        """改进的财务数据提取 - 第2行为表头，从第39行利润表列查找总部应收未收金额"""
+        """改进的财务数据提取 - 第4行为表头，查找合计列，从第37行提取总部应收未收金额"""
         financial_data = {
             'revenue': {},
             'cost': {},
@@ -402,46 +402,20 @@ class BulkReportUploader:
         }
         
         try:
-            # 1. 查找利润表列和现金表列
-            profit_col_indices = []  # 利润表列
-            cash_col_indices = []    # 现金表列
+            # 1. 查找合计列
+            total_col_indices = []
             
             for col_idx, col_name in enumerate(df.columns):
                 col_str = str(col_name).lower().strip()
-                
-                # 识别利润表列
                 if any(keyword in col_str for keyword in [
-                    '利润', 'profit', '利润表', '损益', '损益表',
-                    '盈亏', '盈利', '净利', '毛利'
+                    '合计', 'total', '总计', '小计', 'sum', '汇总',
+                    '金额', '总金额', '合计金额', '小计金额',
+                    '总额', '总和', '累计', '统计'
                 ]):
-                    profit_col_indices.append(col_idx)
-                
-                # 识别现金表列
-                elif any(keyword in col_str for keyword in [
-                    '现金', 'cash', '现金表', '流水', '资金',
-                    '余额', '账户', '银行'
-                ]):
-                    cash_col_indices.append(col_idx)
+                    total_col_indices.append(col_idx)
             
-            # 如果没有明确的利润表/现金表列名，使用扩展识别
-            if not profit_col_indices and not cash_col_indices:
-                # 使用原来的合计列识别逻辑作为备选
-                for col_idx, col_name in enumerate(df.columns):
-                    col_str = str(col_name).lower().strip()
-                    if any(keyword in col_str for keyword in [
-                        '合计', 'total', '总计', '小计', 'sum', '汇总',
-                        '金额', '总金额', '合计金额', '小计金额',
-                        '总额', '总和', '累计', '统计',
-                        '本月', '当月', '月度'
-                    ]):
-                        # 假设第一个合计列是现金表，第二个是利润表
-                        if len(cash_col_indices) == 0:
-                            cash_col_indices.append(col_idx)
-                        elif len(profit_col_indices) == 0:
-                            profit_col_indices.append(col_idx)
-            
-            # 如果仍然没有找到，按数值含量智能识别
-            if not profit_col_indices and not cash_col_indices:
+            # 如果没有找到合计列，按数值含量智能识别
+            if not total_col_indices:
                 numeric_counts = []
                 for col_idx in range(len(df.columns)):
                     try:
@@ -450,29 +424,26 @@ class BulkReportUploader:
                     except:
                         numeric_counts.append((col_idx, 0))
                 
-                # 按数字含量排序
+                # 按数字含量排序，取前2个作为合计列
                 numeric_counts.sort(key=lambda x: x[1], reverse=True)
                 if len(numeric_counts) >= 2:
-                    cash_col_indices = [numeric_counts[0][0]]     # 第1个数值列作为现金表
-                    profit_col_indices = [numeric_counts[1][0]]   # 第2个数值列作为利润表
+                    total_col_indices = [numeric_counts[0][0], numeric_counts[1][0]]
             
             # 调试信息：记录列识别结果
             financial_data['other_metrics']['所有列名'] = [str(col) for col in df.columns]
-            financial_data['other_metrics']['现金表列位置'] = str(cash_col_indices)
-            financial_data['other_metrics']['利润表列位置'] = str(profit_col_indices)
-            if cash_col_indices:
-                financial_data['other_metrics']['现金表列名称'] = [str(df.columns[i]) for i in cash_col_indices]
-            if profit_col_indices:
-                financial_data['other_metrics']['利润表列名称'] = [str(df.columns[i]) for i in profit_col_indices]
+            financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
+            financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
+            if total_col_indices:
+                financial_data['other_metrics']['合计列名称'] = [str(df.columns[i]) for i in total_col_indices]
             
-            # 2. 在第39行查找总部应收未收金额（使用利润表列）
-            if len(df) >= 39 and len(profit_col_indices) >= 1:
-                target_row_index = 38  # 第39行（索引38，因为第2行为表头）
+            # 2. 在第37行查找总部应收未收金额（使用合计列）
+            if len(df) >= 37 and len(total_col_indices) >= 1:
+                target_row_index = 36  # 第37行（索引36，因为第4行为表头）
                 
                 try:
-                    # 检查第39行第一列的内容
+                    # 检查第37行第一列的内容
                     first_col_value = str(df.iloc[target_row_index, 0]).strip()
-                    financial_data['other_metrics']['第39行第一列内容'] = first_col_value
+                    financial_data['other_metrics']['第37行第一列内容'] = first_col_value
                     
                     # 扩展关键词列表
                     keywords = [
@@ -486,23 +457,27 @@ class BulkReportUploader:
                     financial_data['other_metrics']['匹配的关键词'] = matched_keywords
                     
                     if matched_keywords:
-                        # 使用利润表列提取数据
-                        target_col_idx = profit_col_indices[0]  # 使用第一个利润表列
-                        column_desc = f"利润表列(第{target_col_idx+1}列)"
+                        # 使用第二个合计列提取数据
+                        if len(total_col_indices) >= 2:
+                            target_col_idx = total_col_indices[1]  # 使用第二个合计列
+                            column_desc = f"第{target_col_idx+1}列(第2个合计列)"
+                        else:
+                            target_col_idx = total_col_indices[0]  # 如果只有1个合计列，使用第一个
+                            column_desc = f"第{target_col_idx+1}列(第1个合计列，仅找到1个)"
                         
                         financial_data['other_metrics']['使用列索引'] = target_col_idx
                         financial_data['other_metrics']['使用列描述'] = column_desc
                         
                         try:
-                            # 提取第39行利润表列的值
+                            # 提取第37行合计列的值
                             raw_value = df.iloc[target_row_index, target_col_idx]
-                            financial_data['other_metrics']['第39行利润表列原值'] = str(raw_value)
+                            financial_data['other_metrics']['第37行合计列原值'] = str(raw_value)
                             
                             parsed_value = pd.to_numeric(raw_value, errors='coerce')
                             if not pd.isna(parsed_value):
                                 financial_data['receivables']['net_amount'] = float(parsed_value)
                                 financial_data['other_metrics']['总部应收未收金额'] = float(parsed_value)
-                                financial_data['other_metrics']['提取位置'] = f"第39行{column_desc}"
+                                financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
                                 financial_data['other_metrics']['提取成功'] = True
                                 financial_data['other_metrics']['数值处理'] = "直接显示在可视化看板"
                             else:
@@ -510,15 +485,15 @@ class BulkReportUploader:
                         except (ValueError, TypeError, IndexError) as e:
                             financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
                     else:
-                        financial_data['other_metrics']['提取失败原因'] = "第39行不包含总部应收未收关键词"
+                        financial_data['other_metrics']['提取失败原因'] = "第37行不包含总部应收未收关键词"
                         
                 except (IndexError, Exception) as e:
-                    financial_data['other_metrics']['提取失败原因'] = f"第39行访问异常: {str(e)}"
+                    financial_data['other_metrics']['提取失败原因'] = f"第37行访问异常: {str(e)}"
             else:
-                if len(df) < 39:
-                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足39行，实际{len(df)}行"
-                elif len(profit_col_indices) < 1:
-                    financial_data['other_metrics']['提取失败原因'] = f"未找到利润表列，实际{len(profit_col_indices)}列"
+                if len(df) < 37:
+                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足37行，实际{len(df)}行"
+                elif len(total_col_indices) < 1:
+                    financial_data['other_metrics']['提取失败原因'] = f"未找到合计列，实际{len(total_col_indices)}列"
             
             # 3. 提取其他财务指标
             for idx, row in df.iterrows():
