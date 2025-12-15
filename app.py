@@ -359,8 +359,18 @@ class BulkReportUploader:
                     # 5. 转换显示数据格式，保存表头
                     excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display_cleaned)
                     
+                    # 调试信息：记录使用的表头
+                    print(f"Debug - Sheet: {sheet_name}")
+                    print(f"Display headers (row 2): {headers[:5]}...")  # 显示前5个表头
+                    print(f"Financial columns (row 4): {list(df_financial_cleaned.columns)[:5]}...")
+                    
                     # 6. 提取财务数据（使用第4行表头的数据）
                     financial_data = self._extract_financial_data_v2(df_financial_cleaned)
+                    
+                    # 添加表头来源信息到财务数据
+                    financial_data['other_metrics']['显示数据表头来源'] = "第2行"
+                    financial_data['other_metrics']['财务数据表头来源'] = "第4行"
+                    financial_data['other_metrics']['显示数据表头前5个'] = headers[:5] if headers else []
                     
                     # 7. 创建报表文档
                     report_data = ReportModel.create_report_document(
@@ -936,6 +946,14 @@ def create_query_app():
                     headers = latest_report.get('table_headers', [])
                     
                     if raw_data and headers:
+                        # 调试信息：显示当前使用的表头
+                        with st.expander("🔧 表头调试信息"):
+                            st.write("**当前表头来源:**", latest_report.get('financial_data', {}).get('other_metrics', {}).get('显示数据表头来源', '未知'))
+                            st.write("**财务数据表头来源:**", latest_report.get('financial_data', {}).get('other_metrics', {}).get('财务数据表头来源', '未知'))
+                            st.write("**显示的表头 (前10个):**", headers[:10] if headers else [])
+                            st.write("**报表月份:**", latest_report.get('report_month', '未知'))
+                            st.write("**上传时间:**", latest_report.get('updated_at', '未知'))
+                        
                         # 使用保存的表头重建DataFrame
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
