@@ -182,9 +182,16 @@ class ReportModel:
     
     @staticmethod
     def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
-        """将DataFrame转换为字典列表，保留表头信息并修复#NAME?错误"""
-        # 保存原始列名作为表头
-        headers = [str(col) for col in df.columns]
+        """将DataFrame转换为字典列表，保留表头信息并修复#NAME?错误，处理空白表头"""
+        # 保存原始列名作为表头，处理Unnamed列
+        headers = []
+        for col in df.columns:
+            col_str = str(col)
+            # 将Unnamed列名替换为空字符串
+            if col_str.startswith('Unnamed:'):
+                headers.append("")
+            else:
+                headers.append(col_str)
         
         result = []
         for index, row in df.iterrows():
@@ -359,18 +366,8 @@ class BulkReportUploader:
                     # 5. 转换显示数据格式，保存表头
                     excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display_cleaned)
                     
-                    # 调试信息：记录使用的表头
-                    print(f"Debug - Sheet: {sheet_name}")
-                    print(f"Display headers (row 2): {headers[:5]}...")  # 显示前5个表头
-                    print(f"Financial columns (row 4): {list(df_financial_cleaned.columns)[:5]}...")
-                    
                     # 6. 提取财务数据（使用第4行表头的数据）
                     financial_data = self._extract_financial_data_v2(df_financial_cleaned)
-                    
-                    # 添加表头来源信息到财务数据
-                    financial_data['other_metrics']['显示数据表头来源'] = "第2行"
-                    financial_data['other_metrics']['财务数据表头来源'] = "第4行"
-                    financial_data['other_metrics']['显示数据表头前5个'] = headers[:5] if headers else []
                     
                     # 7. 创建报表文档
                     report_data = ReportModel.create_report_document(
@@ -803,17 +800,17 @@ def create_query_app():
                     
                     # 添加自定义CSS样式
                     if amount < 0:
-                        # 负数：总部应退 - 高级紫色渐变
+                        # 负数：总部应退 - 蓝紫渐变
                         abs_amount = abs(amount)
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #6A1B9A, #8E24AA, #AB47BC);
+                            background: linear-gradient(135deg, #3F51B5, #5C6BC0, #7986CB);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(106, 27, 154, 0.3);
+                            box-shadow: 0 8px 25px rgba(63, 81, 181, 0.4);
                             margin: 20px 0;
-                            border: 3px solid #6A1B9A;
+                            border: 3px solid #3F51B5;
                         ">
                             <div style="
                                 font-size: 42px;
@@ -837,16 +834,16 @@ def create_query_app():
                         </div>
                         """, unsafe_allow_html=True)
                     elif amount > 0:
-                        # 正数：门店应返 - 高级橙色渐变
+                        # 正数：门店应返 - 橙色和暖红渐变
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #E65100, #FF6F00, #FF9800);
+                            background: linear-gradient(135deg, #FF8F00, #FFC107, #FFD54F);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(230, 81, 0, 0.3);
+                            box-shadow: 0 8px 25px rgba(255, 143, 0, 0.4);
                             margin: 20px 0;
-                            border: 3px solid #E65100;
+                            border: 3px solid #FF8F00;
                         ">
                             <div style="
                                 font-size: 42px;
@@ -946,14 +943,6 @@ def create_query_app():
                     headers = latest_report.get('table_headers', [])
                     
                     if raw_data and headers:
-                        # 调试信息：显示当前使用的表头
-                        with st.expander("🔧 表头调试信息"):
-                            st.write("**当前表头来源:**", latest_report.get('financial_data', {}).get('other_metrics', {}).get('显示数据表头来源', '未知'))
-                            st.write("**财务数据表头来源:**", latest_report.get('financial_data', {}).get('other_metrics', {}).get('财务数据表头来源', '未知'))
-                            st.write("**显示的表头 (前10个):**", headers[:10] if headers else [])
-                            st.write("**报表月份:**", latest_report.get('report_month', '未知'))
-                            st.write("**上传时间:**", latest_report.get('updated_at', '未知'))
-                        
                         # 使用保存的表头重建DataFrame
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
