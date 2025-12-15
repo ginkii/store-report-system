@@ -314,8 +314,8 @@ class BulkReportUploader:
             if progress_callback:
                 progress_callback(15, "正在读取Excel文件...")
             
-            # 2. 读取Excel文件 - 以第4行为表头
-            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)  # header=3 表示第4行为表头
+            # 2. 读取Excel文件 - 以第2行为表头
+            excel_data = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)  # header=1 表示第2行为表头
             total_sheets = len(excel_data)
             
             if progress_callback:
@@ -392,7 +392,7 @@ class BulkReportUploader:
         return result
     
     def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
-        """改进的财务数据提取 - 第4行为表头，查找第37行第2个合计列"""
+        """改进的财务数据提取 - 第2行为表头，从第39行利润表列查找总部应收未收金额"""
         financial_data = {
             'revenue': {},
             'cost': {},
@@ -402,21 +402,46 @@ class BulkReportUploader:
         }
         
         try:
-            # 1. 查找所有"合计"列的位置 - 扩展识别范围
-            total_col_indices = []
+            # 1. 查找利润表列和现金表列
+            profit_col_indices = []  # 利润表列
+            cash_col_indices = []    # 现金表列
+            
             for col_idx, col_name in enumerate(df.columns):
                 col_str = str(col_name).lower().strip()
-                # 扩展合计列识别关键词
+                
+                # 识别利润表列
                 if any(keyword in col_str for keyword in [
-                    '合计', 'total', '总计', '小计', 'sum', '汇总',
-                    '金额', '总金额', '合计金额', '小计金额',
-                    '总额', '总和', '累计', '统计',
-                    '本月', '当月', '月度'
+                    '利润', 'profit', '利润表', '损益', '损益表',
+                    '盈亏', '盈利', '净利', '毛利'
                 ]):
-                    total_col_indices.append(col_idx)
+                    profit_col_indices.append(col_idx)
+                
+                # 识别现金表列
+                elif any(keyword in col_str for keyword in [
+                    '现金', 'cash', '现金表', '流水', '资金',
+                    '余额', '账户', '银行'
+                ]):
+                    cash_col_indices.append(col_idx)
             
-            # 如果仍然没有找到合计列，则查找包含数字最多的列
-            if not total_col_indices:
+            # 如果没有明确的利润表/现金表列名，使用扩展识别
+            if not profit_col_indices and not cash_col_indices:
+                # 使用原来的合计列识别逻辑作为备选
+                for col_idx, col_name in enumerate(df.columns):
+                    col_str = str(col_name).lower().strip()
+                    if any(keyword in col_str for keyword in [
+                        '合计', 'total', '总计', '小计', 'sum', '汇总',
+                        '金额', '总金额', '合计金额', '小计金额',
+                        '总额', '总和', '累计', '统计',
+                        '本月', '当月', '月度'
+                    ]):
+                        # 假设第一个合计列是现金表，第二个是利润表
+                        if len(cash_col_indices) == 0:
+                            cash_col_indices.append(col_idx)
+                        elif len(profit_col_indices) == 0:
+                            profit_col_indices.append(col_idx)
+            
+            # 如果仍然没有找到，按数值含量智能识别
+            if not profit_col_indices and not cash_col_indices:
                 numeric_counts = []
                 for col_idx in range(len(df.columns)):
                     try:
@@ -425,73 +450,75 @@ class BulkReportUploader:
                     except:
                         numeric_counts.append((col_idx, 0))
                 
-                # 按数字含量排序，取前几列作为潜在的合计列
+                # 按数字含量排序
                 numeric_counts.sort(key=lambda x: x[1], reverse=True)
-                total_col_indices = [idx for idx, count in numeric_counts[:3] if count > 0]  # 取前3列
-                financial_data['other_metrics']['数值列识别'] = f"按数值含量识别: {total_col_indices}"
+                if len(numeric_counts) >= 2:
+                    cash_col_indices = [numeric_counts[0][0]]     # 第1个数值列作为现金表
+                    profit_col_indices = [numeric_counts[1][0]]   # 第2个数值列作为利润表
             
-            # 调试信息：记录合计列位置
+            # 调试信息：记录列识别结果
             financial_data['other_metrics']['所有列名'] = [str(col) for col in df.columns]
-            financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
-            financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
-            if total_col_indices:
-                financial_data['other_metrics']['合计列名称'] = [str(df.columns[i]) for i in total_col_indices]
+            financial_data['other_metrics']['现金表列位置'] = str(cash_col_indices)
+            financial_data['other_metrics']['利润表列位置'] = str(profit_col_indices)
+            if cash_col_indices:
+                financial_data['other_metrics']['现金表列名称'] = [str(df.columns[i]) for i in cash_col_indices]
+            if profit_col_indices:
+                financial_data['other_metrics']['利润表列名称'] = [str(df.columns[i]) for i in profit_col_indices]
             
-            # 2. 在第37行（索引36）查找应收未收金额（原第39行，减去表头偏移）
-            if len(df) >= 37 and len(total_col_indices) >= 1:  # 改为至少1列即可
-                target_row_index = 36  # 第37行（原第39行-表头偏移2行）
+            # 2. 在第39行查找总部应收未收金额（使用利润表列）
+            if len(df) >= 39 and len(profit_col_indices) >= 1:
+                target_row_index = 38  # 第39行（索引38，因为第2行为表头）
                 
                 try:
-                    # 检查第37行第一列的内容（原第39行）
+                    # 检查第39行第一列的内容
                     first_col_value = str(df.iloc[target_row_index, 0]).strip()
-                    financial_data['other_metrics']['第37行第一列内容'] = first_col_value
+                    financial_data['other_metrics']['第39行第一列内容'] = first_col_value
                     
-                    # 应收未收关键词列表
+                    # 扩展关键词列表
                     keywords = [
                         '总部应收未收金额', '应收未收金额', '应收-未收额', 
-                        '应收未收额', '应收-未收', '应收未收', '未收金额'
+                        '应收未收额', '应收-未收', '应收未收', '未收金额',
+                        '应收金额', '未收', '应收', '收款', '欠款'
                     ]
                     
-                    # 如果第37行包含应收未收关键词
-                    if any(keyword in first_col_value for keyword in keywords):
-                        # 根据合计列数量选择使用哪个列
-                        if len(total_col_indices) >= 2:
-                            # 有2个或以上合计列，使用第2个
-                            target_col_idx = total_col_indices[1]
-                            column_desc = "第2个合计列"
-                        else:
-                            # 只有1个合计列，使用第1个
-                            target_col_idx = total_col_indices[0]
-                            column_desc = "第1个合计列"
+                    # 检查是否包含关键词
+                    matched_keywords = [kw for kw in keywords if kw in first_col_value]
+                    financial_data['other_metrics']['匹配的关键词'] = matched_keywords
+                    
+                    if matched_keywords:
+                        # 使用利润表列提取数据
+                        target_col_idx = profit_col_indices[0]  # 使用第一个利润表列
+                        column_desc = f"利润表列(第{target_col_idx+1}列)"
                         
-                        financial_data['other_metrics']['使用合计列索引'] = target_col_idx
+                        financial_data['other_metrics']['使用列索引'] = target_col_idx
                         financial_data['other_metrics']['使用列描述'] = column_desc
                         
                         try:
-                            # 提取第37行指定合计列的值
+                            # 提取第39行利润表列的值
                             raw_value = df.iloc[target_row_index, target_col_idx]
-                            financial_data['other_metrics']['第37行合计列原值'] = str(raw_value)
+                            financial_data['other_metrics']['第39行利润表列原值'] = str(raw_value)
                             
-                            row_37_value = pd.to_numeric(raw_value, errors='coerce')
-                            if not pd.isna(row_37_value):
-                                financial_data['receivables']['net_amount'] = float(row_37_value)
-                                financial_data['other_metrics']['第37行应收未收'] = float(row_37_value)
-                                financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
+                            parsed_value = pd.to_numeric(raw_value, errors='coerce')
+                            if not pd.isna(parsed_value):
+                                financial_data['receivables']['net_amount'] = float(parsed_value)
+                                financial_data['other_metrics']['总部应收未收金额'] = float(parsed_value)
+                                financial_data['other_metrics']['提取位置'] = f"第39行{column_desc}"
                                 financial_data['other_metrics']['提取成功'] = True
+                                financial_data['other_metrics']['数值处理'] = "直接显示在可视化看板"
                             else:
                                 financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
                         except (ValueError, TypeError, IndexError) as e:
                             financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
                     else:
-                        financial_data['other_metrics']['提取失败原因'] = "第37行不包含应收未收关键词"
-                    
+                        financial_data['other_metrics']['提取失败原因'] = "第39行不包含总部应收未收关键词"
+                        
                 except (IndexError, Exception) as e:
-                    financial_data['other_metrics']['提取失败原因'] = f"行访问异常: {str(e)}"
+                    financial_data['other_metrics']['提取失败原因'] = f"第39行访问异常: {str(e)}"
             else:
-                if len(df) < 37:
-                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足37行，实际{len(df)}行"
-                elif len(total_col_indices) < 1:
-                    financial_data['other_metrics']['提取失败原因'] = f"未找到合计列，实际{len(total_col_indices)}列"
+                if len(df) < 39:
+                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足39行，实际{len(df)}行"
+                elif len(profit_col_indices) < 1:
+                    financial_data['other_metrics']['提取失败原因'] = f"未找到利润表列，实际{len(profit_col_indices)}列"
             
             # 3. 提取其他财务指标
             for idx, row in df.iterrows():
@@ -795,27 +822,151 @@ def create_query_app():
             reports = list(db['reports'].find({'store_id': store_info['_id']}).sort('report_month', -1))
             
             if reports:
-                # 应收未收看板
-                st.subheader("💰 总部应收未收金额")
-                
+                # 美化的应收未收看板
                 try:
                     latest_report = reports[0]
                     receivables = latest_report.get('financial_data', {}).get('receivables', {})
                     amount = receivables.get('net_amount', 0)
+                    st.markdown("### 总部应收未收金额")
                     
-                    # 显示应收未收金额
-                    if amount > 0:
-                        st.error(f"💰 门店应付: ¥{amount:,.2f}")
-                    elif amount < 0:
-                        st.success(f"💚 总部应退: ¥{abs(amount):,.2f}")
+                    # 添加自定义CSS样式
+                    if amount < 0:
+                        # 负数：总部应退 - 渐变绿色
+                        abs_amount = abs(amount)
+                        st.markdown(f"""
+                        <div style="
+                            background: linear-gradient(135deg, #4CAF50, #8BC34A, #CDDC39);
+                            padding: 30px;
+                            border-radius: 15px;
+                            text-align: center;
+                            box-shadow: 0 8px 25px rgba(76, 175, 80, 0.3);
+                            margin: 20px 0;
+                            border: 3px solid #4CAF50;
+                        ">
+                            <div style="
+                                font-size: 28px;
+                                font-weight: bold;
+                                color: white;
+                                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                                margin-bottom: 15px;
+                                letter-spacing: 2px;
+                            ">
+                                总部应退
+                            </div>
+                            <div style="
+                                font-size: 48px;
+                                font-weight: 900;
+                                color: white;
+                                text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
+                                font-family: 'Arial Black', sans-serif;
+                            ">
+                                ¥{abs_amount:,.2f}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    elif amount > 0:
+                        # 正数：门店应返 - 渐变蓝色
+                        st.markdown(f"""
+                        <div style="
+                            background: linear-gradient(135deg, #2196F3, #03A9F4, #00BCD4);
+                            padding: 30px;
+                            border-radius: 15px;
+                            text-align: center;
+                            box-shadow: 0 8px 25px rgba(33, 150, 243, 0.3);
+                            margin: 20px 0;
+                            border: 3px solid #2196F3;
+                        ">
+                            <div style="
+                                font-size: 28px;
+                                font-weight: bold;
+                                color: white;
+                                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                                margin-bottom: 15px;
+                                letter-spacing: 2px;
+                            ">
+                                门店应返
+                            </div>
+                            <div style="
+                                font-size: 48px;
+                                font-weight: 900;
+                                color: white;
+                                text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
+                                font-family: 'Arial Black', sans-serif;
+                            ">
+                                ¥{amount:,.2f}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                     else:
-                        st.info("✅ 已结清: ¥0.00")
+                        # 零：已结清 - 渐变灰色
+                        st.markdown(f"""
+                        <div style="
+                            background: linear-gradient(135deg, #9E9E9E, #BDBDBD, #E0E0E0);
+                            padding: 30px;
+                            border-radius: 15px;
+                            text-align: center;
+                            box-shadow: 0 8px 25px rgba(158, 158, 158, 0.3);
+                            margin: 20px 0;
+                            border: 3px solid #9E9E9E;
+                        ">
+                            <div style="
+                                font-size: 28px;
+                                font-weight: bold;
+                                color: white;
+                                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                                margin-bottom: 15px;
+                                letter-spacing: 2px;
+                            ">
+                                已结清
+                            </div>
+                            <div style="
+                                font-size: 48px;
+                                font-weight: 900;
+                                color: white;
+                                text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
+                                font-family: 'Arial Black', sans-serif;
+                            ">
+                                ¥0.00
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                         
                 except Exception:
-                    st.info("暂无应收数据")
+                    # 错误状态的看板
+                    st.markdown(f"""
+                    <div style="
+                        background: linear-gradient(135deg, #FF5722, #FF7043, #FF8A65);
+                        padding: 30px;
+                        border-radius: 15px;
+                        text-align: center;
+                        box-shadow: 0 8px 25px rgba(255, 87, 34, 0.3);
+                        margin: 20px 0;
+                        border: 3px solid #FF5722;
+                    ">
+                        <div style="
+                            font-size: 28px;
+                            font-weight: bold;
+                            color: white;
+                            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                            margin-bottom: 15px;
+                            letter-spacing: 2px;
+                        ">
+                            暂无数据
+                        </div>
+                        <div style="
+                            font-size: 24px;
+                            font-weight: 600;
+                            color: white;
+                            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                            font-family: Arial, sans-serif;
+                        ">
+                            请联系管理员
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
                 # 报表数据展示 - 修复表头问题
-                st.subheader("📋 报表数据")
+                st.subheader("报表数据")
                 
                 try:
                     latest_report = reports[0]
