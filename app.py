@@ -392,7 +392,7 @@ class BulkReportUploader:
         return result
     
     def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
-        """改进的财务数据提取 - 修复第39行第2个合计列问题"""
+        """改进的财务数据提取 - 修复第40行第2个合计列问题"""
         financial_data = {
             'revenue': {},
             'cost': {},
@@ -929,6 +929,23 @@ def create_upload_app():
                             with st.expander("查看成功上传的门店"):
                                 success_df = pd.DataFrame(result['processed_stores'])
                                 st.dataframe(success_df, use_container_width=True)
+                        
+                        # 显示应收未收金额提取调试信息
+                        with st.expander("🔧 应收金额提取调试信息"):
+                            try:
+                                # 获取一个示例报表的调试信息
+                                sample_report = db['reports'].find_one({'report_month': report_month})
+                                if sample_report:
+                                    debug_info = sample_report.get('financial_data', {}).get('other_metrics', {})
+                                    if debug_info:
+                                        for key, value in debug_info.items():
+                                            st.write(f"**{key}:** {value}")
+                                    else:
+                                        st.write("无调试信息")
+                                else:
+                                    st.write("未找到报表数据")
+                            except Exception as e:
+                                st.write(f"获取调试信息失败: {e}")
                     
                     # 失败信息
                     if result['failed_count'] > 0:
