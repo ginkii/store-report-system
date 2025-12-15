@@ -782,39 +782,24 @@ def create_query_app():
                     receivables = latest_report.get('financial_data', {}).get('receivables', {})
                     amount = receivables.get('net_amount', 0)
                     
-                    # 调试信息：显示从数据库读取到的值
-                    with st.expander("🔧 数据库读取调试信息"):
-                        st.write("**报表月份:**", latest_report.get('report_month', '未知'))
-                        st.write("**财务数据存在:**", 'financial_data' in latest_report)
-                        st.write("**应收数据存在:**", 'receivables' in latest_report.get('financial_data', {}))
-                        st.write("**原始金额值:**", amount)
-                        st.write("**金额类型:**", type(amount))
-                        
-                        # 显示完整的财务调试信息
-                        debug_info = latest_report.get('financial_data', {}).get('other_metrics', {})
-                        if debug_info:
-                            st.write("**完整调试信息:**")
-                            for key, value in debug_info.items():
-                                st.write(f"- **{key}:** {value}")
-                    
                     st.markdown("### 总部应收未收金额")
                     
                     # 添加自定义CSS样式
                     if amount < 0:
-                        # 负数：总部应退 - 柔和绿色
+                        # 负数：总部应退 - 高级紫色渐变
                         abs_amount = abs(amount)
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #81C784, #A5D6A7, #C8E6C9);
+                            background: linear-gradient(135deg, #6A1B9A, #8E24AA, #AB47BC);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(129, 199, 132, 0.3);
+                            box-shadow: 0 8px 25px rgba(106, 27, 154, 0.3);
                             margin: 20px 0;
-                            border: 3px solid #81C784;
+                            border: 3px solid #6A1B9A;
                         ">
                             <div style="
-                                font-size: 36px;
+                                font-size: 42px;
                                 font-weight: bold;
                                 color: white;
                                 text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -824,7 +809,7 @@ def create_query_app():
                                 总部应退
                             </div>
                             <div style="
-                                font-size: 42px;
+                                font-size: 36px;
                                 font-weight: 900;
                                 color: white;
                                 text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
@@ -835,19 +820,19 @@ def create_query_app():
                         </div>
                         """, unsafe_allow_html=True)
                     elif amount > 0:
-                        # 正数：门店应返 - 柔和蓝色
+                        # 正数：门店应返 - 高级橙色渐变
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #64B5F6, #90CAF9, #BBDEFB);
+                            background: linear-gradient(135deg, #E65100, #FF6F00, #FF9800);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(100, 181, 246, 0.3);
+                            box-shadow: 0 8px 25px rgba(230, 81, 0, 0.3);
                             margin: 20px 0;
-                            border: 3px solid #64B5F6;
+                            border: 3px solid #E65100;
                         ">
                             <div style="
-                                font-size: 36px;
+                                font-size: 42px;
                                 font-weight: bold;
                                 color: white;
                                 text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -857,7 +842,7 @@ def create_query_app():
                                 门店应返
                             </div>
                             <div style="
-                                font-size: 42px;
+                                font-size: 36px;
                                 font-weight: 900;
                                 color: white;
                                 text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
@@ -868,19 +853,19 @@ def create_query_app():
                         </div>
                         """, unsafe_allow_html=True)
                     else:
-                        # 零：已结清 - 柔和灰色
+                        # 零：已结清 - 商务银灰渐变 (象征平衡与稳定)
                         st.markdown(f"""
                         <div style="
-                            background: linear-gradient(135deg, #BDBDBD, #D4D4D4, #EEEEEE);
+                            background: linear-gradient(135deg, #546E7A, #78909C, #B0BEC5);
                             padding: 30px;
                             border-radius: 15px;
                             text-align: center;
-                            box-shadow: 0 8px 25px rgba(189, 189, 189, 0.3);
+                            box-shadow: 0 8px 25px rgba(84, 110, 122, 0.3);
                             margin: 20px 0;
-                            border: 3px solid #BDBDBD;
+                            border: 3px solid #546E7A;
                         ">
                             <div style="
-                                font-size: 36px;
+                                font-size: 42px;
                                 font-weight: bold;
                                 color: white;
                                 text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -890,7 +875,7 @@ def create_query_app():
                                 已结清
                             </div>
                             <div style="
-                                font-size: 42px;
+                                font-size: 36px;
                                 font-weight: 900;
                                 color: white;
                                 text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
@@ -902,19 +887,19 @@ def create_query_app():
                         """, unsafe_allow_html=True)
                         
                 except Exception:
-                    # 错误状态的看板
+                    # 错误状态的看板 - 商务红棕渐变 (象征警示)
                     st.markdown(f"""
                     <div style="
-                        background: linear-gradient(135deg, #FFAB91, #FFCC80, #FFE0B2);
+                        background: linear-gradient(135deg, #D32F2F, #E57373, #FFCDD2);
                         padding: 30px;
                         border-radius: 15px;
                         text-align: center;
-                        box-shadow: 0 8px 25px rgba(255, 171, 145, 0.3);
+                        box-shadow: 0 8px 25px rgba(211, 47, 47, 0.3);
                         margin: 20px 0;
-                        border: 3px solid #FFAB91;
+                        border: 3px solid #D32F2F;
                     ">
                         <div style="
-                            font-size: 36px;
+                            font-size: 42px;
                             font-weight: bold;
                             color: white;
                             text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
@@ -924,7 +909,7 @@ def create_query_app():
                             暂无数据
                         </div>
                         <div style="
-                            font-size: 28px;
+                            font-size: 32px;
                             font-weight: 600;
                             color: white;
                             text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
