@@ -392,7 +392,7 @@ class BulkReportUploader:
         return result
     
     def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
-        """改进的财务数据提取 - 第4行为表头，查找第38行第2个合计列"""
+        """改进的财务数据提取 - 第4行为表头，查找第37行第2个合计列"""
         financial_data = {
             'revenue': {},
             'cost': {},
@@ -437,14 +437,14 @@ class BulkReportUploader:
             if total_col_indices:
                 financial_data['other_metrics']['合计列名称'] = [str(df.columns[i]) for i in total_col_indices]
             
-            # 2. 在第38行（索引37）查找应收未收金额（原第40行，减去表头偏移）
-            if len(df) >= 38 and len(total_col_indices) >= 1:  # 改为至少1列即可
-                target_row_index = 37  # 第38行（原第40行-表头偏移2行）
+            # 2. 在第37行（索引36）查找应收未收金额（原第39行，减去表头偏移）
+            if len(df) >= 37 and len(total_col_indices) >= 1:  # 改为至少1列即可
+                target_row_index = 36  # 第37行（原第39行-表头偏移2行）
                 
                 try:
-                    # 检查第38行第一列的内容（原第40行）
+                    # 检查第37行第一列的内容（原第39行）
                     first_col_value = str(df.iloc[target_row_index, 0]).strip()
-                    financial_data['other_metrics']['第38行第一列内容'] = first_col_value
+                    financial_data['other_metrics']['第37行第一列内容'] = first_col_value
                     
                     # 应收未收关键词列表
                     keywords = [
@@ -452,7 +452,7 @@ class BulkReportUploader:
                         '应收未收额', '应收-未收', '应收未收', '未收金额'
                     ]
                     
-                    # 如果第38行包含应收未收关键词
+                    # 如果第37行包含应收未收关键词
                     if any(keyword in first_col_value for keyword in keywords):
                         # 根据合计列数量选择使用哪个列
                         if len(total_col_indices) >= 2:
@@ -468,28 +468,28 @@ class BulkReportUploader:
                         financial_data['other_metrics']['使用列描述'] = column_desc
                         
                         try:
-                            # 提取第38行指定合计列的值
+                            # 提取第37行指定合计列的值
                             raw_value = df.iloc[target_row_index, target_col_idx]
-                            financial_data['other_metrics']['第38行合计列原值'] = str(raw_value)
+                            financial_data['other_metrics']['第37行合计列原值'] = str(raw_value)
                             
-                            row_38_value = pd.to_numeric(raw_value, errors='coerce')
-                            if not pd.isna(row_38_value):
-                                financial_data['receivables']['net_amount'] = float(row_38_value)
-                                financial_data['other_metrics']['第38行应收未收'] = float(row_38_value)
-                                financial_data['other_metrics']['提取位置'] = f"第38行{column_desc}"
+                            row_37_value = pd.to_numeric(raw_value, errors='coerce')
+                            if not pd.isna(row_37_value):
+                                financial_data['receivables']['net_amount'] = float(row_37_value)
+                                financial_data['other_metrics']['第37行应收未收'] = float(row_37_value)
+                                financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
                                 financial_data['other_metrics']['提取成功'] = True
                             else:
                                 financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
                         except (ValueError, TypeError, IndexError) as e:
                             financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
                     else:
-                        financial_data['other_metrics']['提取失败原因'] = "第38行不包含应收未收关键词"
+                        financial_data['other_metrics']['提取失败原因'] = "第37行不包含应收未收关键词"
                     
                 except (IndexError, Exception) as e:
                     financial_data['other_metrics']['提取失败原因'] = f"行访问异常: {str(e)}"
             else:
-                if len(df) < 38:
-                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足38行，实际{len(df)}行"
+                if len(df) < 37:
+                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足37行，实际{len(df)}行"
                 elif len(total_col_indices) < 1:
                     financial_data['other_metrics']['提取失败原因'] = f"未找到合计列，实际{len(total_col_indices)}列"
             
