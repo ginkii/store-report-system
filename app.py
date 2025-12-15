@@ -436,64 +436,37 @@ class BulkReportUploader:
             if total_col_indices:
                 financial_data['other_metrics']['合计列名称'] = [str(df.columns[i]) for i in total_col_indices]
             
-            # 2. 在第37行查找总部应收未收金额（使用合计列）
-            if len(df) >= 37 and len(total_col_indices) >= 1:
+            # 2. 直接从第37行第2个合计列提取总部应收未收金额
+            if len(df) >= 37 and len(total_col_indices) >= 2:
                 target_row_index = 36  # 第37行（索引36，因为第4行为表头）
+                target_col_idx = total_col_indices[1]  # 使用第二个合计列
+                column_desc = f"第{target_col_idx+1}列(第2个合计列)"
                 
                 try:
-                    # 检查第37行第一列的内容
-                    first_col_value = str(df.iloc[target_row_index, 0]).strip()
-                    financial_data['other_metrics']['第37行第一列内容'] = first_col_value
+                    # 直接提取第37行第2个合计列的值
+                    raw_value = df.iloc[target_row_index, target_col_idx]
+                    financial_data['other_metrics']['第37行第2合计列原值'] = str(raw_value)
+                    financial_data['other_metrics']['使用列索引'] = target_col_idx
+                    financial_data['other_metrics']['使用列描述'] = column_desc
                     
-                    # 扩展关键词列表
-                    keywords = [
-                        '总部应收未收金额', '应收未收金额', '应收-未收额', 
-                        '应收未收额', '应收-未收', '应收未收', '未收金额',
-                        '应收金额', '未收', '应收', '收款', '欠款'
-                    ]
-                    
-                    # 检查是否包含关键词
-                    matched_keywords = [kw for kw in keywords if kw in first_col_value]
-                    financial_data['other_metrics']['匹配的关键词'] = matched_keywords
-                    
-                    if matched_keywords:
-                        # 使用第二个合计列提取数据
-                        if len(total_col_indices) >= 2:
-                            target_col_idx = total_col_indices[1]  # 使用第二个合计列
-                            column_desc = f"第{target_col_idx+1}列(第2个合计列)"
-                        else:
-                            target_col_idx = total_col_indices[0]  # 如果只有1个合计列，使用第一个
-                            column_desc = f"第{target_col_idx+1}列(第1个合计列，仅找到1个)"
-                        
-                        financial_data['other_metrics']['使用列索引'] = target_col_idx
-                        financial_data['other_metrics']['使用列描述'] = column_desc
-                        
-                        try:
-                            # 提取第37行合计列的值
-                            raw_value = df.iloc[target_row_index, target_col_idx]
-                            financial_data['other_metrics']['第37行合计列原值'] = str(raw_value)
-                            
-                            parsed_value = pd.to_numeric(raw_value, errors='coerce')
-                            if not pd.isna(parsed_value):
-                                financial_data['receivables']['net_amount'] = float(parsed_value)
-                                financial_data['other_metrics']['总部应收未收金额'] = float(parsed_value)
-                                financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
-                                financial_data['other_metrics']['提取成功'] = True
-                                financial_data['other_metrics']['数值处理'] = "直接显示在可视化看板"
-                            else:
-                                financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
-                        except (ValueError, TypeError, IndexError) as e:
-                            financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
+                    parsed_value = pd.to_numeric(raw_value, errors='coerce')
+                    if not pd.isna(parsed_value):
+                        financial_data['receivables']['net_amount'] = float(parsed_value)
+                        financial_data['other_metrics']['总部应收未收金额'] = float(parsed_value)
+                        financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
+                        financial_data['other_metrics']['提取成功'] = True
+                        financial_data['other_metrics']['数值处理'] = "直接显示在可视化看板"
                     else:
-                        financial_data['other_metrics']['提取失败原因'] = "第37行不包含总部应收未收关键词"
+                        financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
                         
-                except (IndexError, Exception) as e:
-                    financial_data['other_metrics']['提取失败原因'] = f"第37行访问异常: {str(e)}"
+                except (ValueError, TypeError, IndexError) as e:
+                    financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
+                    
             else:
                 if len(df) < 37:
                     financial_data['other_metrics']['提取失败原因'] = f"数据行数不足37行，实际{len(df)}行"
-                elif len(total_col_indices) < 1:
-                    financial_data['other_metrics']['提取失败原因'] = f"未找到合计列，实际{len(total_col_indices)}列"
+                elif len(total_col_indices) < 2:
+                    financial_data['other_metrics']['提取失败原因'] = f"合计列数不足2列，实际{len(total_col_indices)}列"
             
             # 3. 提取其他财务指标
             for idx, row in df.iterrows():
