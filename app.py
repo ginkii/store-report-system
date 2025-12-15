@@ -402,20 +402,43 @@ class BulkReportUploader:
         }
         
         try:
-            # 1. 查找所有"合计"列的位置
+            # 1. 查找所有"合计"列的位置 - 扩展识别范围
             total_col_indices = []
             for col_idx, col_name in enumerate(df.columns):
-                col_str = str(col_name).lower()
-                if '合计' in col_str or 'total' in col_str or '总计' in col_str:
+                col_str = str(col_name).lower().strip()
+                # 扩展合计列识别关键词
+                if any(keyword in col_str for keyword in [
+                    '合计', 'total', '总计', '小计', 'sum', '汇总',
+                    '金额', '总金额', '合计金额', '小计金额',
+                    '总额', '总和', '累计', '统计',
+                    '本月', '当月', '月度'
+                ]):
                     total_col_indices.append(col_idx)
             
+            # 如果仍然没有找到合计列，则查找包含数字最多的列
+            if not total_col_indices:
+                numeric_counts = []
+                for col_idx in range(len(df.columns)):
+                    try:
+                        numeric_count = df.iloc[:, col_idx].apply(lambda x: pd.to_numeric(x, errors='coerce')).notna().sum()
+                        numeric_counts.append((col_idx, numeric_count))
+                    except:
+                        numeric_counts.append((col_idx, 0))
+                
+                # 按数字含量排序，取前几列作为潜在的合计列
+                numeric_counts.sort(key=lambda x: x[1], reverse=True)
+                total_col_indices = [idx for idx, count in numeric_counts[:3] if count > 0]  # 取前3列
+                financial_data['other_metrics']['数值列识别'] = f"按数值含量识别: {total_col_indices}"
+            
             # 调试信息：记录合计列位置
+            financial_data['other_metrics']['所有列名'] = [str(col) for col in df.columns]
+            financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
+            financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
             if total_col_indices:
-                financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
-                financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
+                financial_data['other_metrics']['合计列名称'] = [str(df.columns[i]) for i in total_col_indices]
             
             # 2. 在第40行（索引39）查找应收未收金额
-            if len(df) >= 40 and len(total_col_indices) >= 2:
+            if len(df) >= 40 and len(total_col_indices) >= 1:  # 改为至少1列即可
                 target_row_index = 39  # 第40行
                 
                 try:
@@ -431,20 +454,29 @@ class BulkReportUploader:
                     
                     # 如果第40行包含应收未收关键词
                     if any(keyword in first_col_value for keyword in keywords):
-                        # 强制使用第2个合计列
-                        target_col_idx = total_col_indices[1]
+                        # 根据合计列数量选择使用哪个列
+                        if len(total_col_indices) >= 2:
+                            # 有2个或以上合计列，使用第2个
+                            target_col_idx = total_col_indices[1]
+                            column_desc = "第2个合计列"
+                        else:
+                            # 只有1个合计列，使用第1个
+                            target_col_idx = total_col_indices[0]
+                            column_desc = "第1个合计列"
+                        
                         financial_data['other_metrics']['使用合计列索引'] = target_col_idx
+                        financial_data['other_metrics']['使用列描述'] = column_desc
                         
                         try:
-                            # 提取第40行第2个合计列的值
+                            # 提取第40行指定合计列的值
                             raw_value = df.iloc[target_row_index, target_col_idx]
-                            financial_data['other_metrics']['第40行第2个合计列原值'] = str(raw_value)
+                            financial_data['other_metrics']['第40行合计列原值'] = str(raw_value)
                             
                             row_40_value = pd.to_numeric(raw_value, errors='coerce')
                             if not pd.isna(row_40_value):
                                 financial_data['receivables']['net_amount'] = float(row_40_value)
                                 financial_data['other_metrics']['第40行应收未收'] = float(row_40_value)
-                                financial_data['other_metrics']['提取位置'] = f"第40行第2个合计列"
+                                financial_data['other_metrics']['提取位置'] = f"第40行{column_desc}"
                                 financial_data['other_metrics']['提取成功'] = True
                             else:
                                 financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
@@ -458,8 +490,8 @@ class BulkReportUploader:
             else:
                 if len(df) < 40:
                     financial_data['other_metrics']['提取失败原因'] = f"数据行数不足40行，实际{len(df)}行"
-                elif len(total_col_indices) < 2:
-                    financial_data['other_metrics']['提取失败原因'] = f"合计列数不足2列，实际{len(total_col_indices)}列"
+                elif len(total_col_indices) < 1:
+                    financial_data['other_metrics']['提取失败原因'] = f"未找到合计列，实际{len(total_col_indices)}列"
             
             # 3. 提取其他财务指标
             for idx, row in df.iterrows():
