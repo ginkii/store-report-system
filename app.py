@@ -188,7 +188,7 @@ class ReportModel:
         for col in df.columns:
             col_str = str(col)
             # 将Unnamed列名替换为空字符串（更宽泛的匹配）
-            if ('unnamed' in col_str.lower()) or col_str.lower().startswith('unnamed'):
+            if col_str.startswith('Unnamed:') or col_str.startswith('Unnamed ') or ('unnamed' in col_str.lower()):
                 headers.append("")
             else:
                 headers.append(col_str)
