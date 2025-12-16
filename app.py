@@ -185,13 +185,24 @@ class ReportModel:
         """将DataFrame转换为字典列表，保留表头信息并修复#NAME?错误，处理空白表头"""
         # 保存原始列名作为表头，处理Unnamed列
         headers = []
+        print(f"DEBUG: Processing {len(df.columns)} columns")
         for col in df.columns:
             col_str = str(col)
+            print(f"DEBUG: Column '{col_str}'")
             # 将Unnamed列名替换为空字符串（更宽泛的匹配）
             if col_str.startswith('Unnamed:') or col_str.startswith('Unnamed ') or ('unnamed' in col_str.lower()):
                 headers.append("")
+                print(f"DEBUG: Replaced '{col_str}' with empty string")
             else:
                 headers.append(col_str)
+                print(f"DEBUG: Kept '{col_str}' as is")
+        
+        print(f"DEBUG: Final headers: {headers}")
+        print(f"DEBUG: Headers with empty check: {[f'[{i}]: {repr(h)}' for i, h in enumerate(headers)]}")
+        
+        # 强制确保空白表头确实是空字符串
+        headers = ["" if ("Unnamed:" in h or "unnamed" in h.lower()) else h for h in headers]
+        print(f"DEBUG: After force cleanup: {headers}")
         
         result = []
         for index, row in df.iterrows():
