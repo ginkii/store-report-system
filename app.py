@@ -188,26 +188,29 @@ class ReportModel:
     @staticmethod
     def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
         """将DataFrame转换为字典列表，保留表头信息并修复#NAME?错误，处理空白表头"""
-        # 保存原始列名作为表头，处理Unnamed列
+        # 保存原始列名作为表头，处理Unnamed列，避免重复空白列名
         headers = []
-        print(f"DEBUG: Processing {len(df.columns)} columns")
+        empty_count = 0
         for col in df.columns:
             col_str = str(col)
-            print(f"DEBUG: Column '{col_str}'")
-            # 将Unnamed列名替换为空字符串（更宽泛的匹配）
+            # 将Unnamed列名替换为空字符串
             if col_str.startswith('Unnamed:') or col_str.startswith('Unnamed ') or ('unnamed' in col_str.lower()):
                 headers.append("")
-                print(f"DEBUG: Replaced '{col_str}' with empty string")
             else:
                 headers.append(col_str)
-                print(f"DEBUG: Kept '{col_str}' as is")
         
-        print(f"DEBUG: Final headers: {headers}")
-        print(f"DEBUG: Headers with empty check: {[f'[{i}]: {repr(h)}' for i, h in enumerate(headers)]}")
+        # 处理重复的空白列名，为pandas创建唯一列名
+        unique_headers = []
+        empty_count = 0
+        for header in headers:
+            if header == "":
+                unique_headers.append(f"_empty_{empty_count}")
+                empty_count += 1
+            else:
+                unique_headers.append(header)
         
-        # 强制确保空白表头确实是空字符串
-        headers = ["" if ("Unnamed:" in h or "unnamed" in h.lower()) else h for h in headers]
-        print(f"DEBUG: After force cleanup: {headers}")
+        # 使用唯一列名重建DataFrame，但保存原始表头用于显示
+        df.columns = unique_headers
         
         result = []
         for index, row in df.iterrows():
@@ -337,7 +340,7 @@ class BulkReportUploader:
             if progress_callback:
                 progress_callback(15, "正在读取Excel文件...")
             
-            # 2. 读取Excel文件 - 以第2行为表头用于显示，同时读取第4行为表头用于财务提取
+            # 2. 读取Excel文件 - 以第2行为表头用于显示，第4行为表头用于财务提取
             excel_data_display = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)  # header=1 表示第2行为表头用于显示
             excel_data_financial = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)  # header=3 表示第4行为表头用于财务提取
             total_sheets = len(excel_data_display)
@@ -380,9 +383,7 @@ class BulkReportUploader:
                         continue
                     
                     # 5. 转换显示数据格式，保存表头
-                    print(f"UPLOAD DEBUG: About to process headers for {sheet_name}")
                     excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display_cleaned)
-                    print(f"UPLOAD DEBUG: Processed headers: {headers}")
                     
                     # 6. 提取财务数据（使用第4行表头的数据）
                     financial_data = self._extract_financial_data_v2(df_financial_cleaned)
@@ -963,13 +964,6 @@ def create_query_app():
                     headers = latest_report.get('table_headers', [])
                     
                     if raw_data and headers:
-                        # 临时调试：显示实际的表头内容
-                        with st.expander("🔧 临时调试 - 表头内容"):
-                            st.write("数据库中的原始表头:", headers)
-                            st.write("表头数量:", len(headers))
-                            for i, h in enumerate(headers):
-                                st.write(f"表头 {i}: '{h}' (长度: {len(h)})")
-                        
                         # 使用保存的表头重建DataFrame
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
