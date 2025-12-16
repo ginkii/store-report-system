@@ -728,7 +728,7 @@ class PermissionManager:
 
 # 报表数据处理工具
 def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> pd.DataFrame:
-    """根据保存的表头重建DataFrame，解决表头消失问题"""
+    """根据保存的表头重建DataFrame，解决表头消失问题，处理重复空白表头"""
     if not raw_data or not headers:
         return pd.DataFrame()
     
@@ -743,8 +743,25 @@ def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> 
                 row_values.append(value)
             data_matrix.append(row_values)
         
-        # 使用保存的表头创建DataFrame
-        df = pd.DataFrame(data_matrix, columns=headers)
+        # 处理重复的空白表头，创建唯一的pandas列名
+        unique_headers = []
+        display_headers = []  # 保存用于显示的原始表头
+        empty_count = 0
+        
+        for header in headers:
+            display_headers.append(header)  # 保存原始表头
+            if header == "":
+                unique_headers.append(f"_empty_{empty_count}")
+                empty_count += 1
+            else:
+                unique_headers.append(header)
+        
+        # 使用唯一表头创建DataFrame
+        df = pd.DataFrame(data_matrix, columns=unique_headers)
+        
+        # 将显示用的表头存储为属性
+        df.attrs['display_headers'] = display_headers
+        
         return df.fillna('')
     
     except Exception as e:
@@ -970,6 +987,14 @@ def create_query_app():
                         if not df.empty:
                             # 格式化数字列：两位小数和千分位
                             df_display = df.copy()
+                            
+                            # 获取原始显示表头
+                            display_headers = df.attrs.get('display_headers', df.columns.tolist())
+                            
+                            # 为显示创建新的DataFrame，使用原始表头但要处理重复问题
+                            display_df = df_display.copy()
+                            
+                            # 格式化数字列
                             for col in df_display.columns:
                                 # 尝试将每列转换为数字并格式化
                                 try:
@@ -988,18 +1013,44 @@ def create_query_app():
                                                     formatted_values.append(str(val) if pd.notna(val) else "")
                                             except:
                                                 formatted_values.append(str(val) if pd.notna(val) else "")
-                                        df_display[col] = formatted_values
+                                        display_df[col] = formatted_values
                                 except:
                                     # 如果转换失败，保持原样
                                     continue
                             
-                            # 显示格式化后的只读表格
-                            st.dataframe(df_display, use_container_width=True, height=400)
+                            # 显示格式化后的只读表格（使用内部列名避免重复问题）
+                            st.dataframe(display_df, use_container_width=True, height=400)
                             
                             # 提供Excel下载功能
                             buffer = io.BytesIO()
                             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                df.to_excel(writer, index=False, sheet_name=store_info['store_name'][:31])
+                                # 为Excel下载创建带有原始表头的DataFrame
+                                download_df = df.copy()
+                                display_headers = df.attrs.get('display_headers', df.columns.tolist())
+                                
+                                # 直接使用原始表头（包含空字符串）
+                                # Excel支持空白列名，pandas需要手动处理
+                                data_matrix = []
+                                for _, row in download_df.iterrows():
+                                    data_matrix.append(row.tolist())
+                                
+                                # 创建工作簿并手动写入数据
+                                import openpyxl
+                                wb = openpyxl.Workbook()
+                                ws = wb.active
+                                ws.title = store_info['store_name'][:31]
+                                
+                                # 写入表头（可以是空字符串）
+                                for col_idx, header in enumerate(display_headers, 1):
+                                    ws.cell(row=1, column=col_idx, value=header)
+                                
+                                # 写入数据
+                                for row_idx, row_data in enumerate(data_matrix, 2):
+                                    for col_idx, value in enumerate(row_data, 1):
+                                        ws.cell(row=row_idx, column=col_idx, value=value)
+                                
+                                # 保存到buffer
+                                wb.save(buffer)
                             
                             st.download_button(
                                 label="📥 下载完整报表 (Excel)",
