@@ -981,6 +981,12 @@ def create_query_app():
                     headers = latest_report.get('table_headers', [])
                     
                     if raw_data and headers:
+                        # 临时调试
+                        with st.expander("🔧 表头调试"):
+                            st.write("原始表头:", headers)
+                            st.write("表头类型:", [type(h).__name__ for h in headers])
+                            st.write("表头长度:", [len(str(h)) for h in headers])
+                            
                         # 使用保存的表头重建DataFrame
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
@@ -1023,34 +1029,40 @@ def create_query_app():
                             
                             # 提供Excel下载功能
                             buffer = io.BytesIO()
-                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            try:
                                 # 为Excel下载创建带有原始表头的DataFrame
                                 download_df = df.copy()
                                 display_headers = df.attrs.get('display_headers', df.columns.tolist())
                                 
-                                # 直接使用原始表头（包含空字符串）
-                                # Excel支持空白列名，pandas需要手动处理
-                                data_matrix = []
-                                for _, row in download_df.iterrows():
-                                    data_matrix.append(row.tolist())
+                                # 使用pandas的ExcelWriter，但处理空白列名
+                                excel_headers = []
+                                for i, header in enumerate(display_headers):
+                                    if header == "":
+                                        excel_headers.append(f"_col_{i}")  # 临时列名
+                                    else:
+                                        excel_headers.append(header)
                                 
-                                # 创建工作簿并手动写入数据
-                                import openpyxl
-                                wb = openpyxl.Workbook()
-                                ws = wb.active
-                                ws.title = store_info['store_name'][:31]
+                                # 创建临时DataFrame用于导出
+                                temp_df = download_df.copy()
+                                temp_df.columns = excel_headers
                                 
-                                # 写入表头（可以是空字符串）
-                                for col_idx, header in enumerate(display_headers, 1):
-                                    ws.cell(row=1, column=col_idx, value=header)
-                                
-                                # 写入数据
-                                for row_idx, row_data in enumerate(data_matrix, 2):
-                                    for col_idx, value in enumerate(row_data, 1):
-                                        ws.cell(row=row_idx, column=col_idx, value=value)
-                                
-                                # 保存到buffer
-                                wb.save(buffer)
+                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                    temp_df.to_excel(writer, index=False, sheet_name=store_info['store_name'][:31])
+                                    
+                                    # 获取工作簿和工作表
+                                    workbook = writer.book
+                                    worksheet = writer.sheets[store_info['store_name'][:31]]
+                                    
+                                    # 手动设置表头为空白（如果原来是空的）
+                                    for col_idx, (original_header, excel_header) in enumerate(zip(display_headers, excel_headers)):
+                                        if original_header == "":
+                                            # 设置表头单元格为空白
+                                            worksheet.cell(row=1, column=col_idx + 1).value = ""
+                            except Exception as e:
+                                st.error(f"Excel生成错误: {e}")
+                                # fallback: 使用简化方式
+                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                    df.to_excel(writer, index=False, sheet_name=store_info['store_name'][:31])
                             
                             st.download_button(
                                 label="📥 下载完整报表 (Excel)",
