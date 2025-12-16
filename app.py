@@ -945,6 +945,13 @@ def create_query_app():
                     headers = latest_report.get('table_headers', [])
                     
                     if raw_data and headers:
+                        # 临时调试：显示实际的表头内容
+                        with st.expander("🔧 临时调试 - 表头内容"):
+                            st.write("数据库中的原始表头:", headers)
+                            st.write("表头数量:", len(headers))
+                            for i, h in enumerate(headers):
+                                st.write(f"表头 {i}: '{h}' (长度: {len(h)})")
+                        
                         # 使用保存的表头重建DataFrame
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
