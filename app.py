@@ -981,12 +981,6 @@ def create_query_app():
                     headers = latest_report.get('table_headers', [])
                     
                     if raw_data and headers:
-                        # 临时调试
-                        with st.expander("🔧 表头调试"):
-                            st.write("原始表头:", headers)
-                            st.write("表头类型:", [type(h).__name__ for h in headers])
-                            st.write("表头长度:", [len(str(h)) for h in headers])
-                            
                         # 使用保存的表头重建DataFrame
                         df = rebuild_dataframe_with_headers(raw_data, headers)
                         
@@ -1024,8 +1018,41 @@ def create_query_app():
                                     # 如果转换失败，保持原样
                                     continue
                             
-                            # 显示格式化后的只读表格（使用内部列名避免重复问题）
-                            st.dataframe(display_df, use_container_width=True, height=400)
+                            # 显示格式化后的只读表格
+                            # 为了正确显示空白列名，使用st.table而不是st.dataframe
+                            
+                            # 获取原始显示表头
+                            display_headers = df.attrs.get('display_headers', df.columns.tolist())
+                            
+                            # 创建用于显示的HTML表格
+                            html_table = "<div style='overflow-x: auto;'><table border='1' style='border-collapse: collapse; width: 100%;'>"
+                            
+                            # 添加表头行
+                            html_table += "<tr style='background-color: #f0f0f0;'>"
+                            for header in display_headers:
+                                if header == "":
+                                    html_table += "<th style='padding: 8px; text-align: center; min-width: 100px;'>&nbsp;</th>"
+                                else:
+                                    html_table += f"<th style='padding: 8px; text-align: center;'>{header}</th>"
+                            html_table += "</tr>"
+                            
+                            # 添加数据行（最多显示100行）
+                            max_rows = min(100, len(display_df))
+                            for i in range(max_rows):
+                                html_table += "<tr>"
+                                for col in display_df.columns:
+                                    value = display_df.iloc[i][col]
+                                    html_table += f"<td style='padding: 8px; text-align: center;'>{value}</td>"
+                                html_table += "</tr>"
+                            
+                            html_table += "</table></div>"
+                            
+                            # 显示HTML表格
+                            st.markdown(html_table, unsafe_allow_html=True)
+                            
+                            # 如果数据超过100行，显示提示
+                            if len(display_df) > 100:
+                                st.info(f"表格显示前100行，完整数据共{len(display_df)}行。请下载Excel查看完整数据。")
                             
                             # 提供Excel下载功能
                             buffer = io.BytesIO()
