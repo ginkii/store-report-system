@@ -130,6 +130,11 @@ class DatabaseManager:
 def get_db_manager():
     return DatabaseManager()
 
+# 清除缓存函数
+def clear_all_caches():
+    st.cache_resource.clear()
+    st.cache_data.clear()
+
 # 数据模型
 class StoreModel:
     """门店数据模型"""
@@ -375,7 +380,9 @@ class BulkReportUploader:
                         continue
                     
                     # 5. 转换显示数据格式，保存表头
+                    print(f"UPLOAD DEBUG: About to process headers for {sheet_name}")
                     excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display_cleaned)
+                    print(f"UPLOAD DEBUG: Processed headers: {headers}")
                     
                     # 6. 提取财务数据（使用第4行表头的数据）
                     financial_data = self._extract_financial_data_v2(df_financial_cleaned)
@@ -1139,6 +1146,15 @@ def create_upload_app():
                                             st.write(f"**{key}:** {value}")
                                     else:
                                         st.write("无调试信息")
+                                    
+                                    # 显示表头处理信息
+                                    headers = sample_report.get('table_headers', [])
+                                    st.write("**处理后的表头:**")
+                                    for i, h in enumerate(headers):
+                                        if h == "":
+                                            st.write(f"列 {i}: [空白] (长度: {len(h)})")
+                                        else:
+                                            st.write(f"列 {i}: '{h}' (长度: {len(h)})")
                                 else:
                                     st.write("未找到报表数据")
                             except Exception as e:
