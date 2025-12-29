@@ -1224,7 +1224,7 @@ def create_financial_admin_app():
             st.error(f"获取门店列表失败: {e}")
 
 def create_store_query_app():
-    """门店查询系统界面"""
+    """门店查询系统界面 - 整合财务填报功能"""
     st.title("🔍 门店查询系统")
     
     # 获取数据库连接
@@ -1341,125 +1341,355 @@ def create_store_query_app():
                                 net_profit = total_revenue - total_cost
                                 st.metric("净利润", f"¥{net_profit:,.2f}", 
                                          delta=f"{(net_profit/total_revenue*100):.1f}%" if total_revenue > 0 else "0%")
+                
+                # ============= 整合财务填报系统 =============
+                st.markdown("---")
+                st.markdown("## 💼 财务填报系统")
+                st.info("📝 请在下方填报财务数据。选择期间后可查看或填报对应的财务信息。")
+                
+                # 初始化财务报表管理器
+                try:
+                    financial_manager = FinancialReportManager(db)
+                except Exception as e:
+                    st.error(f"初始化财务管理器失败: {e}")
+                    return
+                
+                # 财务填报期间选择
+                col_period, col_status = st.columns([2, 1])
+                
+                with col_period:
+                    current_date = datetime.now()
+                    default_period = current_date.strftime("%Y-%m")
+                    financial_period = st.text_input("财务填报期间 (YYYY-MM)", value=default_period, key="financial_period")
+                
+                with col_status:
+                    if re.match(r'^\d{4}-\d{2}$', financial_period):
+                        # 检查该期间的财务报表状态
+                        existing_financial_report = financial_manager.get_report(store_id, financial_period)
+                        if existing_financial_report:
+                            status = existing_financial_report.get('header', {}).get('status', 'pending')
+                            if status == 'submitted':
+                                st.success("✅ 已提交")
+                            else:
+                                st.info("📝 草稿状态")
+                        else:
+                            st.warning("📋 未创建")
+                    else:
+                        st.error("❌ 期间格式错误")
+                        return
+                
+                if re.match(r'^\d{4}-\d{2}$', financial_period):
+                    # 获取或创建财务报表
+                    financial_report = financial_manager.get_report(store_id, financial_period)
+                    if not financial_report:
+                        # 创建新报表（仅创建结构，不保存）
+                        financial_report = FinancialReportModel.create_financial_report_document(
+                            store_id, 
+                            store['store_name'], 
+                            financial_period
+                        )
+                    
+                    # 财务填报主界面
+                    col_left, col_right = st.columns([2, 1])
+                    
+                    with col_left:
+                        st.subheader("📊 财务数据填报")
                         
-                        # 如果是财务报表，显示可视化看板
-                        if selected_report.get('raw_excel_data'):
-                            st.markdown("---")
-                            st.markdown("## 📊 财务运算可视化看板")
+                        # 管理员预设数据（只读显示）
+                        with st.expander("📋 管理员预设数据", expanded=True):
+                            admin_data = financial_report.get('admin_data', {})
                             
-                            # 尝试从报表数据中提取财务数据
-                            raw_data = selected_report.get('raw_excel_data', [])
-                            headers = selected_report.get('table_headers', [])
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                st.metric("(1) 回款", f"¥{admin_data.get('1', 0):,.2f}")
+                                st.metric("(11) 线上支出", f"¥{admin_data.get('11', 0):,.2f}")
                             
-                            # 模拟财务数据（实际应该从Excel数据中解析）
-                            mock_admin_data = {'1': 50000, '11': 30000, '16': 20000}
-                            mock_user_inputs = {'18': 8000, '19': 5000, '20': 1000, '21': 500, '22': 0, '23': 0, '24': 0, '25': 0, '26': 0}
+                            with col_b:
+                                st.metric("(2) 其他现金收入", f"¥{admin_data.get('2', 0):,.2f}")
+                                st.metric("(16) 线上净利润", f"¥{admin_data.get('16', 0):,.2f}")
                             
-                            # 计算指标
-                            huikuan = mock_admin_data.get('1', 0)
-                            xianshang_zhichu = mock_admin_data.get('11', 0)
-                            xianshang_jinglilun = mock_admin_data.get('16', 0)
-                            xianxia_total = sum(mock_user_inputs.values())
+                            # 计算线上余额
+                            calculated = financial_report.get('calculated_metrics', {})
+                            if calculated:
+                                st.metric("(15) 线上余额", f"¥{calculated.get('15', 0):,.2f}", 
+                                         help="回款 - 线上支出")
+                        
+                        # 用户填报表单
+                        with st.form("integrated_financial_form", clear_on_submit=False):
+                            st.subheader("✏️ 线下费用填报")
+                            
+                            user_inputs = financial_report.get('user_inputs', {})
+                            
+                            col1_form, col2_form = st.columns(2)
+                            
+                            with col1_form:
+                                gongzi = st.number_input("(18) 工资", min_value=0.0, value=float(user_inputs.get('18', 0)), format="%.2f", key="integrated_input_18")
+                                fangzu = st.number_input("(19) 房租", min_value=0.0, value=float(user_inputs.get('19', 0)), format="%.2f", key="integrated_input_19")
+                                shuidian = st.number_input("(20) 水电费", min_value=0.0, value=float(user_inputs.get('20', 0)), format="%.2f", key="integrated_input_20")
+                                wuye = st.number_input("(21) 物业费", min_value=0.0, value=float(user_inputs.get('21', 0)), format="%.2f", key="integrated_input_21")
+                                qita1 = st.number_input("(22) 其他费用1", min_value=0.0, value=float(user_inputs.get('22', 0)), format="%.2f", key="integrated_input_22")
+                            
+                            with col2_form:
+                                qita2 = st.number_input("(23) 其他费用2", min_value=0.0, value=float(user_inputs.get('23', 0)), format="%.2f", key="integrated_input_23")
+                                qita3 = st.number_input("(24) 其他费用3", min_value=0.0, value=float(user_inputs.get('24', 0)), format="%.2f", key="integrated_input_24")
+                                qita4 = st.number_input("(25) 其他费用4", min_value=0.0, value=float(user_inputs.get('25', 0)), format="%.2f", key="integrated_input_25")
+                                qita5 = st.number_input("(26) 其他费用5", min_value=0.0, value=float(user_inputs.get('26', 0)), format="%.2f", key="integrated_input_26")
+                            
+                            # 实时计算显示（在表单内）
+                            current_total = gongzi + fangzu + shuidian + wuye + qita1 + qita2 + qita3 + qita4 + qita5
+                            
+                            st.markdown("### 📊 **实时计算预览**")
+                            col_calc1, col_calc2 = st.columns(2)
+                            
+                            with col_calc1:
+                                st.markdown(f"""
+                                <div style="background-color: #e8f4f8; padding: 12px; border-radius: 8px; border-left: 4px solid #17a2b8;">
+                                    <strong>(17) 线下费用合计</strong><br/>
+                                    <span style="font-size: 18px; color: #17a2b8; font-weight: bold;">¥{current_total:,.2f}</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            admin_data = financial_report.get('admin_data', {})
+                            xianshang_yue = admin_data.get('1', 0) - admin_data.get('11', 0)
+                            current_final = xianshang_yue - current_total
+                            current_profit = admin_data.get('16', 0) - current_total
+                            
+                            with col_calc2:
+                                st.markdown(f"""
+                                <div style="background-color: #f0f8e8; padding: 12px; border-radius: 8px; border-left: 4px solid #28a745;">
+                                    <strong>(26) 最终余额</strong><br/>
+                                    <span style="font-size: 18px; color: #28a745; font-weight: bold;">¥{current_final:,.2f}</span>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            # 表单按钮
+                            col_btn1, col_btn2 = st.columns(2)
+                            
+                            with col_btn1:
+                                save_btn = st.form_submit_button("💾 保存草稿", type="secondary")
+                            
+                            with col_btn2:
+                                submit_btn = st.form_submit_button("✅ 正式提交", type="primary")
+                            
+                            # 处理表单提交
+                            if save_btn or submit_btn:
+                                new_user_inputs = {
+                                    '18': gongzi, '19': fangzu, '20': shuidian, '21': wuye,
+                                    '22': qita1, '23': qita2, '24': qita3, '25': qita4, '26': qita5
+                                }
+                                
+                                # 保存数据
+                                success = financial_manager.create_or_update_report(
+                                    store_id, 
+                                    store['store_name'], 
+                                    financial_period,
+                                    user_inputs=new_user_inputs
+                                )
+                                
+                                if success:
+                                    if submit_btn:
+                                        # 正式提交
+                                        submit_success = financial_manager.submit_report(
+                                            store_id, 
+                                            financial_period, 
+                                            store['store_name']
+                                        )
+                                        if submit_success:
+                                            st.success("✅ 财务报表已正式提交！")
+                                            st.balloons()
+                                        else:
+                                            st.error("❌ 提交失败")
+                                    else:
+                                        st.success("✅ 财务数据已保存！")
+                                    
+                                    # 刷新页面数据
+                                    st.rerun()
+                                else:
+                                    st.error("❌ 保存失败")
+                    
+                    with col_right:
+                        st.subheader("📈 财务概览")
+                        
+                        # 重新获取最新数据用于预览
+                        latest_financial_report = financial_manager.get_report(store_id, financial_period)
+                        if latest_financial_report:
+                            admin_data = latest_financial_report.get('admin_data', {})
+                            user_inputs = latest_financial_report.get('user_inputs', {})
+                            calculated = latest_financial_report.get('calculated_metrics', {})
+                            
+                            # 实时计算指标
+                            huikuan = admin_data.get('1', 0)
+                            xianshang_zhichu = admin_data.get('11', 0)
+                            xianshang_jinglilun = admin_data.get('16', 0)
+                            
+                            xianxia_total = sum(user_inputs.values())
                             xianshang_yue = huikuan - xianshang_zhichu
                             zuizhong_yue = xianshang_yue - xianxia_total
                             zuizhong_jinglilun = xianshang_jinglilun - xianxia_total
                             
-                            # 勾稽关系提醒
-                            st.markdown("""
-                            <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 10px; padding: 15px; margin: 10px 0;">
-                                <h4 style="color: #856404; margin: 0;">⚠️ 重要勾稽关系</h4>
-                                <p style="color: #856404; margin: 5px 0; font-weight: bold;">
-                                    表一(9) ≡ 表二(11) &nbsp;&nbsp;|&nbsp;&nbsp; 表一(14) ≡ 表二(12)
-                                </p>
-                                <small style="color: #856404;">请确保两个表格对应项目数值一致</small>
+                            # 关键指标卡片（加粗显示重要项目）
+                            st.markdown("### 🎯 **关键财务指标**")
+                            
+                            # 最终余额和净利润（关键结果项）
+                            st.markdown(f"""
+                            <div style="background-color: #e8f5e8; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745; margin: 10px 0;">
+                                <h4 style="color: #155724; margin: 0;">💰 最终余额 (26)</h4>
+                                <h2 style="color: #155724; margin: 5px 0; font-weight: bold;">¥{zuizhong_yue:,.2f}</h2>
                             </div>
                             """, unsafe_allow_html=True)
                             
-                            # 创建两个看板
-                            col_cash, col_profit = st.columns(2)
+                            st.markdown(f"""
+                            <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1976d2; margin: 10px 0;">
+                                <h4 style="color: #1565c0; margin: 0;">📊 最终净利润 (27)</h4>
+                                <h2 style="color: #1565c0; margin: 5px 0; font-weight: bold;">¥{zuizhong_jinglilun:,.2f}</h2>
+                            </div>
+                            """, unsafe_allow_html=True)
                             
-                            with col_cash:
-                                st.markdown("""
-                                <div style="background-color: #e8f5e8; border: 2px solid #28a745; border-radius: 15px; padding: 20px;">
-                                    <h3 style="color: #155724; text-align: center; margin: 0;">🟢 现金表运算</h3>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                # 现金表流程图
-                                st.markdown(f"""
-                                <div style="background-color: #f8fff8; padding: 20px; border-radius: 10px; margin: 10px 0;">
-                                    <div style="text-align: center;">
-                                        <div style="background-color: #28a745; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
-                                            <strong>(1) 回款</strong><br/>¥{huikuan:,.2f}
-                                        </div>
-                                        <div style="font-size: 20px; margin: 10px;">➖</div>
-                                        <div style="background-color: #6c757d; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
-                                            <strong>(11) 线上支出</strong><br/>¥{xianshang_zhichu:,.2f}
-                                        </div>
-                                        <div style="font-size: 20px; margin: 10px;">⬇️</div>
-                                        <div style="background-color: #17a2b8; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
-                                            <strong>(15) 线上余额</strong><br/>¥{xianshang_yue:,.2f}
-                                        </div>
-                                        <div style="font-size: 20px; margin: 10px;">➖</div>
-                                        <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
-                                            <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total:,.2f}
-                                        </div>
-                                        <div style="font-size: 20px; margin: 10px;">⬇️</div>
-                                        <div style="background-color: #dc3545; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
-                                            <strong>(26) 最终余额</strong><br/>¥{zuizhong_yue:,.2f}
-                                        </div>
+                            # 其他重要指标
+                            st.markdown("### 📋 计算详情")
+                            st.metric("(17) 线下费用合计", f"¥{xianxia_total:,.2f}")
+                            st.metric("(15) 线上余额", f"¥{xianshang_yue:,.2f}")
+                            
+                            # 报表状态
+                            status = latest_financial_report.get('header', {}).get('status', 'pending')
+                            if status == 'submitted':
+                                st.success("✅ 已提交")
+                            else:
+                                st.info("📝 草稿状态")
+                            
+                            # 导出Excel
+                            if st.button("📊 导出财务Excel", use_container_width=True):
+                                excel_file = ExcelExporter.create_financial_excel(latest_financial_report)
+                                if excel_file:
+                                    st.download_button(
+                                        label="⬇️ 下载财务报表",
+                                        data=excel_file,
+                                        file_name=f"{store['store_name']}_{financial_period}_财务报表.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        use_container_width=True
+                                    )
+                    
+                    # 财务运算可视化看板
+                    st.markdown("---")
+                    st.markdown("## 📊 财务运算可视化看板")
+                    
+                    # 勾稽关系提醒
+                    st.markdown("""
+                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 10px; padding: 15px; margin: 10px 0;">
+                        <h4 style="color: #856404; margin: 0;">⚠️ 重要勾稽关系</h4>
+                        <p style="color: #856404; margin: 5px 0; font-weight: bold;">
+                            表一(9) ≡ 表二(11) &nbsp;&nbsp;|&nbsp;&nbsp; 表一(14) ≡ 表二(12)
+                        </p>
+                        <small style="color: #856404;">请确保两个表格对应项目数值一致</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # 获取当前数据用于可视化
+                    if latest_financial_report:
+                        current_admin_data = latest_financial_report.get('admin_data', {})
+                        current_user_inputs = latest_financial_report.get('user_inputs', {})
+                        
+                        # 实时计算所有指标
+                        huikuan_current = current_admin_data.get('1', 0)
+                        xianshang_zhichu_current = current_admin_data.get('11', 0)
+                        xianshang_jinglilun_current = current_admin_data.get('16', 0)
+                        xianxia_total_current = sum(current_user_inputs.values())
+                        xianshang_yue_current = huikuan_current - xianshang_zhichu_current
+                        zuizhong_yue_current = xianshang_yue_current - xianxia_total_current
+                        zuizhong_jinglilun_current = xianshang_jinglilun_current - xianxia_total_current
+                        
+                        # 创建两个看板
+                        col_cash, col_profit = st.columns(2)
+                        
+                        with col_cash:
+                            st.markdown("""
+                            <div style="background-color: #e8f5e8; border: 2px solid #28a745; border-radius: 15px; padding: 20px;">
+                                <h3 style="color: #155724; text-align: center; margin: 0;">🟢 现金表运算</h3>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # 现金表流程图
+                            st.markdown(f"""
+                            <div style="background-color: #f8fff8; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                                <div style="text-align: center;">
+                                    <div style="background-color: #28a745; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                        <strong>(1) 回款</strong><br/>¥{huikuan_current:,.2f}
+                                    </div>
+                                    <div style="font-size: 20px; margin: 10px;">➖</div>
+                                    <div style="background-color: #6c757d; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                        <strong>(11) 线上支出</strong><br/>¥{xianshang_zhichu_current:,.2f}
+                                    </div>
+                                    <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                                    <div style="background-color: #17a2b8; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                        <strong>(15) 线上余额</strong><br/>¥{xianshang_yue_current:,.2f}
+                                    </div>
+                                    <div style="font-size: 20px; margin: 10px;">➖</div>
+                                    <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                        <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total_current:,.2f}
+                                    </div>
+                                    <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                                    <div style="background-color: #dc3545; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
+                                        <strong>(26) 最终余额</strong><br/>¥{zuizhong_yue_current:,.2f}
                                     </div>
                                 </div>
-                                """, unsafe_allow_html=True)
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with col_profit:
+                            st.markdown("""
+                            <div style="background-color: #e3f2fd; border: 2px solid #1976d2; border-radius: 15px; padding: 20px;">
+                                <h3 style="color: #1565c0; text-align: center; margin: 0;">🔵 利润表运算</h3>
+                            </div>
+                            """, unsafe_allow_html=True)
                             
-                            with col_profit:
-                                st.markdown("""
-                                <div style="background-color: #e3f2fd; border: 2px solid #1976d2; border-radius: 15px; padding: 20px;">
-                                    <h3 style="color: #1565c0; text-align: center; margin: 0;">🔵 利润表运算</h3>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                # 利润表流程图
-                                st.markdown(f"""
-                                <div style="background-color: #f8feff; padding: 20px; border-radius: 10px; margin: 10px 0;">
-                                    <div style="text-align: center;">
-                                        <div style="background-color: #1976d2; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
-                                            <strong>(16) 线上净利润</strong><br/>¥{xianshang_jinglilun:,.2f}
-                                        </div>
-                                        <div style="font-size: 20px; margin: 10px;">➖</div>
-                                        <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
-                                            <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total:,.2f}
-                                        </div>
-                                        <div style="font-size: 14px; color: #6c757d; margin: 10px;">
-                                            SUM(18至26项明细)
-                                        </div>
-                                        <div style="font-size: 20px; margin: 10px;">⬇️</div>
-                                        <div style="background-color: #28a745; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
-                                            <strong>(27) 最终净利润</strong><br/>¥{zuizhong_jinglilun:,.2f}
-                                        </div>
+                            # 利润表流程图
+                            st.markdown(f"""
+                            <div style="background-color: #f8feff; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                                <div style="text-align: center;">
+                                    <div style="background-color: #1976d2; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                        <strong>(16) 线上净利润</strong><br/>¥{xianshang_jinglilun_current:,.2f}
+                                    </div>
+                                    <div style="font-size: 20px; margin: 10px;">➖</div>
+                                    <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                        <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total_current:,.2f}
+                                    </div>
+                                    <div style="font-size: 14px; color: #6c757d; margin: 10px;">
+                                        SUM(18至26项明细)
+                                    </div>
+                                    <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                                    <div style="background-color: #28a745; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
+                                        <strong>(27) 最终净利润</strong><br/>¥{zuizhong_jinglilun_current:,.2f}
                                     </div>
                                 </div>
-                                """, unsafe_allow_html=True)
-                            
-                            # 关键结果项展示
-                            st.markdown("### 🎯 **关键财务指标**")
-                            col_key1, col_key2 = st.columns(2)
-                            
-                            with col_key1:
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # 明细项目展示
+                        st.markdown("### 📝 线下费用明细 (18-26项)")
+                        detail_cols = st.columns(3)
+                        
+                        detail_items = [
+                            ("18", "工资", current_user_inputs.get('18', 0)),
+                            ("19", "房租", current_user_inputs.get('19', 0)),
+                            ("20", "水电费", current_user_inputs.get('20', 0)),
+                            ("21", "物业费", current_user_inputs.get('21', 0)),
+                            ("22", "其他费用1", current_user_inputs.get('22', 0)),
+                            ("23", "其他费用2", current_user_inputs.get('23', 0)),
+                            ("24", "其他费用3", current_user_inputs.get('24', 0)),
+                            ("25", "其他费用4", current_user_inputs.get('25', 0)),
+                            ("26", "其他费用5", current_user_inputs.get('26', 0))
+                        ]
+                        
+                        for i, (code, name, value) in enumerate(detail_items):
+                            with detail_cols[i % 3]:
                                 st.markdown(f"""
-                                <div style="background-color: #e8f5e8; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745;">
-                                    <h4 style="color: #155724; margin: 0;">💰 最终余额 (26)</h4>
-                                    <h2 style="color: #155724; margin: 5px 0; font-weight: bold;">¥{zuizhong_yue:,.2f}</h2>
+                                <div style="background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 8px; margin: 2px;">
+                                    <small style="color: #6c757d;">({code})</small>
+                                    <div style="font-weight: bold;">{name}</div>
+                                    <div style="color: #495057;">¥{value:,.2f}</div>
                                 </div>
                                 """, unsafe_allow_html=True)
-                            
-                            with col_key2:
-                                st.markdown(f"""
-                                <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1976d2;">
-                                    <h4 style="color: #1565c0; margin: 0;">📊 最终净利润 (27)</h4>
-                                    <h2 style="color: #1565c0; margin: 5px 0; font-weight: bold;">¥{zuizhong_jinglilun:,.2f}</h2>
-                                </div>
-                                """, unsafe_allow_html=True)
+                
                 else:
                     st.info("📝 暂无报表数据")
                     
@@ -1986,8 +2216,7 @@ def main():
         app_choice = st.selectbox(
             "选择功能模块",
             [
-                "门店查询系统", 
-                "财务填报系统", 
+                "门店查询系统 (含财务填报)", 
                 "财务管理系统", 
                 "批量上传系统", 
                 "权限管理系统"
@@ -2004,13 +2233,51 @@ def main():
             st.success("✅ 系统正常")
         else:
             st.error("❌ 连接异常")
+        
+        # 功能说明
+        st.markdown("---")
+        st.markdown("### 💡 功能说明")
+        
+        if app_choice == "门店查询系统 (含财务填报)":
+            st.info("""
+            **🔍 门店查询功能**
+            - 查询代码验证
+            - 历史报表查看
+            - 数据统计分析
+            
+            **💼 财务填报功能**
+            - 线下费用录入
+            - 实时财务计算
+            - 可视化运算看板
+            - Excel报表导出
+            """)
+        elif app_choice == "财务管理系统":
+            st.info("""
+            **👨‍💼 管理员专用**
+            - 提交情况汇总
+            - 批量数据导出
+            - 财务数据分析
+            - 图表可视化
+            """)
+        elif app_choice == "批量上传系统":
+            st.info("""
+            **📤 管理员专用**
+            - Excel文件批量上传
+            - 自动门店识别
+            - 数据预览处理
+            """)
+        elif app_choice == "权限管理系统":
+            st.info("""
+            **👥 管理员专用**
+            - 查询权限配置
+            - 门店信息管理
+            - 数据统计分析
+            """)
     
     # 主界面 - 连接实际功能
     try:
-        if app_choice == "门店查询系统":
+        if app_choice == "门店查询系统 (含财务填报)":
             create_store_query_app()
-        elif app_choice == "财务填报系统":
-            create_financial_report_app()
         elif app_choice == "财务管理系统":
             create_financial_admin_app()
         elif app_choice == "批量上传系统":
