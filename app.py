@@ -1,8 +1,8 @@
 # streamlit_app.py - 门店报表系统完整版
 """
 门店报表查询系统 - 完整功能单文件部署版本
-包含查询、上传、权限管理功能
-修复: 1.完全覆盖历史文件 2.修复表头消失问题 3.第41行第2个合计列应收金额
+包含查询、上传、权限管理、财务填报功能
+修复: 1.完全覆盖历史文件 2.修复表头消失问题 3.第41行第2个合计列应收金额 4.新增财务填报系统
 """
 
 import streamlit as st
@@ -114,6 +114,7 @@ class DatabaseManager:
             self.db['stores'].create_index([("store_code", 1)], background=True)
             self.db['permissions'].create_index([("query_code", 1)], background=True)
             self.db['reports'].create_index([("store_id", 1), ("report_month", -1)], background=True)
+            self.db['store_financial_reports'].create_index([("header.store_id", 1), ("header.period", 1)], unique=True)
         except Exception:
             pass
     
@@ -129,11 +130,6 @@ class DatabaseManager:
 @st.cache_resource
 def get_db_manager():
     return DatabaseManager()
-
-# 清除缓存函数
-def clear_all_caches():
-    st.cache_resource.clear()
-    st.cache_data.clear()
 
 # 数据模型
 class StoreModel:
@@ -255,1193 +251,1729 @@ class PermissionModel:
             'status': kwargs.get('status', 'active')
         }
 
-# 批量上传器
-class BulkReportUploader:
-    """批量报表上传器"""
+# 财务报表数据模型
+class FinancialReportModel:
+    """财务报表数据模型"""
     
-    def __init__(self, db):
-        if db is None:
-            raise Exception("数据库连接失败")
-        self.db = db
-        self.stores_collection = self.db['stores']
-        self.reports_collection = self.db['reports']
-    
-    def normalize_store_name(self, sheet_name: str) -> str:
-        """标准化门店名称"""
-        name = sheet_name.strip()
-        name = name.replace('犀牛百货', '').replace('门店', '').replace('店', '')
-        name = name.replace('(', '').replace(')', '').replace('（', '').replace('）', '')
-        name = ''.join(name.split())
-        return name
-    
-    def find_or_create_store(self, sheet_name: str) -> Optional[Dict]:
-        """通过sheet名称查找门店，如果不存在则创建"""
-        normalized_name = self.normalize_store_name(sheet_name)
-        
-        # 查找现有门店
-        search_patterns = [
-            {"store_name": sheet_name},
-            {"store_name": {"$regex": normalized_name, "$options": "i"}},
-            {"aliases": {"$in": [sheet_name, normalized_name]}},
-        ]
-        
-        for pattern in search_patterns:
-            try:
-                store = self.stores_collection.find_one(pattern)
-                if store:
-                    return store
-            except Exception:
-                continue
-        
-        # 创建新门店
-        return self._create_store_from_sheet_name(sheet_name)
-    
-    def _create_store_from_sheet_name(self, sheet_name: str) -> Optional[Dict]:
-        """从工作表名称创建新门店"""
-        try:
-            store_data = StoreModel.create_store_document(
-                store_name=sheet_name.strip(),
-                aliases=[sheet_name.strip(), self.normalize_store_name(sheet_name)],
-                created_by='bulk_upload'
-            )
-            self.stores_collection.insert_one(store_data)
-            return store_data
-        except Exception as e:
-            st.error(f"创建门店失败: {e}")
-            return None
-    
-    def process_excel_file(self, file_buffer, report_month: str, clear_history: bool = True, progress_callback=None) -> Dict:
-        """处理Excel文件并上传报表数据"""
-        start_time = time.time()
-        result = {
-            'success_count': 0,
-            'failed_count': 0,
-            'errors': [],
-            'processed_stores': [],
-            'failed_stores': [],
-            'total_time': 0,
-            'cleared_count': 0
+    @staticmethod
+    def create_financial_report_document(store_id: str, store_name: str, period: str, admin_data: Dict = None) -> Dict:
+        """创建标准财务报表文档"""
+        return {
+            'header': {
+                'store_id': store_id,
+                'store_name': store_name,
+                'period': period,  # 格式：2024-12
+                'status': 'pending',  # pending/submitted
+                'created_at': datetime.now(),
+                'updated_at': datetime.now()
+            },
+            'admin_data': admin_data or {
+                '1': 0,   # 回款
+                '2': 0,   # 其他现金收入
+                '11': 0,  # 线上支出
+                '16': 0,  # 线上净利润
+                # 其他管理员预设数据...
+            },
+            'user_inputs': {
+                '18': 0,  # 工资
+                '19': 0,  # 房租
+                '20': 0,  # 水电费
+                '21': 0,  # 物业费
+                '22': 0,  # 其他费用1
+                '23': 0,  # 其他费用2
+                '24': 0,  # 其他费用3
+                '25': 0,  # 其他费用4
+                '26': 0,  # 其他费用5
+            },
+            'calculated_metrics': {},
+            'metadata': {
+                'created_at': datetime.now(),
+                'updated_at': datetime.now(),
+                'submitted_by': None,
+                'submission_time': None
+            }
         }
-        
-        try:
-            if progress_callback:
-                progress_callback(5, "准备上传，清理历史数据...")
-            
-            # 1. 完全清除历史数据
-            if clear_history:
-                try:
-                    clear_result = self.reports_collection.delete_many({'report_month': report_month})
-                    result['cleared_count'] = clear_result.deleted_count
-                    if progress_callback:
-                        progress_callback(10, f"已清除 {result['cleared_count']} 条历史数据")
-                except Exception as e:
-                    result['errors'].append(f"清除历史数据失败: {str(e)}")
-            
-            if progress_callback:
-                progress_callback(15, "正在读取Excel文件...")
-            
-            # 2. 读取Excel文件 - 以第2行为表头用于显示，第4行为表头用于财务提取
-            excel_data_display = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)  # header=1 表示第2行为表头用于显示
-            excel_data_financial = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)  # header=3 表示第4行为表头用于财务提取
-            total_sheets = len(excel_data_display)
-            
-            if progress_callback:
-                progress_callback(20, f"发现 {total_sheets} 个工作表，开始处理...")
-            
-            processed = 0
-            
-            for sheet_name in excel_data_display.keys():
-                try:
-                    processed += 1
-                    progress = 20 + (processed / total_sheets) * 70
-                    if progress_callback:
-                        progress_callback(progress, f"正在处理: {sheet_name}")
-                    
-                    store = self.find_or_create_store(sheet_name)
-                    if not store:
-                        result['failed_stores'].append({
-                            'store_name': sheet_name,
-                            'reason': '无法创建门店记录'
-                        })
-                        result['failed_count'] += 1
-                        continue
-                    
-                    # 3. 处理显示数据 - 使用第2行为表头
-                    df_display = excel_data_display[sheet_name]
-                    df_display_cleaned = df_display.dropna(axis=1, how='all')
-                    
-                    # 4. 处理财务数据 - 使用第4行为表头
-                    df_financial = excel_data_financial[sheet_name]
-                    df_financial_cleaned = df_financial.dropna(axis=1, how='all')
-                    
-                    if df_display_cleaned.empty:
-                        result['failed_stores'].append({
-                            'store_name': sheet_name,
-                            'reason': '显示数据为空'
-                        })
-                        result['failed_count'] += 1
-                        continue
-                    
-                    # 5. 转换显示数据格式，保存表头
-                    excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display_cleaned)
-                    
-                    # 6. 提取财务数据（使用第4行表头的数据）
-                    financial_data = self._extract_financial_data_v2(df_financial_cleaned)
-                    
-                    # 7. 创建报表文档
-                    report_data = ReportModel.create_report_document(
-                        store_data=store,
-                        report_month=report_month,
-                        excel_data=excel_data_dict,
-                        headers=headers,  # 保存第2行表头用于显示
-                        sheet_name=sheet_name,
-                        financial_data=financial_data,
-                        uploaded_by='bulk_upload'
-                    )
-                    
-                    # 8. 保存到数据库（不检查existing，因为已经清空）
-                    self.reports_collection.insert_one(report_data)
-                    
-                    result['success_count'] += 1
-                    result['processed_stores'].append({
-                        'sheet_name': sheet_name,
-                        'store_name': store['store_name'],
-                        'store_code': store['store_code']
-                    })
-                
-                except Exception as e:
-                    result['failed_stores'].append({
-                        'store_name': sheet_name,
-                        'reason': f"处理错误: {str(e)}"
-                    })
-                    result['failed_count'] += 1
-                    result['errors'].append(f"{sheet_name}: {str(e)}")
-            
-            if progress_callback:
-                progress_callback(100, "上传完成！")
-            
-        except Exception as e:
-            result['errors'].append(f"文件处理失败: {str(e)}")
-        
-        result['total_time'] = time.time() - start_time
-        return result
     
-    def _extract_financial_data_v2(self, df: pd.DataFrame) -> Dict:
-        """改进的财务数据提取 - 第4行为表头，查找合计列，从第37行提取总部应收未收金额"""
-        financial_data = {
-            'revenue': {},
-            'cost': {},
-            'profit': {},
-            'receivables': {},
-            'other_metrics': {}
-        }
-        
+    @staticmethod
+    def calculate_financial_metrics(admin_data: Dict, user_inputs: Dict) -> Dict:
+        """计算财务指标"""
         try:
-            # 1. 查找合计列
-            total_col_indices = []
-            
-            for col_idx, col_name in enumerate(df.columns):
-                col_str = str(col_name).lower().strip()
-                if any(keyword in col_str for keyword in [
-                    '合计', 'total', '总计', '小计', 'sum', '汇总',
-                    '金额', '总金额', '合计金额', '小计金额',
-                    '总额', '总和', '累计', '统计'
-                ]):
-                    total_col_indices.append(col_idx)
-            
-            # 如果没有找到合计列，按数值含量智能识别
-            if not total_col_indices:
-                numeric_counts = []
-                for col_idx in range(len(df.columns)):
-                    try:
-                        numeric_count = df.iloc[:, col_idx].apply(lambda x: pd.to_numeric(x, errors='coerce')).notna().sum()
-                        numeric_counts.append((col_idx, numeric_count))
-                    except:
-                        numeric_counts.append((col_idx, 0))
-                
-                # 按数字含量排序，取前2个作为合计列
-                numeric_counts.sort(key=lambda x: x[1], reverse=True)
-                if len(numeric_counts) >= 2:
-                    total_col_indices = [numeric_counts[0][0], numeric_counts[1][0]]
-            
-            # 调试信息：记录列识别结果
-            financial_data['other_metrics']['所有列名'] = [str(col) for col in df.columns]
-            financial_data['other_metrics']['合计列位置'] = str(total_col_indices)
-            financial_data['other_metrics']['合计列数量'] = len(total_col_indices)
-            if total_col_indices:
-                financial_data['other_metrics']['合计列名称'] = [str(df.columns[i]) for i in total_col_indices]
-            
-            # 2. 直接从第37行第2个合计列提取总部应收未收金额
-            if len(df) >= 37 and len(total_col_indices) >= 2:
-                target_row_index = 36  # 第37行（索引36，因为第4行为表头）
-                target_col_idx = total_col_indices[1]  # 使用第二个合计列
-                column_desc = f"第{target_col_idx+1}列(第2个合计列)"
-                
+            # 类型转换，确保所有值都是数字
+            def safe_float(value):
                 try:
-                    # 直接提取第37行第2个合计列的值
-                    raw_value = df.iloc[target_row_index, target_col_idx]
-                    financial_data['other_metrics']['第37行第2合计列原值'] = str(raw_value)
-                    financial_data['other_metrics']['使用列索引'] = target_col_idx
-                    financial_data['other_metrics']['使用列描述'] = column_desc
-                    
-                    parsed_value = pd.to_numeric(raw_value, errors='coerce')
-                    if not pd.isna(parsed_value):
-                        # 保存原始数值
-                        financial_data['receivables']['net_amount'] = float(parsed_value)
-                        financial_data['other_metrics']['总部应收未收金额'] = float(parsed_value)
-                        
-                        # 格式化为两位小数和千分位
-                        formatted_value = f"{parsed_value:,.2f}"
-                        financial_data['other_metrics']['格式化金额'] = formatted_value
-                        
-                        financial_data['other_metrics']['提取位置'] = f"第37行{column_desc}"
-                        financial_data['other_metrics']['提取成功'] = True
-                        financial_data['other_metrics']['数值处理'] = f"原始值: {parsed_value}, 格式化: {formatted_value}"
-                    else:
-                        financial_data['other_metrics']['提取失败原因'] = "数值转换失败"
-                        
-                except (ValueError, TypeError, IndexError) as e:
-                    financial_data['other_metrics']['提取失败原因'] = f"异常: {str(e)}"
-                    
-            else:
-                if len(df) < 37:
-                    financial_data['other_metrics']['提取失败原因'] = f"数据行数不足37行，实际{len(df)}行"
-                elif len(total_col_indices) < 2:
-                    financial_data['other_metrics']['提取失败原因'] = f"合计列数不足2列，实际{len(total_col_indices)}列"
+                    return float(value) if value is not None else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
             
-            # 3. 提取其他财务指标
-            for idx, row in df.iterrows():
-                try:
-                    if len(row) < 2:
-                        continue
-                    
-                    metric_name = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ""
-                    if not metric_name:
-                        continue
-                    
-                    # 查找数值（优先从合计列取值）
-                    value = None
-                    
-                    # 先从合计列查找
-                    for col_idx in total_col_indices:
-                        if col_idx < len(row):
-                            try:
-                                if pd.notna(row.iloc[col_idx]):
-                                    value = float(row.iloc[col_idx])
-                                    break
-                            except:
-                                continue
-                    
-                    # 如果合计列没有值，从其他列查找
-                    if value is None:
-                        for col_idx in range(1, len(row)):
-                            if col_idx not in total_col_indices:  # 跳过合计列
-                                try:
-                                    if pd.notna(row.iloc[col_idx]):
-                                        value = float(row.iloc[col_idx])
-                                        break
-                                except:
-                                    continue
-                    
-                    if value is None:
-                        value = 0
-                    
-                    # 4. 分类存储财务指标
-                    if any(keyword in metric_name for keyword in ['收入', '营收', '销售额', '营业收入']):
-                        if '线上' in metric_name:
-                            financial_data['revenue']['online_revenue'] = value
-                        elif '线下' in metric_name:
-                            financial_data['revenue']['offline_revenue'] = value
-                        elif '总' in metric_name or '合计' in metric_name:
-                            financial_data['revenue']['total_revenue'] = value
-                    
-                    elif any(keyword in metric_name for keyword in ['成本', '费用', '支出']):
-                        if '商品' in metric_name:
-                            financial_data['cost']['product_cost'] = value
-                        elif '租金' in metric_name or '房租' in metric_name:
-                            financial_data['cost']['rent_cost'] = value
-                        elif '人工' in metric_name or '工资' in metric_name:
-                            financial_data['cost']['labor_cost'] = value
-                    
-                    elif any(keyword in metric_name for keyword in ['利润', '盈利', '净利', '毛利']):
-                        if '毛利' in metric_name:
-                            financial_data['profit']['gross_profit'] = value
-                        elif '净利' in metric_name:
-                            financial_data['profit']['net_profit'] = value
-                    
-                    # 保存所有指标到other_metrics用于调试
-                    if metric_name and value != 0:
-                        financial_data['other_metrics'][f"第{idx+1}行_{metric_name}"] = value
-                
-                except:
-                    continue
+            # 提取管理员数据
+            huikuan = safe_float(admin_data.get('1', 0))  # 回款
+            xianshang_zhichu = safe_float(admin_data.get('11', 0))  # 线上支出  
+            xianshang_jinglilun = safe_float(admin_data.get('16', 0))  # 线上净利润
             
-        except Exception as e:
-            st.error(f"提取财务数据时出错: {e}")
-        
-        return financial_data
-
-# 权限管理器
-class PermissionManager:
-    """权限管理器"""
-    
-    def __init__(self, db):
-        if db is None:
-            raise Exception("数据库连接失败")
-        self.db = db
-        self.permissions_collection = self.db['permissions']
-        self.stores_collection = self.db['stores']
-    
-    def upload_permission_table(self, uploaded_file) -> Dict:
-        """上传权限表"""
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
+            # 提取用户输入数据
+            gongzi = safe_float(user_inputs.get('18', 0))  # 工资
+            fangzu = safe_float(user_inputs.get('19', 0))  # 房租
+            shuidian = safe_float(user_inputs.get('20', 0))  # 水电费
+            wuye = safe_float(user_inputs.get('21', 0))  # 物业费
+            qita1 = safe_float(user_inputs.get('22', 0))  # 其他费用1
+            qita2 = safe_float(user_inputs.get('23', 0))  # 其他费用2
+            qita3 = safe_float(user_inputs.get('24', 0))  # 其他费用3
+            qita4 = safe_float(user_inputs.get('25', 0))  # 其他费用4
+            qita5 = safe_float(user_inputs.get('26', 0))  # 其他费用5
             
-            # 自动识别列名
-            query_code_col = None
-            store_name_col = None
+            # 核心计算逻辑
+            # 15: 线上余额 = 回款 - 线上支出
+            xianshang_yue = huikuan - xianshang_zhichu
             
-            for col in df.columns:
-                col_str = str(col).lower().strip()
-                if any(keyword in col_str for keyword in ['查询编号', 'query', 'code', '编号', '代码', '查询码']):
-                    query_code_col = col
-                    break
+            # 17: 线下费用合计 = SUM(18至26项明细)
+            xianxia_feiyong = gongzi + fangzu + shuidian + wuye + qita1 + qita2 + qita3 + qita4 + qita5
             
-            for col in df.columns:
-                col_str = str(col).lower().strip()
-                if any(keyword in col_str for keyword in ['门店名称', 'store', '门店', '名称', 'name', 'shop']):
-                    store_name_col = col
-                    break
+            # 26: 最终余额 = 线上余额 - 线下费用合计
+            zuizhong_yue = xianshang_yue - xianxia_feiyong
             
-            if not query_code_col or not store_name_col:
-                if len(df.columns) >= 2:
-                    query_code_col = df.columns[0]
-                    store_name_col = df.columns[1]
-                else:
-                    return {"success": False, "message": "文件至少需要两列数据"}
+            # 27: 最终净利润 = 线上净利润 - 线下费用合计
+            zuizhong_jinglilun = xianshang_jinglilun - xianxia_feiyong
             
-            results = {
-                "success": True,
-                "processed": 0,
-                "created": 0,
-                "updated": 0,
-                "errors": [],
-                "detected_columns": {
-                    "query_code": str(query_code_col),
-                    "store_name": str(store_name_col)
-                }
+            return {
+                '15': xianshang_yue,      # 线上余额
+                '17': xianxia_feiyong,    # 线下费用合计
+                '26': zuizhong_yue,       # 最终余额
+                '27': zuizhong_jinglilun, # 最终净利润
             }
             
-            for _, row in df.iterrows():
-                try:
-                    query_code = str(row[query_code_col]).strip()
-                    store_name = str(row[store_name_col]).strip()
-                    
-                    if not query_code or not store_name or query_code == 'nan' or store_name == 'nan':
-                        continue
-                    
-                    store = self._find_or_create_store(store_name)
-                    if not store:
-                        results["errors"].append(f"无法处理门店: {store_name}")
-                        continue
-                    
-                    existing = self.permissions_collection.find_one({'query_code': query_code})
-                    
-                    permission_doc = PermissionModel.create_permission_document(
-                        query_code=query_code,
-                        store_data=store,
-                        created_at=existing.get('created_at') if existing else None,
-                        created_by=existing.get('created_by', 'upload') if existing else 'upload'
-                    )
-                    
-                    if existing:
-                        self.permissions_collection.replace_one(
-                            {'query_code': query_code},
-                            permission_doc
-                        )
-                        results["updated"] += 1
-                    else:
-                        self.permissions_collection.insert_one(permission_doc)
-                        results["created"] += 1
-                    
-                    results["processed"] += 1
-                
-                except Exception as e:
-                    results["errors"].append(f"处理行数据时出错: {str(e)}")
-            
-            return results
-            
         except Exception as e:
-            return {"success": False, "message": f"处理文件时出错: {str(e)}"}
+            st.error(f"财务计算错误: {e}")
+            return {
+                '15': 0,  # 线上余额
+                '17': 0,  # 线下费用合计
+                '26': 0,  # 最终余额
+                '27': 0,  # 最终净利润
+            }
+
+# 财务报表管理器
+class FinancialReportManager:
+    """财务报表管理器"""
     
-    def _find_or_create_store(self, store_name: str) -> Optional[Dict]:
-        """根据门店名称查找门店，如果不存在则创建"""
+    def __init__(self, db):
+        if db is None:
+            raise Exception("数据库连接失败")
+        self.db = db
+        self.reports_collection = self.db['store_financial_reports']
+        self.stores_collection = self.db['stores']
+        self._create_indexes()
+    
+    def _create_indexes(self):
+        """创建索引"""
         try:
-            # 精确匹配
-            store = self.stores_collection.find_one({'store_name': store_name})
-            if store:
-                return store
+            self.reports_collection.create_index([("header.store_id", 1), ("header.period", 1)], unique=True)
+            self.reports_collection.create_index([("header.status", 1)])
+            self.reports_collection.create_index([("header.period", 1)])
+        except Exception:
+            pass
+    
+    def create_or_update_report(self, store_id: str, store_name: str, period: str, 
+                              admin_data: Dict = None, user_inputs: Dict = None) -> bool:
+        """创建或更新财务报表"""
+        try:
+            # 查找现有报表
+            existing_report = self.reports_collection.find_one({
+                'header.store_id': store_id,
+                'header.period': period
+            })
             
-            # 模糊匹配
-            clean_name = store_name.replace('犀牛百货', '').replace('门店', '').replace('店', '').strip()
-            if clean_name:
-                stores = list(self.stores_collection.find({
-                    '$or': [
-                        {'store_name': {'$regex': clean_name, '$options': 'i'}},
-                        {'aliases': {'$in': [store_name, clean_name]}}
-                    ]
-                }))
-                if stores:
-                    return stores[0]
+            if existing_report:
+                # 更新现有报表
+                update_data = {'header.updated_at': datetime.now()}
+                
+                if admin_data:
+                    update_data['admin_data'] = admin_data
+                
+                if user_inputs:
+                    update_data['user_inputs'] = user_inputs
+                    # 重新计算指标
+                    calculated = FinancialReportModel.calculate_financial_metrics(
+                        existing_report.get('admin_data', {}), 
+                        user_inputs
+                    )
+                    update_data['calculated_metrics'] = calculated
+                
+                self.reports_collection.update_one(
+                    {'header.store_id': store_id, 'header.period': period},
+                    {'$set': update_data}
+                )
+            else:
+                # 创建新报表
+                report_doc = FinancialReportModel.create_financial_report_document(
+                    store_id=store_id,
+                    store_name=store_name,
+                    period=period,
+                    admin_data=admin_data
+                )
+                
+                if user_inputs:
+                    report_doc['user_inputs'] = user_inputs
+                
+                # 计算指标
+                calculated = FinancialReportModel.calculate_financial_metrics(
+                    report_doc['admin_data'],
+                    report_doc['user_inputs']
+                )
+                report_doc['calculated_metrics'] = calculated
+                
+                self.reports_collection.insert_one(report_doc)
             
-            # 创建新门店
-            store_data = StoreModel.create_store_document(
-                store_name=store_name,
-                created_by='permission_upload'
-            )
-            self.stores_collection.insert_one(store_data)
-            return store_data
+            return True
             
         except Exception as e:
-            st.error(f"查找门店时出错: {e}")
+            st.error(f"保存财务报表失败: {e}")
+            return False
+    
+    def submit_report(self, store_id: str, period: str, submitted_by: str) -> bool:
+        """提交财务报表"""
+        try:
+            result = self.reports_collection.update_one(
+                {'header.store_id': store_id, 'header.period': period},
+                {'$set': {
+                    'header.status': 'submitted',
+                    'metadata.submitted_by': submitted_by,
+                    'metadata.submission_time': datetime.now(),
+                    'header.updated_at': datetime.now()
+                }}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            st.error(f"提交报表失败: {e}")
+            return False
+    
+    def get_report(self, store_id: str, period: str) -> Optional[Dict]:
+        """获取财务报表"""
+        try:
+            return self.reports_collection.find_one({
+                'header.store_id': store_id,
+                'header.period': period
+            })
+        except Exception as e:
+            st.error(f"获取财务报表失败: {e}")
             return None
     
-    def get_all_permissions(self) -> List[Dict]:
-        """获取所有权限配置"""
+    def get_all_reports_by_period(self, period: str) -> List[Dict]:
+        """获取指定期间的所有报表"""
         try:
-            return list(self.permissions_collection.find().sort('query_code', 1))
+            return list(self.reports_collection.find({'header.period': period}))
         except Exception as e:
-            st.error(f"获取权限配置失败: {e}")
+            st.error(f"获取报表列表失败: {e}")
             return []
     
-    def delete_permission(self, query_code: str) -> bool:
-        """删除权限配置"""
+    def get_submission_summary(self, period: str) -> Dict:
+        """获取提交情况汇总"""
         try:
-            result = self.permissions_collection.delete_one({'query_code': query_code})
-            return result.deleted_count > 0
+            pipeline = [
+                {'$match': {'header.period': period}},
+                {'$group': {
+                    '_id': '$header.status',
+                    'count': {'$sum': 1},
+                    'stores': {'$push': {
+                        'store_id': '$header.store_id',
+                        'store_name': '$header.store_name',
+                        'updated_at': '$header.updated_at'
+                    }}
+                }}
+            ]
+            
+            results = list(self.reports_collection.aggregate(pipeline))
+            
+            summary = {
+                'pending': {'count': 0, 'stores': []},
+                'submitted': {'count': 0, 'stores': []},
+                'total': 0
+            }
+            
+            for result in results:
+                status = result['_id']
+                if status in summary:
+                    summary[status] = {
+                        'count': result['count'],
+                        'stores': result['stores']
+                    }
+                summary['total'] += result['count']
+            
+            return summary
+            
         except Exception as e:
-            st.error(f"删除权限配置失败: {e}")
-            return False
+            st.error(f"获取汇总信息失败: {e}")
+            return {'pending': {'count': 0, 'stores': []}, 'submitted': {'count': 0, 'stores': []}, 'total': 0}
 
-# 报表数据处理工具
-def rebuild_dataframe_with_headers(raw_data: List[Dict], headers: List[str]) -> pd.DataFrame:
-    """根据保存的表头重建DataFrame，解决表头消失问题，处理重复空白表头"""
-    if not raw_data or not headers:
-        return pd.DataFrame()
+# Excel 导出功能
+class ExcelExporter:
+    """Excel导出器"""
     
-    try:
-        # 重建数据矩阵
-        data_matrix = []
-        for row_data in raw_data:
-            row_values = []
-            for col_idx in range(len(headers)):
-                col_key = f"col_{col_idx}"
-                value = row_data.get(col_key, "")
-                row_values.append(value)
-            data_matrix.append(row_values)
+    @staticmethod
+    def create_financial_excel(report_data: Dict) -> io.BytesIO:
+        """创建财务报表Excel"""
+        try:
+            import xlsxwriter
+        except ImportError:
+            st.error("xlsxwriter未安装，无法导出Excel")
+            return None
+            
+        output = io.BytesIO()
+        workbook = xlsxwriter.Workbook(output)
+        worksheet = workbook.add_worksheet('财务报表')
         
-        # 处理重复的空白表头，创建唯一的pandas列名
-        unique_headers = []
-        display_headers = []  # 保存用于显示的原始表头
-        empty_count = 0
+        # 样式设置
+        header_format = workbook.add_format({
+            'bold': True,
+            'font_size': 14,
+            'align': 'center',
+            'valign': 'vcenter',
+            'bg_color': '#4CAF50',
+            'font_color': 'white',
+            'border': 1
+        })
         
-        for header in headers:
-            display_headers.append(header)  # 保存原始表头
-            if header == "":
-                unique_headers.append(f"_empty_{empty_count}")
-                empty_count += 1
-            else:
-                unique_headers.append(header)
+        data_format = workbook.add_format({
+            'align': 'right',
+            'num_format': '#,##0.00',
+            'border': 1
+        })
         
-        # 使用唯一表头创建DataFrame
-        df = pd.DataFrame(data_matrix, columns=unique_headers)
+        label_format = workbook.add_format({
+            'bold': True,
+            'align': 'left',
+            'border': 1
+        })
         
-        # 将显示用的表头存储为属性
-        df.attrs['display_headers'] = display_headers
+        # 写入报表数据
+        header = report_data.get('header', {})
+        admin_data = report_data.get('admin_data', {})
+        user_inputs = report_data.get('user_inputs', {})
+        calculated = report_data.get('calculated_metrics', {})
         
-        return df.fillna('')
-    
-    except Exception as e:
-        st.error(f"重建表格失败: {e}")
-        return pd.DataFrame()
+        # 标题
+        worksheet.merge_range('A1:D1', f"{header.get('store_name', '未知门店')} - {header.get('period', '未知期间')} 财务报表", header_format)
+        
+        # 数据行
+        row = 2
+        
+        # 管理员数据部分
+        worksheet.write(row, 0, "管理员预设数据", header_format)
+        row += 1
+        
+        admin_labels = {
+            '1': '回款',
+            '2': '其他现金收入', 
+            '11': '线上支出',
+            '16': '线上净利润'
+        }
+        
+        for key, value in admin_data.items():
+            if key in admin_labels:
+                worksheet.write(row, 0, admin_labels[key], label_format)
+                worksheet.write(row, 1, float(value), data_format)
+                row += 1
+        
+        # 计算指标
+        worksheet.write(row, 0, "线上余额", label_format)
+        worksheet.write(row, 1, calculated.get('15', 0), data_format)
+        row += 1
+        
+        # 空行
+        row += 1
+        
+        # 用户输入部分
+        worksheet.write(row, 0, "用户填报数据", header_format)
+        row += 1
+        
+        user_labels = {
+            '18': '工资',
+            '19': '房租',
+            '20': '水电费',
+            '21': '物业费',
+            '22': '其他费用1',
+            '23': '其他费用2',
+            '24': '其他费用3',
+            '25': '其他费用4',
+            '26': '其他费用5'
+        }
+        
+        for key, value in user_inputs.items():
+            if key in user_labels:
+                worksheet.write(row, 0, user_labels[key], label_format)
+                worksheet.write(row, 1, float(value), data_format)
+                row += 1
+        
+        # 计算结果
+        worksheet.write(row, 0, "线下费用合计", label_format)
+        worksheet.write(row, 1, calculated.get('17', 0), data_format)
+        row += 1
+        
+        # 空行
+        row += 1
+        
+        # 最终结果
+        worksheet.write(row, 0, "最终结果", header_format)
+        row += 1
+        
+        worksheet.write(row, 0, "最终余额", label_format)
+        worksheet.write(row, 1, calculated.get('26', 0), data_format)
+        row += 1
+        
+        worksheet.write(row, 0, "最终净利润", label_format)
+        worksheet.write(row, 1, calculated.get('27', 0), data_format)
+        
+        workbook.close()
+        output.seek(0)
+        return output
 
-# 应用界面
-def create_query_app():
-    """门店查询应用"""
-    # 居中显示标题
-    st.markdown("<h1 style='text-align: center;'>🔍 门店查询系统</h1>", unsafe_allow_html=True)
+# UI 组件函数
+def create_financial_report_app():
+    """财务填报界面"""
+    st.title("💼 财务填报系统")
     
+    # 获取数据库连接
     db_manager = get_db_manager()
     if not db_manager.is_connected():
-        st.error("数据库连接失败，请检查配置")
+        st.error("数据库连接失败，请联系管理员")
         return
     
     db = db_manager.get_database()
     
-    # 检查登录状态
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-    
-    if not st.session_state.authenticated:
-        # 居中显示登录区域
-        st.markdown("<h3 style='text-align: center;'>🔐 登录</h3>", unsafe_allow_html=True)
-        
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            query_code = st.text_input("", placeholder="请输入查询编号")
-            
-            if st.button("登录", use_container_width=True):
-                if query_code:
-                    try:
-                        permission = db['permissions'].find_one({'query_code': query_code})
-                        if permission:
-                            store = db['stores'].find_one({'_id': permission['store_id']})
-                            if store:
-                                st.session_state.authenticated = True
-                                st.session_state.store_info = store
-                                st.session_state.query_code = query_code
-                                st.success(f"登录成功！欢迎 {store['store_name']}")
-                                st.rerun()
-                            else:
-                                st.error("门店信息不存在")
-                        else:
-                            st.error("查询编号无效")
-                    except Exception as e:
-                        st.error(f"查询失败: {e}")
-                else:
-                    st.warning("请输入查询编号")
-    else:
-        # 已登录，显示报表
-        store_info = st.session_state.store_info
-        
-        with st.sidebar:
-            st.info(f"当前门店: {store_info['store_name']}")
-            if st.button("退出登录"):
-                st.session_state.authenticated = False
-                st.rerun()
-        
-        st.title(f"📊 {store_info['store_name']}")
-        
-        # 获取报表数据
-        try:
-            reports = list(db['reports'].find({'store_id': store_info['_id']}).sort('report_month', -1))
-            
-            if reports:
-                # 美化的应收未收看板
-                try:
-                    latest_report = reports[0]
-                    receivables = latest_report.get('financial_data', {}).get('receivables', {})
-                    amount = receivables.get('net_amount', 0)
-                    
-                    # 添加自定义CSS样式
-                    if amount < 0:
-                        # 负数：总部应退 - 蓝紫渐变
-                        abs_amount = abs(amount)
-                        st.markdown(f"""
-                        <div style="
-                            background: linear-gradient(135deg, #3F51B5, #5C6BC0, #7986CB);
-                            padding: 30px;
-                            border-radius: 15px;
-                            text-align: center;
-                            box-shadow: 0 8px 25px rgba(63, 81, 181, 0.4);
-                            margin: 20px 0;
-                            border: 3px solid #3F51B5;
-                        ">
-                            <div style="
-                                font-size: 42px;
-                                font-weight: bold;
-                                color: white;
-                                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-                                margin-bottom: 15px;
-                                letter-spacing: 2px;
-                            ">
-                                总部应退
-                            </div>
-                            <div style="
-                                font-size: 36px;
-                                font-weight: 900;
-                                color: white;
-                                text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
-                                font-family: 'Arial Black', sans-serif;
-                            ">
-                                ¥{abs_amount:,.2f}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    elif amount > 0:
-                        # 正数：门店应返 - 橙色和暖红渐变
-                        st.markdown(f"""
-                        <div style="
-                            background: linear-gradient(135deg, #FF8F00, #FFC107, #FFD54F);
-                            padding: 30px;
-                            border-radius: 15px;
-                            text-align: center;
-                            box-shadow: 0 8px 25px rgba(255, 143, 0, 0.4);
-                            margin: 20px 0;
-                            border: 3px solid #FF8F00;
-                        ">
-                            <div style="
-                                font-size: 42px;
-                                font-weight: bold;
-                                color: white;
-                                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-                                margin-bottom: 15px;
-                                letter-spacing: 2px;
-                            ">
-                                门店应返
-                            </div>
-                            <div style="
-                                font-size: 36px;
-                                font-weight: 900;
-                                color: white;
-                                text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
-                                font-family: 'Arial Black', sans-serif;
-                            ">
-                                ¥{amount:,.2f}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        # 零：已结清 - 商务银灰渐变 (象征平衡与稳定)
-                        st.markdown(f"""
-                        <div style="
-                            background: linear-gradient(135deg, #546E7A, #78909C, #B0BEC5);
-                            padding: 30px;
-                            border-radius: 15px;
-                            text-align: center;
-                            box-shadow: 0 8px 25px rgba(84, 110, 122, 0.3);
-                            margin: 20px 0;
-                            border: 3px solid #546E7A;
-                        ">
-                            <div style="
-                                font-size: 42px;
-                                font-weight: bold;
-                                color: white;
-                                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-                                margin-bottom: 15px;
-                                letter-spacing: 2px;
-                            ">
-                                已结清
-                            </div>
-                            <div style="
-                                font-size: 36px;
-                                font-weight: 900;
-                                color: white;
-                                text-shadow: 3px 3px 6px rgba(0,0,0,0.4);
-                                font-family: 'Arial Black', sans-serif;
-                            ">
-                                ¥0.00
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                except Exception:
-                    # 错误状态的看板 - 商务红棕渐变 (象征警示)
-                    st.markdown(f"""
-                    <div style="
-                        background: linear-gradient(135deg, #D32F2F, #E57373, #FFCDD2);
-                        padding: 30px;
-                        border-radius: 15px;
-                        text-align: center;
-                        box-shadow: 0 8px 25px rgba(211, 47, 47, 0.3);
-                        margin: 20px 0;
-                        border: 3px solid #D32F2F;
-                    ">
-                        <div style="
-                            font-size: 42px;
-                            font-weight: bold;
-                            color: white;
-                            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-                            margin-bottom: 15px;
-                            letter-spacing: 2px;
-                        ">
-                            暂无数据
-                        </div>
-                        <div style="
-                            font-size: 32px;
-                            font-weight: 600;
-                            color: white;
-                            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-                            font-family: Arial, sans-serif;
-                        ">
-                            请联系管理员
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                # 报表数据展示 - 修复表头问题
-                st.subheader("报表数据")
-                
-                try:
-                    latest_report = reports[0]
-                    raw_data = latest_report.get('raw_excel_data', [])
-                    headers = latest_report.get('table_headers', [])
-                    
-                    if raw_data and headers:
-                        # 使用保存的表头重建DataFrame
-                        df = rebuild_dataframe_with_headers(raw_data, headers)
-                        
-                        if not df.empty:
-                            # 格式化数字列：两位小数和千分位
-                            df_display = df.copy()
-                            
-                            # 获取原始显示表头
-                            display_headers = df.attrs.get('display_headers', df.columns.tolist())
-                            
-                            # 为显示创建新的DataFrame，使用原始表头但要处理重复问题
-                            display_df = df_display.copy()
-                            
-                            # 格式化数字列
-                            for col in df_display.columns:
-                                # 尝试将每列转换为数字并格式化
-                                try:
-                                    # 检查列是否包含数字
-                                    numeric_series = pd.to_numeric(df_display[col], errors='coerce')
-                                    # 如果超过30%的值是数字，就格式化这一列
-                                    if numeric_series.notna().sum() > len(df_display) * 0.3:
-                                        # 格式化数字列
-                                        formatted_values = []
-                                        for i, val in enumerate(df_display[col]):
-                                            try:
-                                                num_val = pd.to_numeric(val, errors='coerce')
-                                                if pd.notna(num_val):
-                                                    formatted_values.append(f"{num_val:,.2f}")
-                                                else:
-                                                    formatted_values.append(str(val) if pd.notna(val) else "")
-                                            except:
-                                                formatted_values.append(str(val) if pd.notna(val) else "")
-                                        display_df[col] = formatted_values
-                                except:
-                                    # 如果转换失败，保持原样
-                                    continue
-                            
-                            # 显示格式化后的只读表格
-                            # 为了正确显示空白列名，使用st.table而不是st.dataframe
-                            
-                            # 获取原始显示表头
-                            display_headers = df.attrs.get('display_headers', df.columns.tolist())
-                            
-                            # 创建用于显示的HTML表格
-                            html_table = "<div style='overflow-x: auto;'><table border='1' style='border-collapse: collapse; width: 100%;'>"
-                            
-                            # 添加表头行
-                            html_table += "<tr style='background-color: #f0f0f0;'>"
-                            for header in display_headers:
-                                if header == "":
-                                    html_table += "<th style='padding: 8px; text-align: center; min-width: 100px;'>&nbsp;</th>"
-                                else:
-                                    html_table += f"<th style='padding: 8px; text-align: center;'>{header}</th>"
-                            html_table += "</tr>"
-                            
-                            # 添加数据行（最多显示100行）
-                            max_rows = min(100, len(display_df))
-                            for i in range(max_rows):
-                                html_table += "<tr>"
-                                for col in display_df.columns:
-                                    value = display_df.iloc[i][col]
-                                    html_table += f"<td style='padding: 8px; text-align: center;'>{value}</td>"
-                                html_table += "</tr>"
-                            
-                            html_table += "</table></div>"
-                            
-                            # 显示HTML表格
-                            st.markdown(html_table, unsafe_allow_html=True)
-                            
-                            # 如果数据超过100行，显示提示
-                            if len(display_df) > 100:
-                                st.info(f"表格显示前100行，完整数据共{len(display_df)}行。请下载Excel查看完整数据。")
-                            
-                            # 提供Excel下载功能
-                            buffer = io.BytesIO()
-                            try:
-                                # 为Excel下载创建带有原始表头的DataFrame
-                                download_df = df.copy()
-                                display_headers = df.attrs.get('display_headers', df.columns.tolist())
-                                
-                                # 使用pandas的ExcelWriter，但处理空白列名
-                                excel_headers = []
-                                for i, header in enumerate(display_headers):
-                                    if header == "":
-                                        excel_headers.append(f"_col_{i}")  # 临时列名
-                                    else:
-                                        excel_headers.append(header)
-                                
-                                # 创建临时DataFrame用于导出
-                                temp_df = download_df.copy()
-                                temp_df.columns = excel_headers
-                                
-                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                    temp_df.to_excel(writer, index=False, sheet_name=store_info['store_name'][:31])
-                                    
-                                    # 获取工作簿和工作表
-                                    workbook = writer.book
-                                    worksheet = writer.sheets[store_info['store_name'][:31]]
-                                    
-                                    # 手动设置表头为空白（如果原来是空的）
-                                    for col_idx, (original_header, excel_header) in enumerate(zip(display_headers, excel_headers)):
-                                        if original_header == "":
-                                            # 设置表头单元格为空白
-                                            worksheet.cell(row=1, column=col_idx + 1).value = ""
-                            except Exception as e:
-                                st.error(f"Excel生成错误: {e}")
-                                # fallback: 使用简化方式
-                                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                                    df.to_excel(writer, index=False, sheet_name=store_info['store_name'][:31])
-                            
-                            st.download_button(
-                                label="📥 下载完整报表 (Excel)",
-                                data=buffer.getvalue(),
-                                file_name=f"{store_info['store_name']}_{latest_report['report_month']}_报表.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        else:
-                            st.info("报表数据格式错误")
-                    else:
-                        st.info("暂无报表数据")
-                        
-                except Exception as e:
-                    st.error(f"数据显示错误: {e}")
-                    
-                    # 显示调试信息
-                    with st.expander("调试信息"):
-                        st.write("原始数据预览:", latest_report.get('raw_excel_data', [])[:5])
-                        st.write("表头信息:", latest_report.get('table_headers', []))
-            else:
-                st.info("暂无报表数据")
-        except Exception as e:
-            st.error(f"查询报表失败: {e}")
-
-def create_upload_app():
-    """批量上传应用"""
-    st.title("📤 批量上传系统")
-    
-    db_manager = get_db_manager()
-    if not db_manager.is_connected():
-        st.error("数据库连接失败，请检查配置")
+    # 初始化财务报表管理器
+    try:
+        financial_manager = FinancialReportManager(db)
+    except Exception as e:
+        st.error(f"初始化财务管理器失败: {e}")
         return
     
-    # 管理员验证
+    # 侧边栏 - 基本信息
+    with st.sidebar:
+        st.header("📝 填报信息")
+        
+        # 门店选择
+        stores_collection = db['stores']
+        try:
+            stores = list(stores_collection.find({'status': 'active'}))
+            if not stores:
+                st.warning("未找到可用门店，请联系管理员添加门店")
+                return
+                
+            store_options = {store['store_name']: store for store in stores}
+            selected_store_name = st.selectbox("选择门店", list(store_options.keys()))
+            selected_store = store_options[selected_store_name]
+        except Exception as e:
+            st.error(f"获取门店列表失败: {e}")
+            return
+        
+        # 期间选择
+        current_date = datetime.now()
+        default_period = current_date.strftime("%Y-%m")
+        period = st.text_input("报告期间 (YYYY-MM)", value=default_period)
+        
+        if not re.match(r'^\d{4}-\d{2}$', period):
+            st.error("期间格式错误，请使用YYYY-MM格式")
+            return
+    
+    # 获取或创建报表
+    report = financial_manager.get_report(selected_store['_id'], period)
+    if not report:
+        # 创建新报表（仅创建结构，不保存）
+        report = FinancialReportModel.create_financial_report_document(
+            selected_store['_id'], 
+            selected_store['store_name'], 
+            period
+        )
+    
+    # 主界面
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.header("📊 财务数据填报")
+        
+        # 管理员预设数据（只读显示）
+        with st.expander("📋 管理员预设数据", expanded=True):
+            admin_data = report.get('admin_data', {})
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("回款", f"¥{admin_data.get('1', 0):,.2f}")
+                st.metric("线上支出", f"¥{admin_data.get('11', 0):,.2f}")
+            
+            with col_b:
+                st.metric("其他现金收入", f"¥{admin_data.get('2', 0):,.2f}")
+                st.metric("线上净利润", f"¥{admin_data.get('16', 0):,.2f}")
+            
+            # 计算线上余额
+            calculated = report.get('calculated_metrics', {})
+            if calculated:
+                st.metric("线上余额", f"¥{calculated.get('15', 0):,.2f}", 
+                         help="回款 - 线上支出")
+        
+        # 用户填报表单
+        with st.form("financial_form", clear_on_submit=False):
+            st.subheader("✏️ 线下费用填报")
+            
+            user_inputs = report.get('user_inputs', {})
+            
+            col1_form, col2_form = st.columns(2)
+            
+            with col1_form:
+                gongzi = st.number_input("工资", min_value=0.0, value=float(user_inputs.get('18', 0)), format="%.2f", key="input_18")
+                fangzu = st.number_input("房租", min_value=0.0, value=float(user_inputs.get('19', 0)), format="%.2f", key="input_19")
+                shuidian = st.number_input("水电费", min_value=0.0, value=float(user_inputs.get('20', 0)), format="%.2f", key="input_20")
+                wuye = st.number_input("物业费", min_value=0.0, value=float(user_inputs.get('21', 0)), format="%.2f", key="input_21")
+                qita1 = st.number_input("其他费用1", min_value=0.0, value=float(user_inputs.get('22', 0)), format="%.2f", key="input_22")
+            
+            with col2_form:
+                qita2 = st.number_input("其他费用2", min_value=0.0, value=float(user_inputs.get('23', 0)), format="%.2f", key="input_23")
+                qita3 = st.number_input("其他费用3", min_value=0.0, value=float(user_inputs.get('24', 0)), format="%.2f", key="input_24")
+                qita4 = st.number_input("其他费用4", min_value=0.0, value=float(user_inputs.get('25', 0)), format="%.2f", key="input_25")
+                qita5 = st.number_input("其他费用5", min_value=0.0, value=float(user_inputs.get('26', 0)), format="%.2f", key="input_26")
+            
+            # 实时计算显示（在表单内）
+            current_total = gongzi + fangzu + shuidian + wuye + qita1 + qita2 + qita3 + qita4 + qita5
+            
+            st.markdown("### 📊 **实时计算预览**")
+            col_calc1, col_calc2 = st.columns(2)
+            
+            with col_calc1:
+                st.markdown(f"""
+                <div style="background-color: #e8f4f8; padding: 12px; border-radius: 8px; border-left: 4px solid #17a2b8;">
+                    <strong>(17) 线下费用合计</strong><br/>
+                    <span style="font-size: 18px; color: #17a2b8; font-weight: bold;">¥{current_total:,.2f}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            admin_data = report.get('admin_data', {})
+            xianshang_yue = admin_data.get('1', 0) - admin_data.get('11', 0)
+            current_final = xianshang_yue - current_total
+            current_profit = admin_data.get('16', 0) - current_total
+            
+            with col_calc2:
+                st.markdown(f"""
+                <div style="background-color: #f0f8e8; padding: 12px; border-radius: 8px; border-left: 4px solid #28a745;">
+                    <strong>(26) 最终余额</strong><br/>
+                    <span style="font-size: 18px; color: #28a745; font-weight: bold;">¥{current_final:,.2f}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # 表单按钮
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                save_btn = st.form_submit_button("💾 保存草稿", type="secondary")
+            
+            with col_btn2:
+                submit_btn = st.form_submit_button("✅ 正式提交", type="primary")
+            
+            # 处理表单提交
+            if save_btn or submit_btn:
+                new_user_inputs = {
+                    '18': gongzi, '19': fangzu, '20': shuidian, '21': wuye,
+                    '22': qita1, '23': qita2, '24': qita3, '25': qita4, '26': qita5
+                }
+                
+                # 保存数据
+                success = financial_manager.create_or_update_report(
+                    selected_store['_id'], 
+                    selected_store['store_name'], 
+                    period,
+                    user_inputs=new_user_inputs
+                )
+                
+                if success:
+                    if submit_btn:
+                        # 正式提交
+                        submit_success = financial_manager.submit_report(
+                            selected_store['_id'], 
+                            period, 
+                            selected_store_name
+                        )
+                        if submit_success:
+                            st.success("✅ 报表已正式提交！")
+                            st.balloons()
+                        else:
+                            st.error("❌ 提交失败")
+                    else:
+                        st.success("✅ 草稿已保存！")
+                    
+                    # 刷新页面数据
+                    st.rerun()
+                else:
+                    st.error("❌ 保存失败")
+    
+    with col2:
+        st.header("📈 实时预览")
+        
+        # 重新获取最新数据用于预览
+        latest_report = financial_manager.get_report(selected_store['_id'], period)
+        if latest_report:
+            admin_data = latest_report.get('admin_data', {})
+            user_inputs = latest_report.get('user_inputs', {})
+            calculated = latest_report.get('calculated_metrics', {})
+            
+            # 实时计算指标
+            huikuan = admin_data.get('1', 0)
+            xianshang_zhichu = admin_data.get('11', 0)
+            xianshang_jinglilun = admin_data.get('16', 0)
+            
+            xianxia_total = sum(user_inputs.values())
+            xianshang_yue = huikuan - xianshang_zhichu
+            zuizhong_yue = xianshang_yue - xianxia_total
+            zuizhong_jinglilun = xianshang_jinglilun - xianxia_total
+            
+            # 关键指标卡片（加粗显示重要项目）
+            st.markdown("### 🎯 **关键财务指标**")
+            
+            # 最终余额和净利润（关键结果项）
+            col_key1, col_key2 = st.columns(2)
+            with col_key1:
+                st.markdown(f"""
+                <div style="background-color: #e8f5e8; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745;">
+                    <h4 style="color: #155724; margin: 0;">💰 最终余额 (26)</h4>
+                    <h2 style="color: #155724; margin: 5px 0; font-weight: bold;">¥{zuizhong_yue:,.2f}</h2>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_key2:
+                st.markdown(f"""
+                <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1976d2;">
+                    <h4 style="color: #1565c0; margin: 0;">📊 最终净利润 (27)</h4>
+                    <h2 style="color: #1565c0; margin: 5px 0; font-weight: bold;">¥{zuizhong_jinglilun:,.2f}</h2>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # 其他重要指标
+            st.markdown("### 📋 计算详情")
+            st.metric("(17) 线下费用合计", f"¥{xianxia_total:,.2f}")
+            st.metric("(15) 线上余额", f"¥{xianshang_yue:,.2f}")
+            
+            # 报表状态
+            status = latest_report.get('header', {}).get('status', 'pending')
+            if status == 'submitted':
+                st.success("✅ 已提交")
+            else:
+                st.info("📝 草稿状态")
+            
+            # 导出Excel
+            if st.button("📊 导出Excel", use_container_width=True):
+                excel_file = ExcelExporter.create_financial_excel(latest_report)
+                if excel_file:
+                    st.download_button(
+                        label="⬇️ 下载Excel文件",
+                        data=excel_file,
+                        file_name=f"{selected_store['store_name']}_{period}_财务报表.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+    
+    # 页面底部 - 可视化运算看板
+    st.markdown("---")
+    st.markdown("## 📊 财务运算可视化看板")
+    
+    # 勾稽关系提醒
+    st.markdown("""
+    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 10px; padding: 15px; margin: 10px 0;">
+        <h4 style="color: #856404; margin: 0;">⚠️ 重要勾稽关系</h4>
+        <p style="color: #856404; margin: 5px 0; font-weight: bold;">
+            表一(9) ≡ 表二(11) &nbsp;&nbsp;|&nbsp;&nbsp; 表一(14) ≡ 表二(12)
+        </p>
+        <small style="color: #856404;">请确保两个表格对应项目数值一致</small>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 获取当前数据用于可视化
+    current_admin_data = report.get('admin_data', {})
+    current_user_inputs = report.get('user_inputs', {})
+    
+    # 实时计算所有指标
+    huikuan_current = current_admin_data.get('1', 0)
+    xianshang_zhichu_current = current_admin_data.get('11', 0)
+    xianshang_jinglilun_current = current_admin_data.get('16', 0)
+    xianxia_total_current = sum(current_user_inputs.values())
+    xianshang_yue_current = huikuan_current - xianshang_zhichu_current
+    zuizhong_yue_current = xianshang_yue_current - xianxia_total_current
+    zuizhong_jinglilun_current = xianshang_jinglilun_current - xianxia_total_current
+    
+    # 创建两个看板
+    col_cash, col_profit = st.columns(2)
+    
+    with col_cash:
+        st.markdown("""
+        <div style="background-color: #e8f5e8; border: 2px solid #28a745; border-radius: 15px; padding: 20px;">
+            <h3 style="color: #155724; text-align: center; margin: 0;">🟢 现金表运算</h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 现金表流程图
+        st.markdown(f"""
+        <div style="background-color: #f8fff8; padding: 20px; border-radius: 10px; margin: 10px 0;">
+            <div style="text-align: center;">
+                <div style="background-color: #28a745; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                    <strong>(1) 回款</strong><br/>¥{huikuan_current:,.2f}
+                </div>
+                <div style="font-size: 20px; margin: 10px;">➖</div>
+                <div style="background-color: #6c757d; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                    <strong>(11) 线上支出</strong><br/>¥{xianshang_zhichu_current:,.2f}
+                </div>
+                <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                <div style="background-color: #17a2b8; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                    <strong>(15) 线上余额</strong><br/>¥{xianshang_yue_current:,.2f}
+                </div>
+                <div style="font-size: 20px; margin: 10px;">➖</div>
+                <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                    <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total_current:,.2f}
+                </div>
+                <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                <div style="background-color: #dc3545; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
+                    <strong>(26) 最终余额</strong><br/>¥{zuizhong_yue_current:,.2f}
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col_profit:
+        st.markdown("""
+        <div style="background-color: #e3f2fd; border: 2px solid #1976d2; border-radius: 15px; padding: 20px;">
+            <h3 style="color: #1565c0; text-align: center; margin: 0;">🔵 利润表运算</h3>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 利润表流程图
+        st.markdown(f"""
+        <div style="background-color: #f8feff; padding: 20px; border-radius: 10px; margin: 10px 0;">
+            <div style="text-align: center;">
+                <div style="background-color: #1976d2; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                    <strong>(16) 线上净利润</strong><br/>¥{xianshang_jinglilun_current:,.2f}
+                </div>
+                <div style="font-size: 20px; margin: 10px;">➖</div>
+                <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                    <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total_current:,.2f}
+                </div>
+                <div style="font-size: 14px; color: #6c757d; margin: 10px;">
+                    SUM(18至26项明细)
+                </div>
+                <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                <div style="background-color: #28a745; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
+                    <strong>(27) 最终净利润</strong><br/>¥{zuizhong_jinglilun_current:,.2f}
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # 明细项目展示
+    st.markdown("### 📝 线下费用明细 (18-26项)")
+    detail_cols = st.columns(3)
+    
+    detail_items = [
+        ("18", "工资", current_user_inputs.get('18', 0)),
+        ("19", "房租", current_user_inputs.get('19', 0)),
+        ("20", "水电费", current_user_inputs.get('20', 0)),
+        ("21", "物业费", current_user_inputs.get('21', 0)),
+        ("22", "其他费用1", current_user_inputs.get('22', 0)),
+        ("23", "其他费用2", current_user_inputs.get('23', 0)),
+        ("24", "其他费用3", current_user_inputs.get('24', 0)),
+        ("25", "其他费用4", current_user_inputs.get('25', 0)),
+        ("26", "其他费用5", current_user_inputs.get('26', 0))
+    ]
+    
+    for i, (code, name, value) in enumerate(detail_items):
+        with detail_cols[i % 3]:
+            st.markdown(f"""
+            <div style="background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 8px; margin: 2px;">
+                <small style="color: #6c757d;">({code})</small>
+                <div style="font-weight: bold;">{name}</div>
+                <div style="color: #495057;">¥{value:,.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+def create_financial_admin_app():
+    """财务管理界面"""
+    st.title("👨‍💼 财务管理系统")
+    
+    # 管理员密码验证
     if 'admin_authenticated' not in st.session_state:
         st.session_state.admin_authenticated = False
     
     if not st.session_state.admin_authenticated:
-        st.subheader("🔐 管理员登录")
-        
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            password = st.text_input("管理员密码", type="password")
+        with st.form("admin_login"):
+            st.subheader("🔐 管理员登录")
+            password = st.text_input("请输入管理员密码", type="password")
+            login_btn = st.form_submit_button("登录")
             
-            if st.button("登录", use_container_width=True):
-                if password == ConfigManager.get_admin_password():
+            if login_btn:
+                admin_password = ConfigManager.get_admin_password()
+                if password == admin_password:
                     st.session_state.admin_authenticated = True
-                    st.success("管理员登录成功！")
+                    st.success("✅ 登录成功！")
                     st.rerun()
                 else:
-                    st.error("密码错误")
+                    st.error("❌ 密码错误")
         return
     
-    db = db_manager.get_database()
-    
-    try:
-        uploader = BulkReportUploader(db)
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader("上传设置")
-            
-            # 月份选择
-            report_month = st.text_input(
-                "报表月份",
-                value=datetime.now().strftime("%Y-%m"),
-                help="格式：YYYY-MM，例如：2024-12"
-            )
-            
-            # 清除历史数据选项
-            clear_history = st.checkbox(
-                "🗑️ 完全覆盖历史数据", 
-                value=True,
-                help="勾选后将清除该月份的所有历史数据，确保数据一致性"
-            )
-            
-            if clear_history:
-                st.warning("⚠️ 将清除该月份所有历史数据，上传的新文件将完全替换旧数据")
-            
-            # 文件上传
-            uploaded_file = st.file_uploader(
-                "选择Excel文件",
-                type=['xlsx', 'xls'],
-                help="选择包含所有门店报表的Excel文件，每个工作表对应一个门店"
-            )
-            
-            if uploaded_file and report_month:
-                if st.button("开始上传", type="primary", use_container_width=True):
-                    # 进度显示
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    def update_progress(progress, message):
-                        progress_bar.progress(progress / 100)
-                        status_text.text(message)
-                    
-                    # 处理文件
-                    result = uploader.process_excel_file(
-                        uploaded_file, 
-                        report_month, 
-                        clear_history=clear_history,
-                        progress_callback=update_progress
-                    )
-                    
-                    # 显示结果
-                    st.subheader("📊 上传结果")
-                    
-                    # 结果统计
-                    col_cleared, col_success, col_failed, col_time = st.columns(4)
-                    with col_cleared:
-                        st.metric("🗑️ 清理历史", result['cleared_count'])
-                    with col_success:
-                        st.metric("✅ 成功上传", result['success_count'])
-                    with col_failed:
-                        st.metric("❌ 失败数量", result['failed_count'])
-                    with col_time:
-                        st.metric("⏱️ 总耗时", f"{result['total_time']:.2f}s")
-                    
-                    # 成功信息
-                    if result['success_count'] > 0:
-                        st.success(f"✅ 成功处理 {result['success_count']} 个门店的数据")
-                        
-                        if result['processed_stores']:
-                            with st.expander("查看成功上传的门店"):
-                                success_df = pd.DataFrame(result['processed_stores'])
-                                st.dataframe(success_df, use_container_width=True)
-                        
-                        # 显示应收未收金额提取调试信息
-                        with st.expander("🔧 应收金额提取调试信息"):
-                            try:
-                                # 获取一个示例报表的调试信息
-                                sample_report = db['reports'].find_one({'report_month': report_month})
-                                if sample_report:
-                                    debug_info = sample_report.get('financial_data', {}).get('other_metrics', {})
-                                    if debug_info:
-                                        for key, value in debug_info.items():
-                                            st.write(f"**{key}:** {value}")
-                                    else:
-                                        st.write("无调试信息")
-                                    
-                                    # 显示表头处理信息
-                                    headers = sample_report.get('table_headers', [])
-                                    st.write("**处理后的表头:**")
-                                    for i, h in enumerate(headers):
-                                        if h == "":
-                                            st.write(f"列 {i}: [空白] (长度: {len(h)})")
-                                        else:
-                                            st.write(f"列 {i}: '{h}' (长度: {len(h)})")
-                                else:
-                                    st.write("未找到报表数据")
-                            except Exception as e:
-                                st.write(f"获取调试信息失败: {e}")
-                    
-                    # 失败信息
-                    if result['failed_count'] > 0:
-                        st.error(f"❌ {result['failed_count']} 个门店上传失败")
-                        
-                        if result['failed_stores']:
-                            with st.expander("查看失败详情"):
-                                failed_df = pd.DataFrame(result['failed_stores'])
-                                st.dataframe(failed_df, use_container_width=True)
-                    
-                    # 错误信息
-                    if result['errors']:
-                        with st.expander("查看错误详情"):
-                            for error in result['errors']:
-                                st.error(error)
-                    
-                    progress_bar.empty()
-                    status_text.empty()
-        
-        with col2:
-            st.subheader("📈 系统统计")
-            
-            try:
-                stores_count = db['stores'].count_documents({})
-                reports_count = db['reports'].count_documents({})
-                permissions_count = db['permissions'].count_documents({})
-                
-                st.metric("🏪 门店总数", stores_count)
-                st.metric("📋 报表总数", reports_count)
-                st.metric("🔑 权限总数", permissions_count)
-                
-                # 当月统计
-                current_month_reports = db['reports'].count_documents({
-                    'report_month': datetime.now().strftime("%Y-%m")
-                })
-                st.metric("📅 本月报表", current_month_reports)
-                
-                st.subheader("🏪 门店管理")
-                if st.button("查看门店列表"):
-                    stores = list(db['stores'].find({}, {'store_name': 1, 'store_code': 1, 'region': 1}))
-                    if stores:
-                        stores_df = pd.DataFrame(stores)
-                        st.dataframe(stores_df[['store_name', 'store_code', 'region']], use_container_width=True)
-                    else:
-                        st.info("暂无门店数据")
-                        
-            except Exception as e:
-                st.error(f"获取统计失败: {e}")
-            
-            st.markdown("---")
-            if st.button("退出管理员登录", type="secondary"):
-                st.session_state.admin_authenticated = False
-                st.rerun()
-    
-    except Exception as e:
-        st.error(f"初始化上传器失败: {e}")
-
-def create_permission_app():
-    """权限管理应用"""
-    st.title("👥 权限管理系统")
-    
+    # 获取数据库连接
     db_manager = get_db_manager()
     if not db_manager.is_connected():
-        st.error("数据库连接失败，请检查配置")
-        return
-    
-    # 管理员验证
-    if 'perm_admin_authenticated' not in st.session_state:
-        st.session_state.perm_admin_authenticated = False
-    
-    if not st.session_state.perm_admin_authenticated:
-        st.subheader("🔐 管理员登录")
-        
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            password = st.text_input("管理员密码", type="password", key="perm_pass")
-            
-            if st.button("登录", use_container_width=True, key="perm_login"):
-                if password == ConfigManager.get_admin_password():
-                    st.session_state.perm_admin_authenticated = True
-                    st.success("管理员登录成功！")
-                    st.rerun()
-                else:
-                    st.error("密码错误")
+        st.error("数据库连接失败，请联系系统管理员")
         return
     
     db = db_manager.get_database()
     
     try:
-        permission_manager = PermissionManager(db)
-        
-        # 标签页
-        tab1, tab2 = st.tabs(["📤 上传权限表", "📋 权限配置"])
-        
-        with tab1:
-            st.subheader("上传权限表")
-            st.info("上传包含查询编号和门店名称对应关系的Excel或CSV文件")
-            
-            uploaded_file = st.file_uploader(
-                "选择权限表文件",
-                type=['xlsx', 'xls', 'csv'],
-                help="文件应包含查询编号和门店名称两列，系统会自动识别列名"
-            )
-            
-            if uploaded_file is not None:
-                try:
-                    if uploaded_file.name.endswith('.csv'):
-                        preview_df = pd.read_csv(uploaded_file)
-                    else:
-                        preview_df = pd.read_excel(uploaded_file)
-                    
-                    st.subheader("文件预览")
-                    st.dataframe(preview_df.head(10))
-                    
-                    if st.button("开始上传", type="primary"):
-                        with st.spinner("正在处理权限表..."):
-                            uploaded_file.seek(0)
-                            result = permission_manager.upload_permission_table(uploaded_file)
-                        
-                        if result["success"]:
-                            st.success("权限表上传成功！")
-                            
-                            if "detected_columns" in result:
-                                cols = result["detected_columns"]
-                                st.info(f"✅ 自动识别列名：查询编号列='{cols['query_code']}'，门店名称列='{cols['store_name']}'")
-                            
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("📊 处理记录数", result["processed"])
-                            with col2:
-                                st.metric("✅ 成功上传", result["created"] + result["updated"])
-                            with col3:
-                                st.metric("🆕 新建权限", result["created"])
-                            with col4:
-                                st.metric("🔄 更新权限", result["updated"])
-                            
-                            if result["errors"]:
-                                st.warning(f"⚠️ 处理过程中出现 {len(result['errors'])} 个问题：")
-                                for error in result["errors"]:
-                                    st.write(f"• {error}")
-                            else:
-                                st.success("🎉 所有记录处理成功，无错误！")
-                        else:
-                            st.error(f"❌ 上传失败: {result['message']}")
-                            
-                except Exception as e:
-                    st.error(f"文件预览失败: {e}")
-        
-        with tab2:
-            st.subheader("当前权限配置")
-            
-            permissions = permission_manager.get_all_permissions()
-            
-            if permissions:
-                for perm in permissions:
-                    with st.expander(f"查询编号: {perm['query_code']} → {perm['store_name']}"):
-                        st.write(f"**门店名称:** {perm['store_name']}")
-                        st.write(f"**门店ID:** {perm['store_id']}")
-                        st.write(f"**门店代码:** {perm.get('store_code', 'N/A')}")
-                        st.write(f"**创建时间:** {perm.get('created_at', 'N/A')}")
-                        st.write(f"**更新时间:** {perm.get('updated_at', 'N/A')}")
-                        
-                        if st.button(f"删除权限", key=f"delete_{perm['query_code']}"):
-                            if permission_manager.delete_permission(perm['query_code']):
-                                st.success("权限配置已删除")
-                                st.rerun()
-                            else:
-                                st.error("删除失败")
-            else:
-                st.info("暂无权限配置")
-            
-            # 文件格式说明
-            st.markdown("---")
-            st.subheader("📋 文件格式说明")
-            st.markdown("""
-            **权限表文件要求：**
-            - 📄 支持Excel(.xlsx/.xls)和CSV格式
-            - 📊 至少包含两列数据：查询编号和门店名称
-            - 🔍 系统会自动识别列名（支持中英文）
-            - 🔗 一个查询编号只对应一个门店（一对一关系）
-            - 🔄 如果查询编号重复，新记录会覆盖旧记录
-            - 🏪 如果门店不存在，系统会自动创建
-            
-            **示例格式：**
-            ```
-            查询编号    门店名称
-            QC001      犀牛百货滨江店
-            QC002      犀牛百货西湖店
-            QC003      犀牛百货萧山店
-            ```
-            """)
-        
-        st.markdown("---")
-        if st.button("退出管理员登录", type="secondary", key="perm_logout"):
-            st.session_state.perm_admin_authenticated = False
+        financial_manager = FinancialReportManager(db)
+    except Exception as e:
+        st.error(f"初始化财务管理器失败: {e}")
+        return
+    
+    # 顶部操作栏
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        current_date = datetime.now()
+        default_period = current_date.strftime("%Y-%m")
+        period = st.text_input("查询期间 (YYYY-MM)", value=default_period)
+    
+    with col2:
+        if st.button("🔄 刷新数据"):
             st.rerun()
     
-    except Exception as e:
-        st.error(f"初始化权限管理器失败: {e}")
+    with col3:
+        if st.button("🚪 退出登录"):
+            st.session_state.admin_authenticated = False
+            st.rerun()
+    
+    if not re.match(r'^\d{4}-\d{2}$', period):
+        st.error("期间格式错误，请使用YYYY-MM格式")
+        return
+    
+    # 获取汇总数据
+    summary = financial_manager.get_submission_summary(period)
+    reports = financial_manager.get_all_reports_by_period(period)
+    
+    # 汇总卡片
+    st.subheader("📊 提交情况概览")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("总门店数", summary['total'])
+    with col2:
+        st.metric("已提交", summary['submitted']['count'], 
+                 delta=f"{summary['submitted']['count']}/{summary['total']}")
+    with col3:
+        st.metric("待提交", summary['pending']['count'])
+    with col4:
+        completion_rate = (summary['submitted']['count'] / summary['total'] * 100) if summary['total'] > 0 else 0
+        st.metric("完成率", f"{completion_rate:.1f}%")
+    
+    # 详细报表列表
+    st.subheader("📋 详细报表列表")
+    
+    if reports:
+        # 创建数据表格
+        table_data = []
+        for report in reports:
+            header = report.get('header', {})
+            calculated = report.get('calculated_metrics', {})
+            
+            table_data.append({
+                '门店名称': header.get('store_name', '未知'),
+                '状态': '✅ 已提交' if header.get('status') == 'submitted' else '📝 草稿',
+                '最终余额': f"¥{calculated.get('26', 0):,.2f}",
+                '最终净利润': f"¥{calculated.get('27', 0):,.2f}",
+                '更新时间': header.get('updated_at', datetime.now()).strftime('%Y-%m-%d %H:%M'),
+                '门店ID': header.get('store_id', '')
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        # 批量导出功能
+        st.subheader("📤 批量导出")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            export_filter = st.selectbox(
+                "导出范围",
+                ["所有报表", "仅已提交", "仅草稿"]
+            )
+        
+        with col2:
+            if st.button("📊 批量导出Excel", type="primary"):
+                # 根据筛选条件过滤报表
+                filtered_reports = reports
+                if export_filter == "仅已提交":
+                    filtered_reports = [r for r in reports if r.get('header', {}).get('status') == 'submitted']
+                elif export_filter == "仅草稿":
+                    filtered_reports = [r for r in reports if r.get('header', {}).get('status') == 'pending']
+                
+                if filtered_reports:
+                    # 创建ZIP文件包含所有Excel
+                    import zipfile
+                    zip_buffer = io.BytesIO()
+                    
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        for report in filtered_reports:
+                            excel_data = ExcelExporter.create_financial_excel(report)
+                            if excel_data:
+                                store_name = report.get('header', {}).get('store_name', '未知门店')
+                                filename = f"{store_name}_{period}_财务报表.xlsx"
+                                zip_file.writestr(filename, excel_data.getvalue())
+                    
+                    zip_buffer.seek(0)
+                    
+                    st.download_button(
+                        label="⬇️ 下载批量报表",
+                        data=zip_buffer,
+                        file_name=f"财务报表_{period}_{export_filter}.zip",
+                        mime="application/zip"
+                    )
+                else:
+                    st.warning("没有符合条件的报表可导出")
+        
+        # 图表分析
+        st.subheader("📈 数据分析")
+        
+        if len(reports) > 1:
+            # 准备图表数据
+            chart_data = []
+            for report in reports:
+                header = report.get('header', {})
+                calculated = report.get('calculated_metrics', {})
+                
+                chart_data.append({
+                    '门店': header.get('store_name', '未知')[:8],  # 截断长名称
+                    '最终余额': calculated.get('26', 0),
+                    '最终净利润': calculated.get('27', 0),
+                    '状态': header.get('status', 'pending')
+                })
+            
+            chart_df = pd.DataFrame(chart_data)
+            
+            # 余额对比图
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig_balance = px.bar(
+                    chart_df, 
+                    x='门店', 
+                    y='最终余额',
+                    color='状态',
+                    title="各门店最终余额对比",
+                    color_discrete_map={'submitted': '#4CAF50', 'pending': '#FF9800'}
+                )
+                fig_balance.update_layout(height=400)
+                st.plotly_chart(fig_balance, use_container_width=True)
+            
+            with col2:
+                fig_profit = px.bar(
+                    chart_df, 
+                    x='门店', 
+                    y='最终净利润',
+                    color='状态',
+                    title="各门店最终净利润对比",
+                    color_discrete_map={'submitted': '#4CAF50', 'pending': '#FF9800'}
+                )
+                fig_profit.update_layout(height=400)
+                st.plotly_chart(fig_profit, use_container_width=True)
+            
+            # 汇总统计
+            total_balance = chart_df['最终余额'].sum()
+            total_profit = chart_df['最终净利润'].sum()
+            avg_balance = chart_df['最终余额'].mean()
+            avg_profit = chart_df['最终净利润'].mean()
+            
+            st.subheader("🎯 汇总统计")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("总余额", f"¥{total_balance:,.2f}")
+            with col2:
+                st.metric("总净利润", f"¥{total_profit:,.2f}")
+            with col3:
+                st.metric("平均余额", f"¥{avg_balance:,.2f}")
+            with col4:
+                st.metric("平均净利润", f"¥{avg_profit:,.2f}")
+    
+    else:
+        st.info(f"📝 {period} 期间暂无财务报表数据")
+        
+        # 提供创建报表的选项
+        st.subheader("➕ 创建新报表")
+        
+        # 获取所有门店
+        stores_collection = db['stores']
+        try:
+            stores = list(stores_collection.find({'status': 'active'}))
+            if stores:
+                for store in stores:
+                    with st.expander(f"为 {store['store_name']} 创建报表"):
+                        if st.button(f"创建 {store['store_name']} 的 {period} 报表", 
+                                   key=f"create_{store['_id']}"):
+                            success = financial_manager.create_or_update_report(
+                                store['_id'], 
+                                store['store_name'], 
+                                period
+                            )
+                            if success:
+                                st.success(f"✅ 已为 {store['store_name']} 创建 {period} 报表")
+                                st.rerun()
+                            else:
+                                st.error("❌ 创建失败")
+            else:
+                st.warning("未找到可用门店，请先在门店管理中添加门店")
+        except Exception as e:
+            st.error(f"获取门店列表失败: {e}")
+
+def create_store_query_app():
+    """门店查询系统界面"""
+    st.title("🔍 门店查询系统")
+    
+    # 获取数据库连接
+    db_manager = get_db_manager()
+    if not db_manager.is_connected():
+        st.error("数据库连接失败，请稍后重试")
+        return
+    
+    db = db_manager.get_database()
+    
+    # 查询界面
+    with st.form("store_query_form"):
+        st.subheader("🔎 请输入查询代码")
+        query_code = st.text_input("查询代码", placeholder="请输入您的查询代码", help="请联系管理员获取查询代码")
+        search_btn = st.form_submit_button("🔍 查询门店", type="primary")
+        
+        if search_btn and query_code:
+            try:
+                # 验证查询代码
+                permission = db['permissions'].find_one({'query_code': query_code.strip()})
+                
+                if not permission:
+                    st.error("❌ 查询代码无效，请检查后重试")
+                    return
+                
+                # 获取门店信息
+                store_id = permission['store_id']
+                store = db['stores'].find_one({'_id': store_id})
+                
+                if not store:
+                    st.error("❌ 门店信息不存在")
+                    return
+                
+                # 获取报表数据
+                reports = list(db['reports'].find({'store_id': store_id}).sort([('report_month', -1)]))
+                
+                st.success(f"✅ 查询成功！找到门店：{store['store_name']}")
+                
+                # 显示门店信息
+                st.subheader("🏪 门店信息")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.info(f"**门店名称**: {store['store_name']}")
+                with col2:
+                    st.info(f"**门店代码**: {store.get('store_code', '未设置')}")
+                with col3:
+                    st.info(f"**所属区域**: {store.get('region', '未分类')}")
+                
+                # 显示报表数据
+                if reports:
+                    st.subheader("📊 历史报表数据")
+                    
+                    # 期间选择
+                    periods = [report['report_month'] for report in reports]
+                    selected_period = st.selectbox("选择查询期间", periods)
+                    
+                    # 找到选定期间的报表
+                    selected_report = next((r for r in reports if r['report_month'] == selected_period), None)
+                    
+                    if selected_report:
+                        # 显示表格数据
+                        with st.expander(f"📋 {selected_period} 报表详情", expanded=True):
+                            if selected_report.get('table_headers') and selected_report.get('raw_excel_data'):
+                                # 重构数据用于显示
+                                headers = selected_report['table_headers']
+                                raw_data = selected_report['raw_excel_data']
+                                
+                                # 创建DataFrame用于显示
+                                display_data = []
+                                for row_data in raw_data:
+                                    row = []
+                                    for i, header in enumerate(headers):
+                                        col_key = f"col_{i}"
+                                        value = row_data.get(col_key, "")
+                                        row.append(str(value) if value else "")
+                                    display_data.append(row)
+                                
+                                if display_data:
+                                    df = pd.DataFrame(display_data, columns=headers)
+                                    st.dataframe(df, use_container_width=True, hide_index=True)
+                                
+                                    # 下载Excel
+                                    excel_buffer = io.BytesIO()
+                                    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                                        df.to_excel(writer, index=False, sheet_name=store['store_name'][:30])
+                                    
+                                    excel_buffer.seek(0)
+                                    
+                                    st.download_button(
+                                        label="📥 下载Excel报表",
+                                        data=excel_buffer,
+                                        file_name=f"{store['store_name']}_{selected_period}_报表.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                            else:
+                                st.info("该期间暂无详细数据")
+                        
+                        # 基础统计信息
+                        st.subheader("📈 数据统计")
+                        if selected_report.get('financial_data'):
+                            financial_data = selected_report['financial_data']
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                total_revenue = financial_data.get('total_revenue', 0)
+                                st.metric("总收入", f"¥{total_revenue:,.2f}")
+                            
+                            with col2:
+                                total_cost = financial_data.get('total_cost', 0)
+                                st.metric("总支出", f"¥{total_cost:,.2f}")
+                            
+                            with col3:
+                                net_profit = total_revenue - total_cost
+                                st.metric("净利润", f"¥{net_profit:,.2f}", 
+                                         delta=f"{(net_profit/total_revenue*100):.1f}%" if total_revenue > 0 else "0%")
+                        
+                        # 如果是财务报表，显示可视化看板
+                        if selected_report.get('raw_excel_data'):
+                            st.markdown("---")
+                            st.markdown("## 📊 财务运算可视化看板")
+                            
+                            # 尝试从报表数据中提取财务数据
+                            raw_data = selected_report.get('raw_excel_data', [])
+                            headers = selected_report.get('table_headers', [])
+                            
+                            # 模拟财务数据（实际应该从Excel数据中解析）
+                            mock_admin_data = {'1': 50000, '11': 30000, '16': 20000}
+                            mock_user_inputs = {'18': 8000, '19': 5000, '20': 1000, '21': 500, '22': 0, '23': 0, '24': 0, '25': 0, '26': 0}
+                            
+                            # 计算指标
+                            huikuan = mock_admin_data.get('1', 0)
+                            xianshang_zhichu = mock_admin_data.get('11', 0)
+                            xianshang_jinglilun = mock_admin_data.get('16', 0)
+                            xianxia_total = sum(mock_user_inputs.values())
+                            xianshang_yue = huikuan - xianshang_zhichu
+                            zuizhong_yue = xianshang_yue - xianxia_total
+                            zuizhong_jinglilun = xianshang_jinglilun - xianxia_total
+                            
+                            # 勾稽关系提醒
+                            st.markdown("""
+                            <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 10px; padding: 15px; margin: 10px 0;">
+                                <h4 style="color: #856404; margin: 0;">⚠️ 重要勾稽关系</h4>
+                                <p style="color: #856404; margin: 5px 0; font-weight: bold;">
+                                    表一(9) ≡ 表二(11) &nbsp;&nbsp;|&nbsp;&nbsp; 表一(14) ≡ 表二(12)
+                                </p>
+                                <small style="color: #856404;">请确保两个表格对应项目数值一致</small>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # 创建两个看板
+                            col_cash, col_profit = st.columns(2)
+                            
+                            with col_cash:
+                                st.markdown("""
+                                <div style="background-color: #e8f5e8; border: 2px solid #28a745; border-radius: 15px; padding: 20px;">
+                                    <h3 style="color: #155724; text-align: center; margin: 0;">🟢 现金表运算</h3>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # 现金表流程图
+                                st.markdown(f"""
+                                <div style="background-color: #f8fff8; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                                    <div style="text-align: center;">
+                                        <div style="background-color: #28a745; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                            <strong>(1) 回款</strong><br/>¥{huikuan:,.2f}
+                                        </div>
+                                        <div style="font-size: 20px; margin: 10px;">➖</div>
+                                        <div style="background-color: #6c757d; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                            <strong>(11) 线上支出</strong><br/>¥{xianshang_zhichu:,.2f}
+                                        </div>
+                                        <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                                        <div style="background-color: #17a2b8; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                            <strong>(15) 线上余额</strong><br/>¥{xianshang_yue:,.2f}
+                                        </div>
+                                        <div style="font-size: 20px; margin: 10px;">➖</div>
+                                        <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                            <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total:,.2f}
+                                        </div>
+                                        <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                                        <div style="background-color: #dc3545; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
+                                            <strong>(26) 最终余额</strong><br/>¥{zuizhong_yue:,.2f}
+                                        </div>
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            with col_profit:
+                                st.markdown("""
+                                <div style="background-color: #e3f2fd; border: 2px solid #1976d2; border-radius: 15px; padding: 20px;">
+                                    <h3 style="color: #1565c0; text-align: center; margin: 0;">🔵 利润表运算</h3>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                # 利润表流程图
+                                st.markdown(f"""
+                                <div style="background-color: #f8feff; padding: 20px; border-radius: 10px; margin: 10px 0;">
+                                    <div style="text-align: center;">
+                                        <div style="background-color: #1976d2; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                            <strong>(16) 线上净利润</strong><br/>¥{xianshang_jinglilun:,.2f}
+                                        </div>
+                                        <div style="font-size: 20px; margin: 10px;">➖</div>
+                                        <div style="background-color: #fd7e14; color: white; padding: 10px; border-radius: 8px; margin: 5px; display: inline-block;">
+                                            <strong>(17) 线下费用合计</strong><br/>¥{xianxia_total:,.2f}
+                                        </div>
+                                        <div style="font-size: 14px; color: #6c757d; margin: 10px;">
+                                            SUM(18至26项明细)
+                                        </div>
+                                        <div style="font-size: 20px; margin: 10px;">⬇️</div>
+                                        <div style="background-color: #28a745; color: white; padding: 15px; border-radius: 8px; margin: 5px; display: inline-block; font-size: 18px;">
+                                            <strong>(27) 最终净利润</strong><br/>¥{zuizhong_jinglilun:,.2f}
+                                        </div>
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            # 关键结果项展示
+                            st.markdown("### 🎯 **关键财务指标**")
+                            col_key1, col_key2 = st.columns(2)
+                            
+                            with col_key1:
+                                st.markdown(f"""
+                                <div style="background-color: #e8f5e8; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745;">
+                                    <h4 style="color: #155724; margin: 0;">💰 最终余额 (26)</h4>
+                                    <h2 style="color: #155724; margin: 5px 0; font-weight: bold;">¥{zuizhong_yue:,.2f}</h2>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            with col_key2:
+                                st.markdown(f"""
+                                <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1976d2;">
+                                    <h4 style="color: #1565c0; margin: 0;">📊 最终净利润 (27)</h4>
+                                    <h2 style="color: #1565c0; margin: 5px 0; font-weight: bold;">¥{zuizhong_jinglilun:,.2f}</h2>
+                                </div>
+                                """, unsafe_allow_html=True)
+                else:
+                    st.info("📝 暂无报表数据")
+                    
+            except Exception as e:
+                st.error(f"❌ 查询出错: {e}")
+
+def create_bulk_upload_app():
+    """批量上传系统界面"""
+    st.title("📤 批量上传系统")
+    
+    # 管理员密码验证
+    if 'upload_authenticated' not in st.session_state:
+        st.session_state.upload_authenticated = False
+    
+    if not st.session_state.upload_authenticated:
+        with st.form("upload_login"):
+            st.subheader("🔐 管理员验证")
+            st.info("批量上传需要管理员权限")
+            password = st.text_input("请输入管理员密码", type="password")
+            login_btn = st.form_submit_button("验证")
+            
+            if login_btn:
+                admin_password = ConfigManager.get_admin_password()
+                if password == admin_password:
+                    st.session_state.upload_authenticated = True
+                    st.success("✅ 验证成功！")
+                    st.rerun()
+                else:
+                    st.error("❌ 密码错误")
+        return
+    
+    # 获取数据库连接
+    db_manager = get_db_manager()
+    if not db_manager.is_connected():
+        st.error("数据库连接失败，请联系系统管理员")
+        return
+    
+    db = db_manager.get_database()
+    
+    # 退出按钮
+    if st.button("🚪 退出", type="secondary"):
+        st.session_state.upload_authenticated = False
+        st.rerun()
+    
+    # 上传界面
+    st.subheader("📁 Excel文件上传")
+    
+    uploaded_files = st.file_uploader(
+        "选择Excel文件",
+        type=['xlsx', 'xls'],
+        accept_multiple_files=True,
+        help="支持同时上传多个Excel文件"
+    )
+    
+    if uploaded_files:
+        st.subheader("📋 文件预览")
+        
+        for i, uploaded_file in enumerate(uploaded_files):
+            with st.expander(f"📊 {uploaded_file.name}", expanded=i < 3):  # 只展开前3个
+                try:
+                    # 读取Excel文件
+                    df = pd.read_excel(uploaded_file)
+                    
+                    # 显示基本信息
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("总行数", len(df))
+                    with col2:
+                        st.metric("总列数", len(df.columns))
+                    with col3:
+                        st.metric("文件大小", f"{uploaded_file.size / 1024:.1f} KB")
+                    
+                    # 显示数据预览
+                    st.write("**数据预览（前10行）:**")
+                    st.dataframe(df.head(10), use_container_width=True)
+                    
+                    # 门店识别
+                    st.write("**门店识别:**")
+                    potential_store_name = uploaded_file.name.replace('.xlsx', '').replace('.xls', '')
+                    
+                    # 从数据库查找匹配的门店
+                    stores = list(db['stores'].find({'status': 'active'}))
+                    matched_store = None
+                    
+                    for store in stores:
+                        if (store['store_name'] in potential_store_name or 
+                            potential_store_name in store['store_name'] or
+                            any(alias in potential_store_name for alias in store.get('aliases', []))):
+                            matched_store = store
+                            break
+                    
+                    if matched_store:
+                        st.success(f"✅ 自动识别门店: {matched_store['store_name']}")
+                        store_for_upload = matched_store
+                    else:
+                        st.warning("⚠️ 无法自动识别门店，请手动选择")
+                        store_options = {store['store_name']: store for store in stores}
+                        selected_name = st.selectbox(
+                            f"为 {uploaded_file.name} 选择门店",
+                            list(store_options.keys()),
+                            key=f"store_select_{i}"
+                        )
+                        store_for_upload = store_options[selected_name]
+                    
+                    # 期间设置
+                    current_date = datetime.now()
+                    default_month = current_date.strftime("%Y-%m")
+                    report_month = st.text_input(
+                        "报告期间 (YYYY-MM)", 
+                        value=default_month,
+                        key=f"month_input_{i}"
+                    )
+                    
+                    # 上传按钮
+                    if st.button(f"📤 上传 {uploaded_file.name}", key=f"upload_btn_{i}"):
+                        if re.match(r'^\d{4}-\d{2}$', report_month):
+                            try:
+                                # 处理数据
+                                dict_data, headers = ReportModel.dataframe_to_dict_list(df)
+                                
+                                # 创建报表文档
+                                report_doc = ReportModel.create_report_document(
+                                    store_data=store_for_upload,
+                                    report_month=report_month,
+                                    excel_data=dict_data,
+                                    headers=headers,
+                                    uploaded_by='admin'
+                                )
+                                
+                                # 保存到数据库
+                                db['reports'].replace_one(
+                                    {
+                                        'store_id': store_for_upload['_id'],
+                                        'report_month': report_month
+                                    },
+                                    report_doc,
+                                    upsert=True
+                                )
+                                
+                                st.success(f"✅ {uploaded_file.name} 上传成功！")
+                                
+                            except Exception as e:
+                                st.error(f"❌ 上传失败: {e}")
+                        else:
+                            st.error("❌ 期间格式错误，请使用YYYY-MM格式")
+                
+                except Exception as e:
+                    st.error(f"❌ 文件读取错误: {e}")
+        
+        # 批量操作
+        st.subheader("🚀 批量操作")
+        
+        if len(uploaded_files) > 1:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                bulk_month = st.text_input("统一期间 (YYYY-MM)", value=datetime.now().strftime("%Y-%m"))
+            
+            with col2:
+                if st.button("📤 批量上传全部", type="primary"):
+                    if re.match(r'^\d{4}-\d{2}$', bulk_month):
+                        success_count = 0
+                        
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        for i, file in enumerate(uploaded_files):
+                            try:
+                                status_text.text(f"正在处理: {file.name}")
+                                
+                                # 读取文件
+                                df = pd.read_excel(file)
+                                
+                                # 自动匹配门店
+                                potential_name = file.name.replace('.xlsx', '').replace('.xls', '')
+                                stores = list(db['stores'].find({'status': 'active'}))
+                                matched_store = None
+                                
+                                for store in stores:
+                                    if (store['store_name'] in potential_name or 
+                                        potential_name in store['store_name'] or
+                                        any(alias in potential_name for alias in store.get('aliases', []))):
+                                        matched_store = store
+                                        break
+                                
+                                if matched_store:
+                                    # 处理数据
+                                    dict_data, headers = ReportModel.dataframe_to_dict_list(df)
+                                    
+                                    # 创建报表文档
+                                    report_doc = ReportModel.create_report_document(
+                                        store_data=matched_store,
+                                        report_month=bulk_month,
+                                        excel_data=dict_data,
+                                        headers=headers,
+                                        uploaded_by='admin'
+                                    )
+                                    
+                                    # 保存到数据库
+                                    db['reports'].replace_one(
+                                        {
+                                            'store_id': matched_store['_id'],
+                                            'report_month': bulk_month
+                                        },
+                                        report_doc,
+                                        upsert=True
+                                    )
+                                    
+                                    success_count += 1
+                                
+                                # 更新进度
+                                progress_bar.progress((i + 1) / len(uploaded_files))
+                                
+                            except Exception as e:
+                                st.error(f"❌ {file.name} 处理失败: {e}")
+                        
+                        progress_bar.progress(1.0)
+                        status_text.text(f"批量上传完成！成功: {success_count}/{len(uploaded_files)}")
+                        
+                        if success_count > 0:
+                            st.balloons()
+                    else:
+                        st.error("❌ 期间格式错误")
+
+def create_permission_management_app():
+    """权限管理系统界面"""
+    st.title("👥 权限管理系统")
+    
+    # 管理员密码验证
+    if 'perm_authenticated' not in st.session_state:
+        st.session_state.perm_authenticated = False
+    
+    if not st.session_state.perm_authenticated:
+        with st.form("perm_login"):
+            st.subheader("🔐 管理员验证")
+            password = st.text_input("请输入管理员密码", type="password")
+            login_btn = st.form_submit_button("验证")
+            
+            if login_btn:
+                admin_password = ConfigManager.get_admin_password()
+                if password == admin_password:
+                    st.session_state.perm_authenticated = True
+                    st.success("✅ 验证成功！")
+                    st.rerun()
+                else:
+                    st.error("❌ 密码错误")
+        return
+    
+    # 获取数据库连接
+    db_manager = get_db_manager()
+    if not db_manager.is_connected():
+        st.error("数据库连接失败，请联系系统管理员")
+        return
+    
+    db = db_manager.get_database()
+    
+    # 退出按钮
+    if st.button("🚪 退出", type="secondary"):
+        st.session_state.perm_authenticated = False
+        st.rerun()
+    
+    # 权限管理界面
+    tab1, tab2, tab3 = st.tabs(["🔑 查询权限管理", "🏪 门店管理", "📊 数据统计"])
+    
+    with tab1:
+        st.subheader("🔑 查询权限管理")
+        
+        # 添加新权限
+        with st.expander("➕ 添加查询权限", expanded=False):
+            with st.form("add_permission"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    new_query_code = st.text_input("查询代码", placeholder="输入新的查询代码")
+                
+                with col2:
+                    # 获取所有门店
+                    stores = list(db['stores'].find({'status': 'active'}))
+                    if stores:
+                        store_options = {store['store_name']: store for store in stores}
+                        selected_store_name = st.selectbox("选择门店", list(store_options.keys()))
+                        selected_store = store_options[selected_store_name]
+                    else:
+                        st.warning("无可用门店")
+                        selected_store = None
+                
+                add_btn = st.form_submit_button("➕ 添加权限", type="primary")
+                
+                if add_btn and new_query_code and selected_store:
+                    try:
+                        # 检查查询代码是否已存在
+                        existing = db['permissions'].find_one({'query_code': new_query_code.strip()})
+                        
+                        if existing:
+                            st.error("❌ 查询代码已存在")
+                        else:
+                            # 创建权限文档
+                            permission_doc = PermissionModel.create_permission_document(
+                                query_code=new_query_code,
+                                store_data=selected_store,
+                                created_by='admin'
+                            )
+                            
+                            db['permissions'].insert_one(permission_doc)
+                            st.success("✅ 权限添加成功！")
+                            st.rerun()
+                            
+                    except Exception as e:
+                        st.error(f"❌ 添加失败: {e}")
+        
+        # 现有权限列表
+        st.subheader("📋 现有权限列表")
+        
+        try:
+            permissions = list(db['permissions'].find({'status': 'active'}).sort([('created_at', -1)]))
+            
+            if permissions:
+                # 创建表格数据
+                perm_data = []
+                for perm in permissions:
+                    perm_data.append({
+                        '查询代码': perm['query_code'],
+                        '门店名称': perm['store_name'],
+                        '门店代码': perm.get('store_code', '未设置'),
+                        '创建时间': perm.get('created_at', datetime.now()).strftime('%Y-%m-%d %H:%M'),
+                        '创建者': perm.get('created_by', '未知')
+                    })
+                
+                df = pd.DataFrame(perm_data)
+                
+                # 显示表格（可编辑）
+                edited_df = st.data_editor(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic"
+                )
+                
+                # 批量操作
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("🗑️ 删除选中", type="secondary"):
+                        # 这里可以添加删除逻辑
+                        st.info("删除功能需要实现")
+                
+                with col2:
+                    if st.button("📊 导出权限列表"):
+                        excel_buffer = io.BytesIO()
+                        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                            df.to_excel(writer, index=False, sheet_name='查询权限列表')
+                        
+                        excel_buffer.seek(0)
+                        
+                        st.download_button(
+                            label="⬇️ 下载权限列表",
+                            data=excel_buffer,
+                            file_name=f"查询权限列表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                
+                with col3:
+                    if st.button("🔄 刷新列表"):
+                        st.rerun()
+                        
+            else:
+                st.info("📝 暂无权限记录")
+                
+        except Exception as e:
+            st.error(f"❌ 获取权限列表失败: {e}")
+    
+    with tab2:
+        st.subheader("🏪 门店管理")
+        
+        # 添加新门店
+        with st.expander("➕ 添加新门店", expanded=False):
+            with st.form("add_store"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    store_name = st.text_input("门店名称", placeholder="输入门店名称")
+                    store_code = st.text_input("门店代码", placeholder="留空则自动生成")
+                
+                with col2:
+                    region = st.text_input("所属区域", placeholder="例如：华东区")
+                    manager = st.text_input("门店经理", placeholder="门店负责人姓名")
+                
+                add_store_btn = st.form_submit_button("➕ 添加门店", type="primary")
+                
+                if add_store_btn and store_name:
+                    try:
+                        # 检查门店名称是否已存在
+                        existing = db['stores'].find_one({'store_name': store_name.strip()})
+                        
+                        if existing:
+                            st.error("❌ 门店名称已存在")
+                        else:
+                            # 创建门店文档
+                            store_doc = StoreModel.create_store_document(
+                                store_name=store_name,
+                                store_code=store_code if store_code else None,
+                                region=region,
+                                manager=manager,
+                                created_by='admin'
+                            )
+                            
+                            db['stores'].insert_one(store_doc)
+                            st.success("✅ 门店添加成功！")
+                            st.rerun()
+                            
+                    except Exception as e:
+                        st.error(f"❌ 添加失败: {e}")
+        
+        # 现有门店列表
+        st.subheader("📋 门店列表")
+        
+        try:
+            stores = list(db['stores'].find({'status': 'active'}).sort([('created_at', -1)]))
+            
+            if stores:
+                store_data = []
+                for store in stores:
+                    store_data.append({
+                        '门店名称': store['store_name'],
+                        '门店代码': store.get('store_code', '未设置'),
+                        '所属区域': store.get('region', '未分类'),
+                        '门店经理': store.get('manager', '待设置'),
+                        '创建时间': store.get('created_at', datetime.now()).strftime('%Y-%m-%d %H:%M')
+                    })
+                
+                store_df = pd.DataFrame(store_data)
+                st.dataframe(store_df, use_container_width=True, hide_index=True)
+                
+                # 门店操作
+                if st.button("📊 导出门店列表"):
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                        store_df.to_excel(writer, index=False, sheet_name='门店列表')
+                    
+                    excel_buffer.seek(0)
+                    
+                    st.download_button(
+                        label="⬇️ 下载门店列表",
+                        data=excel_buffer,
+                        file_name=f"门店列表_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            else:
+                st.info("📝 暂无门店记录")
+                
+        except Exception as e:
+            st.error(f"❌ 获取门店列表失败: {e}")
+    
+    with tab3:
+        st.subheader("📊 数据统计")
+        
+        try:
+            # 基础统计
+            total_stores = db['stores'].count_documents({'status': 'active'})
+            total_permissions = db['permissions'].count_documents({'status': 'active'})
+            total_reports = db['reports'].count_documents({})
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("总门店数", total_stores)
+            with col2:
+                st.metric("总权限数", total_permissions)
+            with col3:
+                st.metric("总报表数", total_reports)
+            
+            # 按区域统计
+            if total_stores > 0:
+                st.subheader("📍 门店区域分布")
+                
+                pipeline = [
+                    {'$match': {'status': 'active'}},
+                    {'$group': {'_id': '$region', 'count': {'$sum': 1}}},
+                    {'$sort': {'count': -1}}
+                ]
+                
+                region_stats = list(db['stores'].aggregate(pipeline))
+                
+                if region_stats:
+                    region_df = pd.DataFrame([
+                        {'区域': stat['_id'] or '未分类', '门店数量': stat['count']} 
+                        for stat in region_stats
+                    ])
+                    
+                    fig = px.pie(region_df, values='门店数量', names='区域', title="门店区域分布")
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            # 报表提交情况
+            if total_reports > 0:
+                st.subheader("📅 报表提交趋势")
+                
+                pipeline = [
+                    {'$group': {'_id': '$report_month', 'count': {'$sum': 1}}},
+                    {'$sort': {'_id': 1}}
+                ]
+                
+                month_stats = list(db['reports'].aggregate(pipeline))
+                
+                if month_stats:
+                    month_df = pd.DataFrame([
+                        {'期间': stat['_id'], '报表数量': stat['count']} 
+                        for stat in month_stats
+                    ])
+                    
+                    fig = px.line(month_df, x='期间', y='报表数量', title="报表提交趋势", markers=True)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+        except Exception as e:
+            st.error(f"❌ 统计数据获取失败: {e}")
 
 def main():
     """主应用入口"""
@@ -1453,7 +1985,13 @@ def main():
         
         app_choice = st.selectbox(
             "选择功能模块",
-            ["门店查询系统", "批量上传系统", "权限管理系统"],
+            [
+                "门店查询系统", 
+                "财务填报系统", 
+                "财务管理系统", 
+                "批量上传系统", 
+                "权限管理系统"
+            ],
             index=0
         )
         
@@ -1467,14 +2005,18 @@ def main():
         else:
             st.error("❌ 连接异常")
     
-    # 主界面
+    # 主界面 - 连接实际功能
     try:
         if app_choice == "门店查询系统":
-            create_query_app()
+            create_store_query_app()
+        elif app_choice == "财务填报系统":
+            create_financial_report_app()
+        elif app_choice == "财务管理系统":
+            create_financial_admin_app()
         elif app_choice == "批量上传系统":
-            create_upload_app()
+            create_bulk_upload_app()
         elif app_choice == "权限管理系统":
-            create_permission_app()
+            create_permission_management_app()
     except Exception as e:
         st.error(f"应用运行出错: {e}")
         with st.expander("查看详细错误信息"):
