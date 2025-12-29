@@ -1342,6 +1342,50 @@ def create_store_query_app():
                                 st.metric("净利润", f"¥{net_profit:,.2f}", 
                                          delta=f"{(net_profit/total_revenue*100):.1f}%" if total_revenue > 0 else "0%")
                 
+                else:
+                    st.warning("📝 暂无报表数据")
+                    
+                    # 调试信息：帮助用户理解为什么没有报表
+                    with st.expander("🔍 调试信息 - 为什么没有报表？", expanded=True):
+                        st.write(f"**门店ID**: `{store_id}`")
+                        st.write(f"**门店名称**: `{store['store_name']}`")
+                        st.write(f"**门店代码**: `{store.get('store_code', '未设置')}`")
+                        
+                        # 检查数据库中是否有任何报表数据
+                        total_reports = db['reports'].count_documents({})
+                        st.write(f"**数据库中总报表数**: {total_reports}")
+                        
+                        if total_reports > 0:
+                            # 显示其他门店的报表情况
+                            other_reports = list(db['reports'].find({}, {'store_id': 1, 'store_name': 1, 'report_month': 1}).limit(10))
+                            st.write("**数据库中存在的报表示例**:")
+                            for rep in other_reports:
+                                st.write(f"- 门店: `{rep.get('store_name', '未知')}` | 期间: `{rep.get('report_month', '未知')}` | Store ID: `{rep.get('store_id', '未知')}`")
+                            
+                            # 检查是否有匹配的门店ID但不同格式  
+                            st.write("---")
+                            st.write("**检查Store ID匹配情况**:")
+                            matching_reports = list(db['reports'].find({'store_id': store_id}))
+                            st.write(f"完全匹配Store ID `{store_id}` 的报表数量: {len(matching_reports)}")
+                            
+                            # 检查门店名称匹配
+                            name_matching_reports = list(db['reports'].find({'store_name': {'$regex': store['store_name'], '$options': 'i'}}))
+                            st.write(f"门店名称匹配 `{store['store_name']}` 的报表数量: {len(name_matching_reports)}")
+                            
+                            if name_matching_reports:
+                                st.write("**找到名称匹配的报表**:")
+                                for rep in name_matching_reports:
+                                    st.write(f"- Store ID: `{rep.get('store_id')}` | 期间: `{rep.get('report_month')}` | 名称: `{rep.get('store_name')}`")
+                        else:
+                            st.write("❌ 数据库中没有任何报表数据")
+                        
+                        st.markdown("---")
+                        st.write("💡 **可能的解决方案**:")
+                        st.write("1. 确认管理员已通过**批量上传系统**上传了该门店的报表数据")
+                        st.write("2. 检查报表上传时使用的门店名称是否与当前门店匹配")
+                        st.write("3. 如果发现Store ID不匹配，可能需要重新上传或修正权限设置")
+                        st.write("4. 联系管理员确认数据库中是否有相关数据")
+                
                 # ============= 整合财务填报系统 =============
                 st.markdown("---")
                 st.markdown("## 💼 财务填报系统")
@@ -1692,37 +1736,6 @@ def create_store_query_app():
                 
                 else:
                     st.info("📝 暂无报表数据")
-                    
-                    # 调试信息：帮助用户理解为什么没有报表
-                    with st.expander("🔍 调试信息 - 为什么没有报表？", expanded=False):
-                        st.write(f"**门店ID**: `{store_id}`")
-                        st.write(f"**门店名称**: `{store['store_name']}`")
-                        
-                        # 检查数据库中是否有任何报表数据
-                        total_reports = db['reports'].count_documents({})
-                        st.write(f"**数据库中总报表数**: {total_reports}")
-                        
-                        if total_reports > 0:
-                            # 显示其他门店的报表情况
-                            other_reports = list(db['reports'].find({}, {'store_id': 1, 'store_name': 1, 'report_month': 1}).limit(5))
-                            st.write("**数据库中存在的报表示例**:")
-                            for rep in other_reports:
-                                st.write(f"- 门店: {rep.get('store_name', '未知')} | 期间: {rep.get('report_month', '未知')} | Store ID: `{rep.get('store_id', '未知')}`")
-                            
-                            # 检查是否有匹配的门店ID但不同格式
-                            similar_reports = list(db['reports'].find({'store_name': {'$regex': store['store_name'], '$options': 'i'}}))
-                            if similar_reports:
-                                st.write("**找到名称相似的报表**:")
-                                for rep in similar_reports:
-                                    st.write(f"- Store ID: `{rep.get('store_id')}` | 期间: {rep.get('report_month')}`")
-                        else:
-                            st.write("❌ 数据库中没有任何报表数据")
-                        
-                        st.markdown("---")
-                        st.write("💡 **可能的解决方案**:")
-                        st.write("1. 确认管理员已通过批量上传系统上传了该门店的报表数据")
-                        st.write("2. 检查报表上传时使用的门店名称是否与当前门店匹配")
-                        st.write("3. 联系管理员确认数据库中是否有相关数据")
                     
             except Exception as e:
                 st.error(f"❌ 查询出错: {e}")
