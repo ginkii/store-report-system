@@ -1774,10 +1774,46 @@ def create_bulk_upload_app():
                     stores = list(db['stores'].find({'status': 'active'}))
                     matched_store = None
                     
+                    # 智能门店识别逻辑
+                    def smart_store_match(filename, store_name, aliases):
+                        """智能门店匹配算法"""
+                        # 1. 清理文件名：移除常见后缀和前缀
+                        clean_filename = filename.lower()
+                        for remove_word in ['门店', '店', '犀牛百货', '报表', '财务', '数据', '.xlsx', '.xls', '_', '-', ' ']:
+                            clean_filename = clean_filename.replace(remove_word, '')
+                        
+                        # 2. 清理门店名
+                        clean_store = store_name.lower()
+                        for remove_word in ['门店', '店', '犀牛百货']:
+                            clean_store = clean_store.replace(remove_word, '')
+                        
+                        # 3. 多种匹配方式
+                        # 方式1: 完全包含匹配
+                        if clean_store in clean_filename or clean_filename in clean_store:
+                            return True
+                        
+                        # 方式2: 关键词匹配 (>=3个字符)
+                        if len(clean_store) >= 3 and clean_store[:3] in clean_filename:
+                            return True
+                        if len(clean_filename) >= 3 and clean_filename[:3] in clean_store:
+                            return True
+                        
+                        # 方式3: 别名匹配
+                        for alias in aliases:
+                            clean_alias = alias.lower().replace('门店', '').replace('店', '')
+                            if clean_alias in clean_filename or clean_filename in clean_alias:
+                                return True
+                        
+                        # 方式4: 部分字符匹配 (至少2个连续字符)
+                        for i in range(len(clean_store) - 1):
+                            if clean_store[i:i+2] in clean_filename:
+                                return True
+                        
+                        return False
+                    
+                    # 使用智能匹配查找门店
                     for store in stores:
-                        if (store['store_name'] in potential_store_name or 
-                            potential_store_name in store['store_name'] or
-                            any(alias in potential_store_name for alias in store.get('aliases', []))):
+                        if smart_store_match(potential_store_name, store['store_name'], store.get('aliases', [])):
                             matched_store = store
                             break
                     
@@ -1786,6 +1822,14 @@ def create_bulk_upload_app():
                         store_for_upload = matched_store
                     else:
                         st.warning("⚠️ 无法自动识别门店，请手动选择")
+                        # 调试信息：显示文件名和可用门店
+                        with st.expander("🔍 调试信息", expanded=False):
+                            st.write(f"**文件名**: `{potential_store_name}`")
+                            st.write("**可用门店列表**:")
+                            for store in stores:
+                                st.write(f"- {store['store_name']} (代码: {store.get('store_code', '未设置')})")
+                            st.write("💡 **提示**: 请确保文件名包含门店名称的关键字")
+                        
                         store_options = {store['store_name']: store for store in stores}
                         selected_name = st.selectbox(
                             f"为 {uploaded_file.name} 选择门店",
@@ -1863,15 +1907,50 @@ def create_bulk_upload_app():
                                 # 读取文件
                                 df = pd.read_excel(file)
                                 
-                                # 自动匹配门店
+                                # 自动匹配门店 - 使用智能匹配算法
                                 potential_name = file.name.replace('.xlsx', '').replace('.xls', '')
                                 stores = list(db['stores'].find({'status': 'active'}))
                                 matched_store = None
                                 
+                                # 使用相同的智能匹配逻辑
+                                def smart_store_match_batch(filename, store_name, aliases):
+                                    """智能门店匹配算法 - 批量版本"""
+                                    # 1. 清理文件名：移除常见后缀和前缀
+                                    clean_filename = filename.lower()
+                                    for remove_word in ['门店', '店', '犀牛百货', '报表', '财务', '数据', '.xlsx', '.xls', '_', '-', ' ']:
+                                        clean_filename = clean_filename.replace(remove_word, '')
+                                    
+                                    # 2. 清理门店名
+                                    clean_store = store_name.lower()
+                                    for remove_word in ['门店', '店', '犀牛百货']:
+                                        clean_store = clean_store.replace(remove_word, '')
+                                    
+                                    # 3. 多种匹配方式
+                                    # 方式1: 完全包含匹配
+                                    if clean_store in clean_filename or clean_filename in clean_store:
+                                        return True
+                                    
+                                    # 方式2: 关键词匹配 (>=3个字符)
+                                    if len(clean_store) >= 3 and clean_store[:3] in clean_filename:
+                                        return True
+                                    if len(clean_filename) >= 3 and clean_filename[:3] in clean_store:
+                                        return True
+                                    
+                                    # 方式3: 别名匹配
+                                    for alias in aliases:
+                                        clean_alias = alias.lower().replace('门店', '').replace('店', '')
+                                        if clean_alias in clean_filename or clean_filename in clean_alias:
+                                            return True
+                                    
+                                    # 方式4: 部分字符匹配 (至少2个连续字符)
+                                    for i in range(len(clean_store) - 1):
+                                        if clean_store[i:i+2] in clean_filename:
+                                            return True
+                                    
+                                    return False
+                                
                                 for store in stores:
-                                    if (store['store_name'] in potential_name or 
-                                        potential_name in store['store_name'] or
-                                        any(alias in potential_name for alias in store.get('aliases', []))):
+                                    if smart_store_match_batch(potential_name, store['store_name'], store.get('aliases', [])):
                                         matched_store = store
                                         break
                                 
